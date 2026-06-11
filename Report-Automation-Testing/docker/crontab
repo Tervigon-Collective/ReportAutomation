@@ -1,0 +1,8 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Hourly report — IST business hours (01:00–18:00 UTC = 06:30–23:30 IST)
+0 1-18 * * * root cd /app && python scripts/run_hourly.py >> /tmp/logs/hourly.log 2>&1
+
+# Daily WTD/MTD report at 02:00 IST (20:30 UTC)
+30 20 * * * root cd /app && python scripts/run_daily.py >> /tmp/logs/daily.log 2>&1

@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  report-automation:
+    build: .
+    container_name: report-automation
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro        # secrets — never baked into the image
+      - reports:/tmp/reports        # persist generated Excel/CSV reports
+      - logs:/tmp/logs              # persist job logs
+
+volumes:
+  reports:
+  logs:

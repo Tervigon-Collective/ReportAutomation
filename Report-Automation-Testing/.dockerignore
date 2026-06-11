@@ -1,0 +1,12 @@
+.env
+local.settings.json
+venv/
+.git/
+__pycache__/
+*.pyc
+*.pyo
+reports/
+*.log
+.gitignore
+.funcignore
+render.yaml

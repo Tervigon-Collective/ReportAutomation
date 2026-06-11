@@ -1,94 +1,28 @@
-# Ignore everything by default
-*
-# Explicitly allow the core ETL files
-!ETL.py
-!setup_database_for_update.py
-!excel_generation.py
-!run_etl_job.py
-!run_server.py
-!plots.py
-!reports/
-!sku_matching.py
-!Product_detailed_report.py
-!shopifyETL.py
-!timeframe_config.py
-!MetaBudget.py
-!conversionTracking.py
-!combinedUTMMeta.py
-!generate_combined_report.py
-!conversionTracking.md
-!conversion_report_db.py
-!combinedUTMMeta.md
-!combined_UTM_Meta_db.py
-!heatmap.py
-!googleads.py
-!metaActivityTrack.py
-!api_data_fetcher.py
-!env_config.py
-!global_config.py
-!.gitignore
-!.funcignore
-!ProductProfitability.py
-!dailyrollup.py
-!schema.sql
-!timerange_wtd_mtd_rollup.py
-!WTD_MTD/
-!ReportWeekMonth
+# ── Secrets ──────────────────────────────────────────────────────────────────
 .env
+local.settings.json
 
-
-
-
-# --- Include the 'intelligence' directory and its contents ---
-!intelligence/
-!intelligence/*
-# If there are subdirectories within 'intelligence' that you want to include recursively:
-!intelligence/**
-# Exclude Python cache specifically within intelligence if it wasn't already caught by a global ignore
-intelligence/__pycache__/
-
-
-# Allow log files for monitoring
-!*.log
-!metrics.log
-!schema_setup.log
-!scheduler.log
-!excel_generation.log
-
-# Allow deployment configuration files
-!requirements.txt
-!Procfile
-!render.yaml
-!README.md
-!pdf_report.py
-
-# Ignore Python cache files
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
+.python_packages/
 
-# Ignore virtual environments
-.venv/
+# ── Virtual environments ──────────────────────────────────────────────────────
 venv/
+.venv/
 env/
 
-# Ignore environment variables file (contains sensitive information)
-.env
-
-# Ignore data output files
+# ── Generated report output ───────────────────────────────────────────────────
+reports/
 *.xlsx
 *.csv
+*.pdf
 
-# Ignore Windows specific files
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
 Thumbs.db
-ehthumbs.db
 Desktop.ini
-
-# Ignore other unnecessary files
-*.bat
-*.sh
-test_*.py
-
-local.settings.json
-
-crossSale.py

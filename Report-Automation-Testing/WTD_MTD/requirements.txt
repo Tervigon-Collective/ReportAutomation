@@ -1,0 +1,37 @@
+# Core Azure Functions
+azure-functions==1.17.0
+
+# Data Processing
+pandas==2.2.2
+numpy==1.24.3
+openpyxl==3.1.2
+xlsxwriter==3.1.0
+
+# Database
+SQLAlchemy==2.0.20
+psycopg2-binary==2.9.7
+
+# Date/Time
+pytz==2023.3
+python-dotenv==1.0.0
+
+# HTTP Requests & API
+requests==2.31.0
+msal==1.24.1
+
+# Azure Services
+azure-storage-blob==12.19.0
+azure-identity==1.15.0
+
+# Reporting & Visualization
+reportlab==4.0.4
+matplotlib==3.7.2
+seaborn==0.12.2
+
+# String Matching
+python-Levenshtein==0.21.1
+fuzzywuzzy==0.18.0
+
+# Utilities
+tabulate
+

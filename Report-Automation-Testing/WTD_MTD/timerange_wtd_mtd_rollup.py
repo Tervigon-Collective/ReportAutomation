@@ -2626,7 +2626,74 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Could not extract daily performers: {e}")
         
-        email_body = f"""
+        # Build rich HTML email from Jinja2 template
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from report_renderer import render_email_wtd_mtd
+            from report_insights import generate_wtd_insights
+
+            _ch_display = {'meta_ads': 'Meta Ads', 'google_ads': 'Google Ads', 'organic': 'Organic'}
+            wtd_ch_data = summary_data.get('wtd', {}).get('channels', {})
+            mtd_ch_data = summary_data.get('mtd', {}).get('channels', {})
+
+            def _ch_row(d):
+                rev = float(d.get('revenue', 0))
+                spend = float(d.get('spend', 0))
+                return {
+                    'sales': rev,
+                    'ad_spend': spend,
+                    'net_profit': float(d.get('net_profit', 0)),
+                    'gross_roas': rev / spend if spend > 0 else 0.0,
+                    'order_count': int(d.get('orders', 0)),
+                    'cpp': float(d.get('cost_per_order', 0)),
+                }
+
+            wtd_channels_ctx = [(_ch_display.get(k, k), _ch_row(v)) for k, v in wtd_ch_data.items()]
+            mtd_channels_ctx = [(_ch_display.get(k, k), _ch_row(v)) for k, v in mtd_ch_data.items()]
+
+            wtd_totals = {
+                'total_revenue': sum(v.get('revenue', 0) for v in wtd_ch_data.values()),
+                'net_profit': sum(v.get('net_profit', 0) for v in wtd_ch_data.values()),
+                'ad_spend': sum(v.get('spend', 0) for v in wtd_ch_data.values()),
+                'order_count': sum(v.get('orders', 0) for v in wtd_ch_data.values()),
+            }
+            mtd_totals = {
+                'total_revenue': sum(v.get('revenue', 0) for v in mtd_ch_data.values()),
+                'net_profit': sum(v.get('net_profit', 0) for v in mtd_ch_data.values()),
+                'ad_spend': sum(v.get('spend', 0) for v in mtd_ch_data.values()),
+                'order_count': sum(v.get('orders', 0) for v in mtd_ch_data.values()),
+            }
+            # Add roas to amazon dicts (template needs it)
+            def _enrich_amazon(d):
+                if not d:
+                    return d
+                rev, spend = float(d.get('revenue', 0)), float(d.get('spend', 0))
+                return dict(d, roas=rev / spend if spend > 0 else 0.0)
+
+            insights = generate_wtd_insights(
+                {**wtd_totals, 'sales': wtd_totals['total_revenue'], 'ad_spend': wtd_totals['ad_spend']},
+                {**mtd_totals, 'sales': mtd_totals['total_revenue'], 'ad_spend': mtd_totals['ad_spend']},
+            )
+
+            email_ctx = {
+                'report_date': today_str,
+                'weekday': weekday,
+                'wtd_range': summary_data.get('wtd', {}).get('timeframe', ''),
+                'mtd_range': summary_data.get('mtd', {}).get('timeframe', ''),
+                'wtd': wtd_totals,
+                'mtd': mtd_totals,
+                'wtd_channels': wtd_channels_ctx,
+                'mtd_channels': mtd_channels_ctx,
+                'amazon_wtd': _enrich_amazon(amazon_wtd) or {},
+                'amazon_mtd': _enrich_amazon(amazon_mtd) or {},
+                'insights': insights,
+                'wtd_campaigns': [],
+            }
+            email_body = render_email_wtd_mtd(email_ctx)
+        except Exception as _tmpl_err:
+            logger.warning(f"WTD/MTD email template render failed: {_tmpl_err}; using fallback")
+            email_body = f"""
         <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto;">
             <p style="font-size: 14px;">Dear Team,</p>
@@ -2637,11 +2704,8 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 <li><strong>Amazon Report:</strong> Campaign performance for {two_days_ago_str} (2 days earlier)</li>
                 <li><strong>Product Profitability:</strong> Product profitability for {yesterday_str}</li>
             </ul>
-            
             {summary_html}
-            
             {daily_performers_html}
-            
             <p style="font-size: 12px; color: #666; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px;">
                 This is an automated report. For questions, please contact the marketing team.
             </p>

@@ -32,6 +32,9 @@ from api_data_fetcher import get_organized_metrics_for_pdf
 from revenue_gst import apply_net_revenue_column
 from dailyrollup import get_campaign_data, run as run_dailyrollup, get_campaign_grand_total_for_pdf, get_meta_funnel_metrics
 
+# Populated by generate_pdf_report; consumed by send_email to render the rich HTML body
+_daily_email_context: "dict | None" = None
+
 
 def get_google_funnel_metrics(start_date=None, end_date=None):
     """
@@ -782,1250 +785,97 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
     organic_metrics = api_metrics['organic']
     total_metrics = api_metrics['total']
     
+    global _daily_email_context
     try:
-        c = canvas.Canvas(report_name, pagesize=letter)
-        width, height = letter
-        margin = 30  # Slightly increased margin for better breathing room
-        table_width = width - 2 * margin
-        y = height - margin
-        
-        # Professional color palette
-        primary_color = (0.15, 0.15, 0.15)  # Dark charcoal for headers
-        secondary_color = (0.4, 0.4, 0.4)  # Medium gray for subheaders
-        accent_color = (0.1, 0.4, 0.7)  # Professional blue
-        light_gray = (0.97, 0.97, 0.97)  # Very light gray for backgrounds
-        border_color = (0.85, 0.85, 0.85)  # Subtle border color
-        highlight_color = (0.95, 0.97, 1.0)  # Very light blue for highlights
-        
-        # Header section with enhanced typography
-        c.setFont("Helvetica-Bold", 16)
-        c.setFillColorRGB(*primary_color)
-        # Display timeframe range if provided; otherwise, use single date
+        # Derive date range string
         if timeframe_start is not None and timeframe_end is not None:
-            start_str = (timeframe_start.astimezone(IST) if getattr(timeframe_start, 'tzinfo', None) else IST.localize(timeframe_start)).strftime('%Y-%m-%d')
-            end_str = (timeframe_end.astimezone(IST) if getattr(timeframe_end, 'tzinfo', None) else IST.localize(timeframe_end)).strftime('%Y-%m-%d')
-            dt = f"{start_str} to {end_str}"
+            _s = timeframe_start.astimezone(IST) if getattr(timeframe_start, 'tzinfo', None) else IST.localize(timeframe_start)
+            _e = timeframe_end.astimezone(IST) if getattr(timeframe_end, 'tzinfo', None) else IST.localize(timeframe_end)
+            date_range = f"{_s.strftime('%Y-%m-%d')} to {_e.strftime('%Y-%m-%d')}"
+            start_str = _s.strftime('%Y-%m-%d')
+            end_str = _e.strftime('%Y-%m-%d')
         else:
-            dt = today.strftime('%Y-%m-%d') if isinstance(today, datetime) else str(today)
-        time_part = datetime.now(IST).strftime('%H:%M')
-        
-        # Set title based on report type
+            date_range = today.strftime('%Y-%m-%d') if hasattr(today, 'strftime') else str(today)
+            start_str = end_str = None
+        report_time = datetime.now(IST).strftime('%H:%M')
+
+        # Fetch supplementary data (errors are non-fatal)
+        try:
+            funnel_metrics = get_meta_funnel_metrics(start_date=start_str, end_date=end_str) if start_str else get_meta_funnel_metrics()
+        except Exception as _fe:
+            logger.warning(f"Meta funnel fetch failed: {_fe}")
+            funnel_metrics = None
+
+        try:
+            google_funnel = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
+        except Exception as _ge:
+            logger.warning(f"Google funnel fetch failed: {_ge}")
+            google_funnel = None
+
+        try:
+            campaign_df = get_campaign_data(start_date=start_str, end_date=end_str) if start_str else get_campaign_data()
+        except Exception as _ce:
+            logger.warning(f"Campaign data fetch failed: {_ce}")
+            campaign_df = None
+
+        # Generate narrative insights
+        from report_insights import generate_daily_insights
+        insights = generate_daily_insights(api_metrics, campaign_df, funnel_metrics, google_funnel)
+
+        # Render PDF via weasyprint + Jinja2
+        from report_renderer import build_daily_pdf_context, render_pdf_html, html_to_pdf
+        pdf_ctx = build_daily_pdf_context(
+            api_metrics=api_metrics,
+            campaign_df=campaign_df,
+            funnel_metrics=funnel_metrics,
+            google_funnel=google_funnel,
+            insights=insights,
+            report_date=date_range,
+            report_time=report_time,
+        )
         if report_type == 'wtd':
-            title = f"Week-to-Date Marketing Performance Report"
+            pdf_ctx['report_title'] = 'Week-to-Date Marketing Performance Report'
         elif report_type == 'mtd':
-            title = f"Month-to-Date Marketing Performance Report"
+            pdf_ctx['report_title'] = 'Month-to-Date Marketing Performance Report'
         else:
-            title = f"Daily Marketing Performance Report"
-        
-        c.drawString(margin, y, title)
-        
-        # Subtitle with date and time - more elegant styling
-        y -= 40
-        c.setFont("Helvetica", 9)
-        c.setFillColorRGB(*secondary_color)
-        c.drawString(margin, y, f"{dt} • {time_part}")
-        
-        # Summary Metrics Section with enhanced styling
-        y -= 50
-        c.setFont("Helvetica-Bold", 12)
-        c.setFillColorRGB(*primary_color)
-        c.drawString(margin, y, "Summary Metrics")
-        y -= 35
-        
-        # Create a comprehensive table with Labels, Meta, Google, Organic, and Total columns
-        total_width = width - 2 * margin
-        label_width = 85  # Slightly wider for better readability
-        column_width = (total_width - label_width - 80) / 4  # 5 columns: Labels, Meta, Google, Organic, Total
-        
-        # Define column positions
-        label_x = margin
-        meta_x = margin + label_width + 20
-        google_x = margin + label_width + 20 + column_width + 20
-        organic_x = margin + label_width + 20 + 2 * (column_width + 20)
-        total_x = margin + label_width + 20 + 3 * (column_width + 20)
-        
-        # Table headers with enhanced styling
-        headers = ["", "Meta", "Google", "Organic", "Total"]
-        header_x_positions = [label_x, meta_x, google_x, organic_x, total_x]
-        
-        # Enhanced header background with subtle gradient effect
-        c.setFillColorRGB(*light_gray)
-        c.rect(label_x, y - 8, label_width, 28, fill=True, stroke=False)
-        for i, x in enumerate([meta_x, google_x, organic_x, total_x]):
-            c.rect(x, y - 8, column_width, 28, fill=True, stroke=False)
-        
-        # Header text with better typography
-        c.setFillColorRGB(*primary_color)
-        c.setFont("Helvetica-Bold", 10)
-        for i, header in enumerate(headers):
-            if i == 0:  # Label column
-                c.drawString(header_x_positions[i] + 8, y, header)
-            else:  # Data columns
-                c.drawString(header_x_positions[i] + 8, y, header)
-        
-        # Define table rows with proper labels and handle None values
-        def safe_format(value, format_type='float'):
-            """Safely format values, handling None and other edge cases"""
-            if value is None:
-                return "0.00" if format_type == 'float' else "0"
-            try:
-                if format_type == 'float':
-                    return f"{float(value):.2f}"
-                elif format_type == 'int':
-                    return f"{int(value)}"
-                else:
-                    return str(value)
-            except (ValueError, TypeError):
-                return "0.00" if format_type == 'float' else "0"
-        
-        table_rows = [
-            ("Sales", 
-             f"Rs {safe_format(meta_metrics.get('sales'), 'float')}", 
-             f"Rs {safe_format(google_metrics.get('sales'), 'float')}", 
-             f"Rs {safe_format(organic_metrics.get('sales'), 'float')}", 
-             f"Rs {safe_format(total_metrics.get('sales'), 'float')}"),
-            ("Ad Spend", 
-             f"Rs {safe_format(meta_metrics.get('ad_spend'), 'float')}", 
-             f"Rs {safe_format(google_metrics.get('ad_spend'), 'float')}", 
-             f"Rs {safe_format(organic_metrics.get('ad_spend'), 'float')}", 
-             f"Rs {safe_format(total_metrics.get('ad_spend'), 'float')}"),
-            ("COGS", 
-             f"Rs {safe_format(meta_metrics.get('cogs'), 'float')}", 
-             f"Rs {safe_format(google_metrics.get('cogs'), 'float')}", 
-             f"Rs {safe_format(organic_metrics.get('cogs'), 'float')}", 
-             f"Rs {safe_format(total_metrics.get('cogs'), 'float')}"),
-            ("Net Profit", 
-             f"Rs {safe_format(meta_metrics.get('net_profit'), 'float')}", 
-             f"Rs {safe_format(google_metrics.get('net_profit'), 'float')}", 
-             f"Rs {safe_format(organic_metrics.get('net_profit'), 'float')}", 
-             f"Rs {safe_format(total_metrics.get('net_profit'), 'float')}"),
-            ("Gross ROAS", 
-             f"{safe_format(meta_metrics.get('gross_roas'), 'float')}", 
-             f"{safe_format(google_metrics.get('gross_roas'), 'float')}", 
-             f"{safe_format(organic_metrics.get('gross_roas'), 'float')}", 
-             f"{safe_format(total_metrics.get('gross_roas'), 'float')}"),
-            ("Net ROAS", 
-             f"{safe_format(meta_metrics.get('net_roas'), 'float')}", 
-             f"{safe_format(google_metrics.get('net_roas'), 'float')}", 
-             f"{safe_format(organic_metrics.get('net_roas'), 'float')}", 
-             f"{safe_format(total_metrics.get('net_roas'), 'float')}"),
-            ("BE ROAS", 
-             f"{safe_format(meta_metrics.get('be_roas'), 'float')}", 
-             f"{safe_format(google_metrics.get('be_roas'), 'float')}", 
-             f"{safe_format(organic_metrics.get('be_roas'), 'float')}", 
-             f"{safe_format(total_metrics.get('be_roas'), 'float')}"),
-            ("Total Quantity", 
-             f"{safe_format(meta_metrics.get('quantity'), 'int')}", 
-             f"{safe_format(google_metrics.get('quantity'), 'int')}", 
-             f"{safe_format(organic_metrics.get('quantity'), 'int')}", 
-             f"{safe_format(total_metrics.get('quantity'), 'int')}")
-        ]
-        c.setFont("Helvetica", 8)
-        y -= 28
-        
-        # Draw table rows with enhanced styling
-        for i, (row_label, meta_val, google_val, organic_val, total_val) in enumerate(table_rows):
-            if y < margin + 30:
-                c.showPage()
-                y = height - margin
-                y -= 30
-                c.setFont("Helvetica", 8)
-            
-            # Enhanced row background with alternating colors for better readability
-            if i % 2 == 0:
-                c.setFillColorRGB(0.99, 0.99, 0.99)  # Very light background
-            else:
-                c.setFillColorRGB(0.95, 0.95, 0.95)  # Slightly darker background
-            
-            c.rect(label_x, y - 6, label_width, 24, fill=True, stroke=False)
-            c.rect(meta_x, y - 6, column_width, 24, fill=True, stroke=False)
-            c.rect(google_x, y - 6, column_width, 24, fill=True, stroke=False)
-            c.rect(organic_x, y - 6, column_width, 24, fill=True, stroke=False)
-            c.rect(total_x, y - 6, column_width, 24, fill=True, stroke=False)
-            
-            # Draw subtle borders
-            c.setStrokeColorRGB(*border_color)
-            c.rect(label_x, y - 6, label_width, 24, stroke=True, fill=False)
-            c.rect(meta_x, y - 6, column_width, 24, stroke=True, fill=False)
-            c.rect(google_x, y - 6, column_width, 24, stroke=True, fill=False)
-            c.rect(organic_x, y - 6, column_width, 24, stroke=True, fill=False)
-            c.rect(total_x, y - 6, column_width, 24, stroke=True, fill=False)
-            
-            # Draw labels and values with enhanced typography
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(label_x + 8, y, row_label)
-            c.setFont("Helvetica", 8)
-            c.setFillColorRGB(0, 0, 0)
-            c.drawString(meta_x + 8, y, meta_val)
-            c.drawString(google_x + 8, y, google_val)
-            c.drawString(organic_x + 8, y, organic_val)
-            c.drawString(total_x + 8, y, total_val)
-            
-            y -= 24
-        # Add a single line with total orders with enhanced styling
-        y -= 25
-        c.setFont("Helvetica-Bold", 10)
-        c.setFillColorRGB(*primary_color)
-        c.drawString(margin, y, f"Total Orders: {safe_format(total_metrics.get('order_count'), 'int')}")
-        y -= 25
-        
-        # Add Performance Metrics section with funnel table
-        y -= 25
-        c.setFont("Helvetica-Bold", 12)
-        c.setFillColorRGB(*primary_color)
-        c.drawString(margin, y, "Performance Metrics - Funnel Analysis")
-        y -= 35
-        
-        # Get Meta funnel metrics from dailyrollup
-        try:
-            # Use provided timeframe parameters if available, otherwise use timeframe_config
-            if timeframe_start is not None and timeframe_end is not None:
-                # Convert datetime to date strings for the functions
-                start_date_str = timeframe_start.strftime('%Y-%m-%d') if hasattr(timeframe_start, 'strftime') else str(timeframe_start)
-                end_date_str = timeframe_end.strftime('%Y-%m-%d') if hasattr(timeframe_end, 'strftime') else str(timeframe_end)
-                funnel_metrics = get_meta_funnel_metrics(start_date=start_date_str, end_date=end_date_str)
-                google_funnel_metrics = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
-            else:
-                # Use global timeframe from timeframe_config
-                funnel_metrics = get_meta_funnel_metrics()
-                google_funnel_metrics = get_google_funnel_metrics()
-            
-            # Create side-by-side sections: Meta (left) and Google (right)
-            
-            # Calculate page width for two columns
-            page_width = width - 2 * margin
-            column_width = (page_width - 30) / 2  # 30px gap between columns
-            
-            # Meta Section (Left Column)
-            meta_start_x = margin
-            meta_end_x = margin + column_width
-            
-            # Google Section (Right Column)  
-            google_start_x = margin + column_width + 30
-            google_end_x = width - margin
-            
-            # Store the starting Y position for both sections
-            section_start_y = y - 20
-            
-            # Meta Section Header
-            c.setFont("Helvetica-Bold", 12)
-            c.setFillColorRGB(*primary_color)
-            c.drawString(meta_start_x, section_start_y, "Meta Funnel Metrics")
-            
-            # Google Section Header (same Y position)
-            c.drawString(google_start_x, section_start_y, "Google Funnel Metrics")
-            
-            # Move down for table headers
-            y = section_start_y - 25
-            
-            # Meta table headers
-            meta_headers = ["Stage", "Value"]
-            meta_stage_width = 120
-            meta_value_width = 100
-            meta_stage_x = meta_start_x
-            meta_value_x = meta_start_x + meta_stage_width + 10
-            
-            # Google table headers (same Y position as Meta)
-            google_stage_width = 120
-            google_value_width = 100
-            google_stage_x = google_start_x
-            google_value_x = google_start_x + google_stage_width + 10
-            
-            # Meta header background
-            c.setFillColorRGB(*light_gray)
-            c.rect(meta_stage_x, y - 8, meta_stage_width, 28, fill=True, stroke=False)
-            c.rect(meta_value_x, y - 8, meta_value_width, 28, fill=True, stroke=False)
-            
-            # Google header background (same Y position)
-            c.rect(google_stage_x, y - 8, google_stage_width, 28, fill=True, stroke=False)
-            c.rect(google_value_x, y - 8, google_value_width, 28, fill=True, stroke=False)
-            
-            # Meta header text
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(meta_stage_x + 8, y, "Stage")
-            c.drawString(meta_value_x + 8, y, "Value")
-            
-            # Google header text (same Y position)
-            c.drawString(google_stage_x + 8, y, "Stage")
-            c.drawString(google_value_x + 8, y, "Value")
-            
-            # Meta table rows
-            meta_table_rows = [
-                ("Impressions", f"{funnel_metrics.get('impressions', 0):,}"),
-                ("Clicks", f"{funnel_metrics.get('clicks', 0):,} ({funnel_metrics.get('ctr', 0):.2f}%)"),
-                ("Landing Page Views", f"{funnel_metrics.get('landing_page_views', 0):,} ({funnel_metrics.get('landing_page_rate', 0):.2f}%)"),
-                ("Add to Cart", f"{funnel_metrics.get('add_to_cart', 0):,} ({funnel_metrics.get('add_to_cart_rate', 0):.2f}%)"),
-                ("Orders", f"{funnel_metrics.get('orders', 0):,} ({funnel_metrics.get('conversion_rate', 0):.2f}%)")
-            ]
-            
-            # Google table rows
-            google_table_rows = [
-                ("Clicks", f"{google_funnel_metrics.get('clicks', 0):,}"),
-                ("CTR", f"{google_funnel_metrics.get('ctr', 0):.2f}%"),
-                ("Interaction Rate", f"{google_funnel_metrics.get('interaction_rate', 0):.2f}%"),
-                ("Orders", f"{google_funnel_metrics.get('orders', 0):,}")
-            ]
-            
-            c.setFont("Helvetica", 8)
-            y -= 28
-            
-            # Draw both tables side by side
-            max_rows = max(len(meta_table_rows), len(google_table_rows))
-            
-            for i in range(max_rows):
-                if y < margin + 30:
-                    c.showPage()
-                    y = height - margin
-                    y -= 30
-                    c.setFont("Helvetica", 8)
-                
-                # Enhanced row background with alternating colors
-                if i % 2 == 0:
-                    row_bg_color = (0.99, 0.99, 0.99)
-                else:
-                    row_bg_color = (0.95, 0.95, 0.95)
-                
-                # Draw Meta row
-                if i < len(meta_table_rows):
-                    stage, value = meta_table_rows[i]
-                    
-                    # Draw background
-                    c.setFillColorRGB(*row_bg_color)
-                    c.rect(meta_stage_x, y - 6, meta_stage_width, 24, fill=True, stroke=False)
-                    c.rect(meta_value_x, y - 6, meta_value_width, 24, fill=True, stroke=False)
-                    
-                    # Draw borders
-                    c.setStrokeColorRGB(*border_color)
-                    c.rect(meta_stage_x, y - 6, meta_stage_width, 24, stroke=True, fill=False)
-                    c.rect(meta_value_x, y - 6, meta_value_width, 24, stroke=True, fill=False)
-                    
-                    # Draw text - ensure proper color reset
-                    c.setFillColorRGB(0, 0, 0)  # Black for stage names
-                    c.setFont("Helvetica-Bold", 9)
-                    c.drawString(meta_stage_x + 8, y, stage)
-                    
-                    # Reset fill color for value text
-                    c.setFillColorRGB(0, 0, 0)  # Black for values
-                    c.setFont("Helvetica", 8)
-                    c.drawString(meta_value_x + 8, y, str(value))
-                else:
-                    # Draw empty Meta row
-                    c.setFillColorRGB(*row_bg_color)
-                    c.rect(meta_stage_x, y - 6, meta_stage_width, 24, fill=True, stroke=False)
-                    c.rect(meta_value_x, y - 6, meta_value_width, 24, fill=True, stroke=False)
-                    c.setStrokeColorRGB(*border_color)
-                    c.rect(meta_stage_x, y - 6, meta_stage_width, 24, stroke=True, fill=False)
-                    c.rect(meta_value_x, y - 6, meta_value_width, 24, stroke=True, fill=False)
-                
-                # Draw Google row
-                if i < len(google_table_rows):
-                    stage, value = google_table_rows[i]
-                    
-                    # Draw background
-                    c.setFillColorRGB(*row_bg_color)
-                    c.rect(google_stage_x, y - 6, google_stage_width, 24, fill=True, stroke=False)
-                    c.rect(google_value_x, y - 6, google_value_width, 24, fill=True, stroke=False)
-                    
-                    # Draw borders
-                    c.setStrokeColorRGB(*border_color)
-                    c.rect(google_stage_x, y - 6, google_stage_width, 24, stroke=True, fill=False)
-                    c.rect(google_value_x, y - 6, google_value_width, 24, stroke=True, fill=False)
-                    
-                    # Draw text - ensure proper color reset
-                    c.setFillColorRGB(0, 0, 0)  # Black for stage names
-                    c.setFont("Helvetica-Bold", 9)
-                    c.drawString(google_stage_x + 8, y, stage)
-                    
-                    # Reset fill color for value text
-                    c.setFillColorRGB(0, 0, 0)  # Black for values
-                    c.setFont("Helvetica", 8)
-                    c.drawString(google_value_x + 8, y, str(value))
-                else:
-                    # Draw empty Google row
-                    c.setFillColorRGB(*row_bg_color)
-                    c.rect(google_stage_x, y - 6, google_stage_width, 24, fill=True, stroke=False)
-                    c.rect(google_value_x, y - 6, google_value_width, 24, fill=True, stroke=False)
-                    c.setStrokeColorRGB(*border_color)
-                    c.rect(google_stage_x, y - 6, google_stage_width, 24, stroke=True, fill=False)
-                    c.rect(google_value_x, y - 6, google_value_width, 24, stroke=True, fill=False)
-                
-                y -= 24
-            
-            
-            # Add drop-off analysis section for Meta only (positioned below both tables)
-            final_y = y - 50
-            
-            c.setFont("Helvetica-Bold", 11)
-            c.setFillColorRGB(*primary_color)
-            c.drawString(margin, final_y, "Drop-off Analysis - Meta")
-            final_y -= 20
-            
-            # Drop-off percentages for Meta
-            meta_drop_off_stages = [
-                ("Impressions → Clicks", f"{funnel_metrics.get('drop_off_impressions_to_clicks', 0):.1f}%"),
-                ("Clicks → Landing Page Views", f"{funnel_metrics.get('drop_off_clicks_to_landing', 0):.1f}%"),
-                ("Landing Page Views → Add to Cart", f"{funnel_metrics.get('drop_off_landing_to_cart', 0):.1f}%"),
-                ("Add to Cart → Orders", f"{funnel_metrics.get('drop_off_cart_to_orders', 0):.1f}%")
-            ]
-            
-            c.setFont("Helvetica", 9)
-            for stage, drop_off in meta_drop_off_stages:
-                if final_y < margin + 30:
-                    c.showPage()
-                    final_y = height - margin
-                    final_y -= 30
-                    c.setFont("Helvetica", 9)
-                
-                # Color code drop-off percentages
-                drop_off_val = float(drop_off.replace('%', ''))
-                if drop_off_val > 80:
-                    c.setFillColorRGB(0.8, 0.2, 0.2)  # Red for high drop-off
-                elif drop_off_val > 60:
-                    c.setFillColorRGB(0.9, 0.6, 0.2)  # Orange for medium drop-off
-                else:
-                    c.setFillColorRGB(0.2, 0.6, 0.2)  # Green for low drop-off
-                
-                c.drawString(margin + 20, final_y, f"• {stage}: {drop_off}")
-                final_y -= 16
-            
-            # Update main y position for next section
-            y = final_y
-            
-        except Exception as e:
-            # If funnel fails, show error message and continue
-            c.setFont("Helvetica", 10)
-            c.setFillColorRGB(0.8, 0.2, 0.2)
-            c.drawString(margin, y, f"Error loading funnel metrics: {str(e)}")
-            y -= 30
-        
-        def draw_wrapped_campaign_name(canvas, name, x, y, width, font_size=10):
-            canvas.setFont("Helvetica", font_size)
-            # For campaign names, split by hyphens and underscores for better wrapping
-            words = name.replace('-', ' ').replace('_', ' ').split(' ')
-            line = ""
-            y_offset = 0
-            max_lines = 3  # Allow up to 3 lines for very long campaign names
-            line_height = font_size + 2  # Slightly more spacing between lines
-            for word in words:
-                test_line = line + " " + word if line else word
-                if canvas.stringWidth(test_line, "Helvetica", font_size) < width - 10:
-                    line = test_line
-                else:
-                    if y_offset < (max_lines - 1) * line_height:
-                        if line:  # Only draw if we have content
-                            canvas.drawString(x + 5, y - y_offset, line)
-                        line = word
-                        y_offset += line_height
-                    else:
-                        # Last line - truncate if necessary
-                        remaining = line + " " + word
-                        while canvas.stringWidth(remaining + "...", "Helvetica", font_size) > width - 10 and len(remaining) > 0:
-                            remaining = remaining[:-1]
-                        canvas.drawString(x + 5, y - y_offset, remaining + "..." if len(remaining) < len(line + " " + word) else remaining)
-                        return
-            if line:
-                canvas.drawString(x + 5, y - y_offset, line)
-        y -= 15
+            pdf_ctx['report_title'] = 'Daily Marketing Performance Report'
 
-        # --- Regular Campaigns Table: Segmented by Net ROAS (minimal styling) ---
-        y -= 35
-        c.setFont("Helvetica-Bold", 11)
-        c.setFillColorRGB(*primary_color)
-        c.drawString(margin, y, "Campaigns by Net ROAS Segments")
-        y -= 25
-        headers = [
-            "Campaign Name", "Spend", "Revenue", "Net Profit", "CTR", "Bounce", "CR",
-            "GR", "NR"
-        ]
-        # Slightly tightened widths for compact look
-        col_widths = [150, 55, 65, 70, 38, 46, 46, 46, 46]
-        table_width = sum(col_widths)
-        table_margin = (width - table_width) / 2
-        x_positions = [table_margin]
-        for i in range(len(col_widths) - 1):
-            x_positions.append(x_positions[i] + col_widths[i])
-        
-        # Draw the table header
-        c.setFillColorRGB(*light_gray)
-        c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-        c.setFillColorRGB(*primary_color)
-        c.setFont("Helvetica-Bold", 9)
-        for i, header in enumerate(headers):
-            c.drawString(x_positions[i] + 6, y, header)
-        y -= 22
+        html = render_pdf_html(pdf_ctx)
+        html_to_pdf(html, report_name)
 
-        # Helper: draw right-aligned text in the totals rows (shared)
-        def rtot(ix, text):
-            c.drawRightString(x_positions[ix] + col_widths[ix] - 8, y, text)
+        # Cache context for send_email; reuse pdf_ctx's normalized funnel
+        _daily_email_context = {
+            "meta": api_metrics.get("meta", {}),
+            "google": api_metrics.get("google", {}),
+            "organic": api_metrics.get("organic", {}),
+            "total": api_metrics.get("total", {}),
+            "funnel": pdf_ctx.get("funnel"),
+            "google_funnel": google_funnel,
+            "campaigns": pdf_ctx.get("campaigns", []),
+            "insights": insights,
+        }
 
-        # Get campaign_summary from metrics and normalize expected columns for PDF
-        campaign_df = metrics['campaign_summary']
-        
-        logger.info(f"Campaign summary rows: {len(campaign_df)}")
-        
-        try:
-            if not campaign_df.empty:
-                # Ensure expected columns by aliasing/computing
-                if 'shopify_revenue' not in campaign_df.columns and 'sales' in campaign_df.columns:
-                    campaign_df['shopify_revenue'] = campaign_df['sales']
-                # sales
-                if 'sales' not in campaign_df.columns:
-                    if 'shopify_revenue' in campaign_df.columns:
-                        campaign_df['sales'] = campaign_df['shopify_revenue']
-                    elif 'revenue' in campaign_df.columns:
-                        campaign_df['sales'] = campaign_df['revenue']
-                    else:
-                        campaign_df['sales'] = 0
-                # purchases
-                if 'purchases' not in campaign_df.columns:
-                    if 'shopify_orders' in campaign_df.columns:
-                        campaign_df['purchases'] = campaign_df['shopify_orders']
-                    elif 'orders' in campaign_df.columns:
-                        campaign_df['purchases'] = campaign_df['orders']
-                    else:
-                        campaign_df['purchases'] = 0
-                # roas (gross)
-                if 'roas' not in campaign_df.columns and 'gross_roas' in campaign_df.columns:
-                    campaign_df['roas'] = campaign_df['gross_roas']
-                if 'roas' not in campaign_df.columns:
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        campaign_df['roas'] = (pd.to_numeric(campaign_df.get('sales', 0), errors='coerce') / pd.to_numeric(campaign_df.get('spend', 0), errors='coerce'))
-                    campaign_df['roas'] = campaign_df['roas'].replace([np.inf, -np.inf], 0).fillna(0)
-                # net_roas
-                if 'net_roas' not in campaign_df.columns and {'sales','cogs','spend'}.issubset(campaign_df.columns):
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        campaign_df['net_roas'] = (pd.to_numeric(campaign_df['sales'], errors='coerce') - pd.to_numeric(campaign_df.get('cogs', 0), errors='coerce')) / pd.to_numeric(campaign_df['spend'], errors='coerce')
-                    campaign_df['net_roas'] = campaign_df['net_roas'].replace([np.inf, -np.inf], 0).fillna(0)
-                # be_roas / breakeven_roas
-                if 'be_roas' not in campaign_df.columns and 'breakeven_roas' in campaign_df.columns:
-                    campaign_df['be_roas'] = campaign_df['breakeven_roas']
-                if 'breakeven_roas' not in campaign_df.columns:
-                    if 'be_roas' in campaign_df.columns:
-                        campaign_df['breakeven_roas'] = campaign_df['be_roas']
-                    elif {'cogs','spend'}.issubset(campaign_df.columns):
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            campaign_df['breakeven_roas'] = (pd.to_numeric(campaign_df['cogs'], errors='coerce') + pd.to_numeric(campaign_df['spend'], errors='coerce')) / pd.to_numeric(campaign_df['spend'], errors='coerce')
-                        campaign_df['breakeven_roas'] = campaign_df['breakeven_roas'].replace([np.inf, -np.inf], 0).fillna(0)
-                    else:
-                        campaign_df['breakeven_roas'] = 0
-                if 'be_roas' not in campaign_df.columns and 'breakeven_roas' in campaign_df.columns:
-                    campaign_df['be_roas'] = campaign_df['breakeven_roas']
-                # cpp
-                if 'cpp' not in campaign_df.columns and {'spend','purchases'}.issubset(campaign_df.columns):
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        campaign_df['cpp'] = pd.to_numeric(campaign_df['spend'], errors='coerce') / pd.to_numeric(campaign_df['purchases'], errors='coerce')
-                    campaign_df['cpp'] = campaign_df['cpp'].replace([np.inf, -np.inf], 0).fillna(0)
-                if 'cpp' not in campaign_df.columns:
-                    campaign_df['cpp'] = 0
-                # Ensure impressions exist if ctr is present but impressions missing
-                if 'impressions' not in campaign_df.columns and 'ctr' in campaign_df.columns and 'clicks' in campaign_df.columns:
-                    try:
-                        clicks_num = pd.to_numeric(campaign_df['clicks'], errors='coerce')
-                        ctr_num = pd.to_numeric(campaign_df['ctr'], errors='coerce')
-                        # impressions = clicks / (ctr/100) when ctr > 0
-                        campaign_df['impressions'] = np.where(ctr_num > 0, (clicks_num / (ctr_num / 100.0)), np.nan)
-                    except Exception:
-                        campaign_df['impressions'] = np.nan
-                # ctr: compute when missing or zero but we have clicks+impressions
-                if 'ctr' not in campaign_df.columns or (pd.to_numeric(campaign_df.get('ctr', 0), errors='coerce').fillna(0) == 0).all():
-                    if {'clicks','impressions'}.issubset(campaign_df.columns):
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            campaign_df['ctr'] = (pd.to_numeric(campaign_df['clicks'], errors='coerce') / pd.to_numeric(campaign_df['impressions'], errors='coerce')) * 100
-                        campaign_df['ctr'] = campaign_df['ctr'].replace([np.inf, -np.inf], 0).fillna(0)
-                    else:
-                        campaign_df['ctr'] = campaign_df.get('ctr', 0).fillna(0) if 'ctr' in campaign_df.columns else 0
-                # conversion_rate: only recalculate if missing or invalid; preserve dailyrollup values
-                if 'conversion_rate' not in campaign_df.columns or campaign_df['conversion_rate'].isna().all() or (campaign_df['conversion_rate'] == 0).all():
-                    # Only recalculate if conversion_rate is missing or all zeros
-                    if 'clicks' in campaign_df.columns:
-                        clicks_series = pd.to_numeric(campaign_df['clicks'], errors='coerce').fillna(0)
-                    else:
-                        clicks_series = pd.Series([0]*len(campaign_df))
-                    if (clicks_series == 0).any():
-                        try:
-                            if 'impressions' in campaign_df.columns and 'ctr' in campaign_df.columns:
-                                imp_num = pd.to_numeric(campaign_df['impressions'], errors='coerce').fillna(0)
-                                ctr_num = pd.to_numeric(campaign_df['ctr'], errors='coerce').fillna(0)
-                                inferred_clicks = (imp_num * (ctr_num / 100.0)).round()
-                                clicks_series = np.where(clicks_series == 0, inferred_clicks, clicks_series)
-                                campaign_df['clicks'] = clicks_series
-                        except Exception:
-                            pass
-                    if 'purchases' in campaign_df.columns:
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            campaign_df['conversion_rate'] = (pd.to_numeric(campaign_df['purchases'], errors='coerce') / pd.to_numeric(campaign_df['clicks'], errors='coerce')) * 100
-                        campaign_df['conversion_rate'] = campaign_df['conversion_rate'].replace([np.inf, -np.inf], 0).fillna(0)
-                    else:
-                        campaign_df['conversion_rate'] = 0
-                else:
-                    # Ensure conversion_rate is properly formatted (already calculated by dailyrollup)
-                    campaign_df['conversion_rate'] = pd.to_numeric(campaign_df['conversion_rate'], errors='coerce').fillna(0)
-                
-                pass
-                        
-        except Exception as e:
-            logger.warning(f"Campaign DataFrame normalization issue: {e}")
-            logger.error("Normalization exception details: %s", str(e), exc_info=True)
-        
-        # Check if campaign_df is empty or doesn't have required columns
-        if campaign_df.empty or 'campaign_name' not in campaign_df.columns:
-            logger.warning(f"Campaign DataFrame is empty or missing required columns. DataFrame shape: {campaign_df.shape}, columns: {list(campaign_df.columns)}. Creating empty campaign sections.")
-            
-            # Create a placeholder row to show "No data available" message
-            placeholder_data = {
-                'campaign_name': ['No campaign data available'],
-                'spend': [0.0],
-                'shopify_revenue': [0.0],
-                'sales': [0.0],
-                'purchases': [0],
-                'orders': [0],
-                'clicks': [0],
-                'impressions': [0],
-                'ctr': [0.0],
-                'bounce_rate': [0.0],
-                'conversion_rate': [0.0],
-                'gross_roas': [0.0],
-                'roas': [0.0],
-                'net_roas': [0.0],
-                'net_profit': [0.0],
-                'cogs': [0.0],
-                'be_roas': [0.0],
-                'breakeven_roas': [0.0],
-                'cpp': [0.0]
-            }
-            campaign_df = pd.DataFrame(placeholder_data)
-            logger.info("Created placeholder campaign data for empty campaign summary")
-            
-            pmf_campaigns = pd.DataFrame()
-            regular_campaigns = campaign_df  # Use placeholder for regular campaigns
-            seg1 = pd.DataFrame()
-            seg2 = pd.DataFrame()
-            seg3 = campaign_df  # Show placeholder in segment 3
-        else:
-            pmf_campaigns = campaign_df[campaign_df['campaign_name'].str.contains('PMF', case=False, na=False)]
-            
-            logger.info("PMF campaigns: %s", len(pmf_campaigns))
-            
-            # Sort PMF campaigns by net ROAS (descending)
-            if not pmf_campaigns.empty:
-                pmf_campaigns = pmf_campaigns.sort_values('net_roas', ascending=False)
-            
-            # Filter out PMF campaigns for regular campaigns section
-            regular_campaigns = campaign_df[~campaign_df['campaign_name'].str.contains('PMF', case=False, na=False)]
-            
-            logger.info("Regular campaigns: %s", len(regular_campaigns))
-            
-            # Filter out rows with empty campaign names (summary rows)
-            regular_campaigns = regular_campaigns[regular_campaigns['campaign_name'].notna() & (regular_campaigns['campaign_name'].str.strip() != '')]
-            
-            logger.info("Campaigns after name filter: %s", len(regular_campaigns))
-            
-            # Segment regular campaigns
-            seg1 = regular_campaigns[regular_campaigns['net_roas'] > 1]
-            seg2 = regular_campaigns[(regular_campaigns['net_roas'] <= 1) & (regular_campaigns['net_roas'] > 0.8)]
-            seg3 = regular_campaigns[regular_campaigns['net_roas'] <= 0.8]
-            
-            logger.info(
-                "Campaign segments -> S1:%s S2:%s S3:%s",
-                len(seg1), len(seg2), len(seg3)
-            )
-        
-        def draw_campaign_rows(df, y):
-            # Check if DataFrame has required columns
-            required_columns = [
-                'campaign_name', 'spend', 'shopify_revenue', 'ctr', 'bounce_rate',
-                'gross_roas', 'net_roas', 'conversion_rate', 'net_profit'
-            ]
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            
-            if missing_columns:
-                logger.warning(f"Missing required columns in campaign DataFrame: {missing_columns}")
-                return y
-            # Minimal row height and light borders
-            border_rgb = border_color
-            c.setStrokeColorRGB(*border_rgb)
-            
-            for _, row in df.iterrows():
-                if y < margin + 30:
-                    c.showPage()
-                    y = height - margin
-                    # Header redraw on new page
-                    c.setFillColorRGB(*light_gray)
-                    c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-                    c.setFillColorRGB(*primary_color)
-                    c.setFont("Helvetica-Bold", 9)
-                    for i, header in enumerate(headers):
-                        c.drawString(x_positions[i] + 6, y, header)
-                    y -= 22
-                row_height = 32  # Increased height to accommodate wrapped campaign names
-                # Gradient yellow intensity for CTR cell based on value (0-100)
-                try:
-                    ctr_val = float(row.get('ctr', 0) or 0)
-                    if ctr_val > 0:
-                        t = max(0.0, min(100.0, ctr_val)) / 100.0
-                        start_r, start_g, start_b = (1.00, 1.00, 0.92)
-                        end_r, end_g, end_b = (1.00, 0.90, 0.10)
-                        r = start_r + (end_r - start_r) * t
-                        g = start_g + (end_g - start_g) * t
-                        b = start_b + (end_b - start_b) * t
-                        c.setFillColorRGB(r, g, b)
-                        c.rect(x_positions[4], y - row_height + 14, col_widths[4], row_height, fill=True, stroke=False)
-                        c.setFillColorRGB(0, 0, 0)
-                except Exception:
-                    pass
-
-                # Gradient blue intensity for Bounce Rate cell based on value (0-100)
-                try:
-                    bounce_val = float(row.get('bounce_rate', 0) or 0)
-                    if bounce_val > 0:
-                        # Normalize to [0,1]
-                        t = max(0.0, min(100.0, bounce_val)) / 100.0
-                        # From very light blue to professional blue
-                        start_r, start_g, start_b = (0.95, 0.97, 1.0)
-                        end_r, end_g, end_b = (0.10, 0.40, 0.70)
-                        r = start_r + (end_r - start_r) * t
-                        g = start_g + (end_g - start_g) * t
-                        b = start_b + (end_b - start_b) * t
-                        c.setFillColorRGB(r, g, b)
-                        c.rect(x_positions[5], y - row_height + 14, col_widths[5], row_height, fill=True, stroke=False)
-                        c.setFillColorRGB(0, 0, 0)
-                except Exception:
-                    pass
-
-
-                # Red background for Net ROAS < 1
-                try:
-                    net_roas_val = float(row.get('net_roas', 0) or 0)
-                    if net_roas_val < 1 and net_roas_val > 0:  # Only highlight if > 0 to avoid highlighting 0 values
-                        c.setFillColorRGB(1.0, 0.78, 0.81)  # Light red background
-                        c.rect(x_positions[8], y - row_height + 14, col_widths[8], row_height, fill=True, stroke=False)
-                        c.setFillColorRGB(0, 0, 0)
-                except Exception:
-                    pass
-                for i in range(len(col_widths)):
-                    c.rect(x_positions[i], y - row_height + 14, col_widths[i], row_height, stroke=True, fill=False)
-                # Text styles
-                c.setFont("Helvetica", 8)
-                # Campaign name (left aligned) - increased font size for better readability
-                draw_wrapped_campaign_name(c, row['campaign_name'], x_positions[0], y, col_widths[0], font_size=9)
-                # Right align numeric columns for neatness
-                def rtext(ix, text):
-                    c.drawRightString(x_positions[ix] + col_widths[ix] - 6, y, text)
-                def safe_get(row, key, default=0):
-                    val = row.get(key, default)
-                    if hasattr(val, 'iloc'):
-                        return val.iloc[0] if len(val) > 0 else default
-                    return val
-                
-                rtext(1, f"Rs {safe_get(row, 'spend'):.2f}")
-                rtext(2, f"Rs {safe_get(row, 'shopify_revenue'):.2f}")
-                rtext(3, f"Rs {safe_get(row, 'net_profit'):.2f}")
-                rtext(4, f"{safe_get(row, 'ctr'):.2f}%")
-                rtext(5, f"{safe_get(row, 'bounce_rate'):.2f}%")
-                rtext(6, f"{safe_get(row, 'conversion_rate'):.2f}%")
-                rtext(7, f"{safe_get(row, 'gross_roas', safe_get(row, 'roas')):.2f}")
-                rtext(8, f"{safe_get(row, 'net_roas'):.2f}")
-                y -= row_height
-            return y
-        
-        # Calculate overall totals from displayed campaigns for percentage calculations
-        displayed_campaigns = pd.DataFrame()
-        
-        # Add campaigns from each section that was actually drawn
-        if not seg1.empty:
-            displayed_campaigns = pd.concat([displayed_campaigns, seg1], ignore_index=True)
-        if not seg2.empty:
-            displayed_campaigns = pd.concat([displayed_campaigns, seg2], ignore_index=True)
-        if not seg3.empty:
-            displayed_campaigns = pd.concat([displayed_campaigns, seg3], ignore_index=True)
-        if not pmf_campaigns.empty:
-            displayed_campaigns = pd.concat([displayed_campaigns, pmf_campaigns], ignore_index=True)
-        
-        # Compute totals directly from displayed campaigns
-        if displayed_campaigns.empty or not all(col in displayed_campaigns.columns for col in ['spend', 'shopify_revenue', 'purchases']):
-            logger.warning("Displayed campaigns DataFrame is empty or missing required columns. Using default values.")
-            total_spend = 0.00
-            total_sales = 0.00
-            total_conversions = 0
-            total_cpp = 0.00
-            total_gross_roas = 0.00
-            total_net_roas = 0.00
-            total_be_roas = 0.00
-            total_ctr = 0.00
-            total_cr = 0.00
-            total_bounce = 0.00
-            total_checkout = 0.00
-        else:
-            total_spend = float(displayed_campaigns['spend'].sum())
-            total_sales = float(displayed_campaigns['shopify_revenue'].sum())
-            total_conversions = float(displayed_campaigns['purchases'].sum()) if 'purchases' in displayed_campaigns.columns else 0.0
-            total_cogs = float(displayed_campaigns['cogs'].sum()) if 'cogs' in displayed_campaigns.columns else 0.0
-            total_net_profit = total_sales - total_cogs - total_spend
-            total_clicks = float(displayed_campaigns['clicks'].sum()) if 'clicks' in displayed_campaigns.columns else 0.0
-            total_impressions = float(displayed_campaigns['impressions'].sum()) if 'impressions' in displayed_campaigns.columns else 0.0
-            # CPP
-            total_cpp = round(total_spend / total_conversions, 2) if total_conversions > 0 else 0.00
-            # ROAS from totals
-            total_gross_roas = round(total_sales / total_spend, 2) if total_spend > 0 else 0.00
-            total_net_roas = round((total_sales - total_cogs) / total_spend, 2) if total_spend > 0 else 0.00
-            total_be_roas = round((total_cogs + total_spend) / total_spend, 2) if total_spend > 0 else 0.00
-            # CTR and CR from totals
-            total_ctr = round((total_clicks / total_impressions) * 100, 2) if total_impressions > 0 else 0.00
-            total_cr = round((total_conversions / total_clicks) * 100, 2) if total_clicks > 0 else 0.00
-            # Weighted bounce by clicks; fallback to mean
-            try:
-                if 'bounce_rate' in displayed_campaigns.columns and 'clicks' in displayed_campaigns.columns and displayed_campaigns['clicks'].sum() > 0:
-                    total_bounce = round(np.average(displayed_campaigns['bounce_rate'], weights=displayed_campaigns['clicks']), 2)
-                else:
-                    total_bounce = round(displayed_campaigns['bounce_rate'].mean(), 2) if 'bounce_rate' in displayed_campaigns.columns else 0.00
-            except Exception:
-                total_bounce = round(displayed_campaigns['bounce_rate'].mean(), 2) if 'bounce_rate' in displayed_campaigns.columns else 0.00
-            total_checkout = 0.00
-        
-        # Only draw sections if there are campaigns in them
-        sections_drawn = False
-        
-        # Section 1: Net ROAS > 1
-        if not seg1.empty:
-            sections_drawn = True
-            c.setFont("Helvetica-Bold", 11)
-            y-= 20
-            c.setFillColorRGB(*primary_color)
-            c.drawString(table_margin, y, "Net ROAS > 1")
-            y -= 20
-            y = draw_campaign_rows(seg1, y)
-            # Section 1 Total Row with enhanced styling (sum/average per new schema)
-            seg1_total_spend = float(seg1.get('spend', 0).sum()) if 'spend' in seg1.columns else 0.0
-            if 'shopify_revenue' in seg1.columns:
-                seg1_total_sales = float(seg1['shopify_revenue'].sum())
-            elif 'sales' in seg1.columns:
-                seg1_total_sales = float(seg1['sales'].sum())
-            else:
-                seg1_total_sales = 0.0
-            seg1_total_cogs = float(seg1.get('cogs', 0).sum()) if 'cogs' in seg1.columns else 0.0
-            seg1_total_net_profit = seg1_total_sales - seg1_total_cogs - seg1_total_spend
-            # CTR/CR from totals for consistency
-            seg1_clicks_tot = float(seg1.get('clicks', 0).sum()) if 'clicks' in seg1.columns else 0.0
-            seg1_impr_tot = float(seg1.get('impressions', 0).sum()) if 'impressions' in seg1.columns else 0.0
-            seg1_avg_ctr = (seg1_clicks_tot / seg1_impr_tot * 100.0) if seg1_impr_tot > 0 else (float(seg1.get('ctr', 0).mean()) if 'ctr' in seg1.columns else 0.0)
-            seg1_avg_bounce = float(seg1.get('bounce_rate', 0).mean()) if 'bounce_rate' in seg1.columns else 0.0
-            seg1_avg_checkout = 0.0
-            # ROAS: prefer recompute from sums when possible
-            seg1_avg_gross_roas = (seg1_total_sales / seg1_total_spend) if seg1_total_spend > 0 else (float(seg1.get('gross_roas', 0).mean()) if 'gross_roas' in seg1.columns else float(seg1.get('roas', 0).mean()) if 'roas' in seg1.columns else 0.0)
-            seg1_avg_net_roas = ((seg1_total_sales - seg1_total_cogs) / seg1_total_spend) if seg1_total_spend > 0 and 'cogs' in seg1.columns else (float(seg1.get('net_roas', 0).mean()) if 'net_roas' in seg1.columns else 0.0)
-            seg1_avg_be_roas = ((seg1_total_cogs + seg1_total_spend) / seg1_total_spend) if seg1_total_spend > 0 and 'cogs' in seg1.columns else (float(seg1.get('be_roas', 0).mean()) if 'be_roas' in seg1.columns else float(seg1.get('breakeven_roas', 0).mean()) if 'breakeven_roas' in seg1.columns else 0.0)
-            # Calculate average conversion rate from individual campaigns in section 1
-            seg1_avg_cr = float(seg1.get('conversion_rate', 0).mean()) if 'conversion_rate' in seg1.columns else 0.0
-            logger.info(f"Section 1 CR Debug: Individual CRs={seg1.get('conversion_rate', []).tolist()}, Average CR={seg1_avg_cr:.2f}%")
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(x_positions[0] + 8, y, "Section Total")
-            
-            # Calculate percentages for spend and sales
-            spend_percentage = round((seg1_total_spend / total_spend * 100), 1) if total_spend > 0 else 0.0
-            sales_percentage = round((seg1_total_sales / total_sales * 100), 1) if total_sales > 0 else 0.0
-            
-            def rtot(ix, text):
-                c.drawRightString(x_positions[ix] + col_widths[ix] - 8, y, text)
-            # First line: amounts only
-            rtot(1, f"Rs {seg1_total_spend:.2f}")
-            rtot(2, f"Rs {seg1_total_sales:.2f}")
-            rtot(3, f"Rs {seg1_total_net_profit:.2f}")
-            rtot(4, f"{seg1_avg_ctr:.2f}%")
-            rtot(5, f"{seg1_avg_bounce:.2f}%")
-            rtot(6, f"{seg1_avg_cr:.2f}%")
-            rtot(7, f"{seg1_avg_gross_roas:.2f}")
-            rtot(8, f"{seg1_avg_net_roas:.2f}")
-            for i in range(len(col_widths)):
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, stroke=True, fill=False)
-            # Second line: percentages under Spend and Revenue
-            try:
-                c.setFont("Helvetica", 7)
-                c.setFillColorRGB(0, 0, 0)
-                c.drawRightString(x_positions[1] + col_widths[1] - 8, y - 14, f"({spend_percentage}%)")
-                c.drawRightString(x_positions[2] + col_widths[2] - 8, y - 14, f"({sales_percentage}%)")
-            except Exception:
-                pass
-            y -= 24
-        
-        # Section 2: Net ROAS <= 1 and > 0.8
-        if not seg2.empty:
-            sections_drawn = True
-            c.setFont("Helvetica-Bold", 11)
-            y-= 20
-            c.setFillColorRGB(*primary_color)
-            c.drawString(table_margin, y, "Net ROAS <= 1 and > 0.8")
-            y -= 20
-            y = draw_campaign_rows(seg2, y)
-            # Section 2 Total Row (sum/average per new schema)
-            seg2_total_spend = float(seg2.get('spend', 0).sum()) if 'spend' in seg2.columns else 0.0
-            if 'shopify_revenue' in seg2.columns:
-                seg2_total_sales = float(seg2['shopify_revenue'].sum())
-            elif 'sales' in seg2.columns:
-                seg2_total_sales = float(seg2['sales'].sum())
-            else:
-                seg2_total_sales = 0.0
-            seg2_total_cogs = float(seg2.get('cogs', 0).sum()) if 'cogs' in seg2.columns else 0.0
-            seg2_total_net_profit = seg2_total_sales - seg2_total_cogs - seg2_total_spend
-            seg2_clicks_tot = float(seg2.get('clicks', 0).sum()) if 'clicks' in seg2.columns else 0.0
-            seg2_impr_tot = float(seg2.get('impressions', 0).sum()) if 'impressions' in seg2.columns else 0.0
-            seg2_avg_ctr = (seg2_clicks_tot / seg2_impr_tot * 100.0) if seg2_impr_tot > 0 else (float(seg2.get('ctr', 0).mean()) if 'ctr' in seg2.columns else 0.0)
-            seg2_avg_bounce = float(seg2.get('bounce_rate', 0).mean()) if 'bounce_rate' in seg2.columns else 0.0
-            seg2_avg_checkout = 0.0
-            seg2_avg_gross_roas = (seg2_total_sales / seg2_total_spend) if seg2_total_spend > 0 else (float(seg2.get('gross_roas', 0).mean()) if 'gross_roas' in seg2.columns else float(seg2.get('roas', 0).mean()) if 'roas' in seg2.columns else 0.0)
-            seg2_avg_net_roas = ((seg2_total_sales - seg2_total_cogs) / seg2_total_spend) if seg2_total_spend > 0 and 'cogs' in seg2.columns else (float(seg2.get('net_roas', 0).mean()) if 'net_roas' in seg2.columns else 0.0)
-            seg2_avg_be_roas = ((seg2_total_cogs + seg2_total_spend) / seg2_total_spend) if seg2_total_spend > 0 and 'cogs' in seg2.columns else (float(seg2.get('be_roas', 0).mean()) if 'be_roas' in seg2.columns else float(seg2.get('breakeven_roas', 0).mean()) if 'breakeven_roas' in seg2.columns else 0.0)
-            # Calculate average conversion rate from individual campaigns in section 2
-            seg2_avg_cr = float(seg2.get('conversion_rate', 0).mean()) if 'conversion_rate' in seg2.columns else 0.0
-            logger.info(f"Section 2 CR Debug: Individual CRs={seg2.get('conversion_rate', []).tolist()}, Average CR={seg2_avg_cr:.2f}%")
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(x_positions[0] + 8, y, "Section Total")
-            
-            # Calculate percentages for spend and sales
-            spend_percentage = round((seg2_total_spend / total_spend * 100), 1) if total_spend > 0 else 0.0
-            sales_percentage = round((seg2_total_sales / total_sales * 100), 1) if total_sales > 0 else 0.0
-            
-            # First line: amounts only
-            rtot(1, f"Rs {seg2_total_spend:.2f}")
-            rtot(2, f"Rs {seg2_total_sales:.2f}")
-            rtot(3, f"Rs {seg2_total_net_profit:.2f}")
-            rtot(4, f"{seg2_avg_ctr:.2f}%")
-            rtot(5, f"{seg2_avg_bounce:.2f}%")
-            rtot(6, f"{seg2_avg_cr:.2f}%")
-            rtot(7, f"{seg2_avg_gross_roas:.2f}")
-            rtot(8, f"{seg2_avg_net_roas:.2f}")
-            for i in range(len(col_widths)):
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, stroke=True, fill=False)
-            # Second line: percentages under Spend and Revenue
-            try:
-                c.setFont("Helvetica", 7)
-                c.setFillColorRGB(0, 0, 0)
-                c.drawRightString(x_positions[1] + col_widths[1] - 8, y - 14, f"({spend_percentage}%)")
-                c.drawRightString(x_positions[2] + col_widths[2] - 8, y - 14, f"({sales_percentage}%)")
-            except Exception:
-                pass
-            y -= 24
-        
-        # Section 3: Net ROAS <= 0.8
-        if not seg3.empty:
-            sections_drawn = True
-            c.setFont("Helvetica-Bold", 11)
-            y-= 20
-            c.setFillColorRGB(*primary_color)
-            c.drawString(table_margin, y, "Net ROAS <= 0.8")
-            y -= 20
-            y = draw_campaign_rows(seg3, y)
-            # Section 3 Total Row (sum/average per new schema)
-            seg3_total_spend = float(seg3.get('spend', 0).sum()) if 'spend' in seg3.columns else 0.0
-            if 'shopify_revenue' in seg3.columns:
-                seg3_total_sales = float(seg3['shopify_revenue'].sum())
-            elif 'sales' in seg3.columns:
-                seg3_total_sales = float(seg3['sales'].sum())
-            else:
-                seg3_total_sales = 0.0
-            seg3_total_cogs = float(seg3.get('cogs', 0).sum()) if 'cogs' in seg3.columns else 0.0
-            seg3_total_net_profit = seg3_total_sales - seg3_total_cogs - seg3_total_spend
-            seg3_clicks_tot = float(seg3.get('clicks', 0).sum()) if 'clicks' in seg3.columns else 0.0
-            seg3_impr_tot = float(seg3.get('impressions', 0).sum()) if 'impressions' in seg3.columns else 0.0
-            seg3_avg_ctr = (seg3_clicks_tot / seg3_impr_tot * 100.0) if seg3_impr_tot > 0 else (float(seg3.get('ctr', 0).mean()) if 'ctr' in seg3.columns else 0.0)
-            seg3_avg_bounce = float(seg3.get('bounce_rate', 0).mean()) if 'bounce_rate' in seg3.columns else 0.0
-            seg3_avg_checkout = 0.0
-            seg3_avg_gross_roas = (seg3_total_sales / seg3_total_spend) if seg3_total_spend > 0 else (float(seg3.get('gross_roas', 0).mean()) if 'gross_roas' in seg3.columns else float(seg3.get('roas', 0).mean()) if 'roas' in seg3.columns else 0.0)
-            seg3_avg_net_roas = ((seg3_total_sales - seg3_total_cogs) / seg3_total_spend) if seg3_total_spend > 0 and 'cogs' in seg3.columns else (float(seg3.get('net_roas', 0).mean()) if 'net_roas' in seg3.columns else 0.0)
-            seg3_avg_be_roas = ((seg3_total_cogs + seg3_total_spend) / seg3_total_spend) if seg3_total_spend > 0 and 'cogs' in seg3.columns else (float(seg3.get('be_roas', 0).mean()) if 'be_roas' in seg3.columns else float(seg3.get('breakeven_roas', 0).mean()) if 'breakeven_roas' in seg3.columns else 0.0)
-            # Calculate average conversion rate from individual campaigns in section 3
-            seg3_avg_cr = float(seg3.get('conversion_rate', 0).mean()) if 'conversion_rate' in seg3.columns else 0.0
-            logger.info(f"Section 3 CR Debug: Individual CRs={seg3.get('conversion_rate', []).tolist()}, Average CR={seg3_avg_cr:.2f}%")
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(x_positions[0] + 8, y, "Section Total")
-            
-            # Calculate percentages for spend and sales
-            spend_percentage = round((seg3_total_spend / total_spend * 100), 1) if total_spend > 0 else 0.0
-            sales_percentage = round((seg3_total_sales / total_sales * 100), 1) if total_sales > 0 else 0.0
-            
-            # First line: amounts only
-            rtot(1, f"Rs {seg3_total_spend:.2f}")
-            rtot(2, f"Rs {seg3_total_sales:.2f}")
-            rtot(3, f"Rs {seg3_total_net_profit:.2f}")
-            rtot(4, f"{seg3_avg_ctr:.2f}%")
-            rtot(5, f"{seg3_avg_bounce:.2f}%")
-            rtot(6, f"{seg3_avg_cr:.2f}%")
-            rtot(7, f"{seg3_avg_gross_roas:.2f}")
-            rtot(8, f"{seg3_avg_net_roas:.2f}")
-            for i in range(len(col_widths)):
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, stroke=True, fill=False)
-            # Second line: percentages under Spend and Revenue
-            try:
-                c.setFont("Helvetica", 7)
-                c.setFillColorRGB(0, 0, 0)
-                c.drawRightString(x_positions[1] + col_widths[1] - 8, y - 14, f"({spend_percentage}%)")
-                c.drawRightString(x_positions[2] + col_widths[2] - 8, y - 14, f"({sales_percentage}%)")
-            except Exception:
-                pass
-            y -= 24   
-        
-        # --- PMF Campaigns Section (Moved to bottom) ---
-        if not pmf_campaigns.empty:
-            y -= 35
-            c.setFont("Helvetica-Bold", 12)
-            c.setFillColorRGB(*primary_color)
-            c.drawString(margin, y, "PMF Campaigns Performance")
-            y -= 25
-            
-            # Draw header for PMF campaigns with enhanced styling
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            for i, header in enumerate(headers):
-                c.drawString(x_positions[i] + 8, y, header)
-            y -= 22
-            
-            def draw_pmf_campaign_rows(df, y):
-                for _, row in df.iterrows():
-                    if y < margin + 30:
-                        c.showPage()
-                        y = height - margin
-                        c.setFillColorRGB(*light_gray)
-                        c.rect(table_margin, y - 6, table_width, 26, fill=True, stroke=False)
-                        c.setFillColorRGB(*primary_color)
-                        c.setFont("Helvetica-Bold", 12)
-                        for i, header in enumerate(headers):
-                            c.drawString(x_positions[i] + 8, y, header)
-                        y -= 26
-                    row_height = 32  # Increased height to accommodate wrapped campaign names
-                    
-                    # Gradient yellow intensity for CTR cell based on value (0-100)
-                    try:
-                        ctr_val = float(row.get('ctr', 0) or 0)
-                        if ctr_val > 0:
-                            t = max(0.0, min(100.0, ctr_val)) / 100.0
-                            start_r, start_g, start_b = (1.00, 1.00, 0.92)
-                            end_r, end_g, end_b = (1.00, 0.90, 0.10)
-                            r = start_r + (end_r - start_r) * t
-                            g = start_g + (end_g - start_g) * t
-                            b = start_b + (end_b - start_b) * t
-                            c.setFillColorRGB(r, g, b)
-                            c.rect(x_positions[4], y - row_height + 14, col_widths[4], row_height, fill=True, stroke=False)
-                            c.setFillColorRGB(0, 0, 0)
-                    except Exception:
-                        pass
-
-                    # Gradient blue intensity for Bounce Rate cell based on value (0-100)
-                    try:
-                        bounce_val = float(row.get('bounce_rate', 0) or 0)
-                        if bounce_val > 0:
-                            # Normalize to [0,1]
-                            t = max(0.0, min(100.0, bounce_val)) / 100.0
-                            # From very light blue to professional blue
-                            start_r, start_g, start_b = (0.95, 0.97, 1.0)
-                            end_r, end_g, end_b = (0.10, 0.40, 0.70)
-                            r = start_r + (end_r - start_r) * t
-                            g = start_g + (end_g - start_g) * t
-                            b = start_b + (end_b - start_b) * t
-                            c.setFillColorRGB(r, g, b)
-                            c.rect(x_positions[5], y - row_height + 14, col_widths[5], row_height, fill=True, stroke=False)
-                            c.setFillColorRGB(0, 0, 0)
-                    except Exception:
-                        pass
-
-                    # Red background for Net ROAS < 1 in PMF campaigns
-                    try:
-                        net_roas_val = float(row.get('net_roas', 0) or 0)
-                        if net_roas_val < 1 and net_roas_val > 0:  # Only highlight if > 0 to avoid highlighting 0 values
-                            c.setFillColorRGB(1.0, 0.78, 0.81)  # Light red background
-                            c.rect(x_positions[8], y - row_height + 14, col_widths[8], row_height, fill=True, stroke=False)
-                            c.setFillColorRGB(0, 0, 0)
-                    except Exception:
-                        pass
-                    
-                    for i in range(len(col_widths)):
-                        c.rect(x_positions[i], y - row_height + 14, col_widths[i], row_height, stroke=True, fill=False)
-                    draw_wrapped_campaign_name(c, row['campaign_name'], x_positions[0], y, col_widths[0], font_size=9)
-                    c.setFont("Helvetica", 8)
-                    def pr(ix, text):
-                        c.drawRightString(x_positions[ix] + col_widths[ix] - 8, y, text)
-                    def safe_get(row, key, default=0):
-                        val = row.get(key, default)
-                        if hasattr(val, 'iloc'):
-                            return val.iloc[0] if len(val) > 0 else default
-                        return val
-                    
-                    # Match regular campaigns column order: Campaign Name, Spend, Revenue, Net Profit, CTR, Bounce, CR, GR, NR
-                    pr(1, f"Rs {safe_get(row, 'spend'):.2f}")
-                    pr(2, f"Rs {safe_get(row, 'sales', safe_get(row, 'shopify_revenue')):.2f}")
-                    pr(3, f"Rs {safe_get(row, 'net_profit'):.2f}")
-                    pr(4, f"{safe_get(row, 'ctr'):.2f}%")
-                    pr(5, f"{safe_get(row, 'bounce_rate'):.2f}%")
-                    pr(6, f"{safe_get(row, 'conversion_rate'):.2f}%")
-                    pr(7, f"{safe_get(row, 'roas', safe_get(row, 'gross_roas')):.2f}")
-                    pr(8, f"{safe_get(row, 'net_roas'):.2f}")
-                    y -= row_height
-                return y
-            
-            # Draw PMF campaigns
-            y = draw_pmf_campaign_rows(pmf_campaigns, y)
-            
-            # PMF Total Row with enhanced styling (matching regular campaign sections)
-            pmf_total_spend = float(pmf_campaigns.get('spend', 0).sum()) if 'spend' in pmf_campaigns.columns else 0.0
-            if 'shopify_revenue' in pmf_campaigns.columns:
-                pmf_total_sales = float(pmf_campaigns['shopify_revenue'].sum())
-            elif 'sales' in pmf_campaigns.columns:
-                pmf_total_sales = float(pmf_campaigns['sales'].sum())
-            else:
-                pmf_total_sales = 0.0
-            pmf_total_cogs = float(pmf_campaigns.get('cogs', 0).sum()) if 'cogs' in pmf_campaigns.columns else 0.0
-            pmf_total_net_profit = pmf_total_sales - pmf_total_cogs - pmf_total_spend
-            
-            # CTR/CR from totals for consistency
-            pmf_clicks_tot = float(pmf_campaigns.get('clicks', 0).sum()) if 'clicks' in pmf_campaigns.columns else 0.0
-            pmf_impr_tot = float(pmf_campaigns.get('impressions', 0).sum()) if 'impressions' in pmf_campaigns.columns else 0.0
-            pmf_avg_ctr = (pmf_clicks_tot / pmf_impr_tot * 100.0) if pmf_impr_tot > 0 else (float(pmf_campaigns.get('ctr', 0).mean()) if 'ctr' in pmf_campaigns.columns else 0.0)
-            pmf_avg_bounce = float(pmf_campaigns.get('bounce_rate', 0).mean()) if 'bounce_rate' in pmf_campaigns.columns else 0.0
-            
-            # ROAS: prefer recompute from sums when possible
-            pmf_avg_gross_roas = (pmf_total_sales / pmf_total_spend) if pmf_total_spend > 0 else (float(pmf_campaigns.get('gross_roas', 0).mean()) if 'gross_roas' in pmf_campaigns.columns else float(pmf_campaigns.get('roas', 0).mean()) if 'roas' in pmf_campaigns.columns else 0.0)
-            pmf_avg_net_roas = ((pmf_total_sales - pmf_total_cogs) / pmf_total_spend) if pmf_total_spend > 0 and 'cogs' in pmf_campaigns.columns else (float(pmf_campaigns.get('net_roas', 0).mean()) if 'net_roas' in pmf_campaigns.columns else 0.0)
-            
-            # Calculate average conversion rate from individual campaigns in PMF section
-            pmf_avg_cr = float(pmf_campaigns.get('conversion_rate', 0).mean()) if 'conversion_rate' in pmf_campaigns.columns else 0.0
-            logger.info(f"PMF CR Debug: Individual CRs={pmf_campaigns.get('conversion_rate', []).tolist()}, Average CR={pmf_avg_cr:.2f}%")
-            
-            # Add debugging for all PMF metrics
-            logger.info(f"PMF Total Debug - Spend: {pmf_total_spend}, Sales: {pmf_total_sales}, COGS: {pmf_total_cogs}, Net Profit: {pmf_total_net_profit}")
-            logger.info(f"PMF Total Debug - CTR: {pmf_avg_ctr:.2f}%, Bounce: {pmf_avg_bounce:.2f}%, CR: {pmf_avg_cr:.2f}%")
-            logger.info(f"PMF Total Debug - Gross ROAS: {pmf_avg_gross_roas:.2f}, Net ROAS: {pmf_avg_net_roas:.2f}")
-            
-            # Minimal PMF total row styling
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 9)
-            c.drawString(x_positions[0] + 8, y, "PMF Total")
-            
-            # Calculate percentages for spend and sales
-            spend_percentage = round((pmf_total_spend / total_spend * 100), 1) if total_spend > 0 else 0.0
-            sales_percentage = round((pmf_total_sales / total_sales * 100), 1) if total_sales > 0 else 0.0
-            
-            def rtot(ix, text):
-                c.drawRightString(x_positions[ix] + col_widths[ix] - 8, y, text)
-            # First line: amounts only - Match regular campaigns column order
-            rtot(1, f"Rs {pmf_total_spend:.2f}")
-            rtot(2, f"Rs {pmf_total_sales:.2f}")
-            rtot(3, f"Rs {pmf_total_net_profit:.2f}")
-            rtot(4, f"{pmf_avg_ctr:.2f}%")
-            rtot(5, f"{pmf_avg_bounce:.2f}%")
-            rtot(6, f"{pmf_avg_cr:.2f}%")
-            rtot(7, f"{pmf_avg_gross_roas:.2f}")
-            rtot(8, f"{pmf_avg_net_roas:.2f}")
-            for i in range(len(col_widths)):
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, stroke=True, fill=False)
-            # Second line: percentages under Spend and Revenue
-            try:
-                c.setFont("Helvetica", 7)
-                c.setFillColorRGB(0, 0, 0)
-                c.drawRightString(x_positions[1] + col_widths[1] - 8, y - 14, f"({spend_percentage}%)")
-                c.drawRightString(x_positions[2] + col_widths[2] - 8, y - 14, f"({sales_percentage}%)")
-            except Exception:
-                pass
-            y -= 24
-        
-        # Only draw overall totals if there were sections with data (minimal styling)
-        if sections_drawn or not pmf_campaigns.empty:
-            # Add 20px space above overall total row
-            y -= 20
-            
-            # Minimal total row with uniform light background (no gradients)
-            c.setFillColorRGB(*light_gray)
-            c.rect(table_margin, y - 6, table_width, 22, fill=True, stroke=False)
-            # Ensure each cell has uniform background (override any potential gradients)
-            for i in range(len(col_widths)):
-                c.setFillColorRGB(*light_gray)
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, fill=True, stroke=False)
-            c.setFillColorRGB(*primary_color)
-            c.setFont("Helvetica-Bold", 10)
-            c.drawString(x_positions[0] + 8, y, "Overall Total")
-            def orr(ix, text):
-                c.drawRightString(x_positions[ix] + col_widths[ix] - 8, y, text)
-            # Prefer authoritative grand totals from dailyrollup
-            try:
-                # Use provided timeframe parameters if available, otherwise use timeframe_config
-                if timeframe_start is not None and timeframe_end is not None:
-                    # Convert datetime to date strings for the function
-                    start_date_str = timeframe_start.strftime('%Y-%m-%d') if hasattr(timeframe_start, 'strftime') else str(timeframe_start)
-                    end_date_str = timeframe_end.strftime('%Y-%m-%d') if hasattr(timeframe_end, 'strftime') else str(timeframe_end)
-                    gt = get_campaign_grand_total_for_pdf(start_date=start_date_str, end_date=end_date_str) or {}
-                else:
-                    # Use global timeframe from timeframe_config
-                    gt = get_campaign_grand_total_for_pdf() or {}
-                logger.info("Loaded dailyrollup grand total payload")
-                # Recalculate rates explicitly from provided totals for full consistency
-                gt_clicks = float(gt.get('clicks', 0) or 0)
-                gt_impr = float(gt.get('impressions', 0) or 0)
-                gt_lpv = float(gt.get('lpv', 0) or 0)
-                gt_ic = float(gt.get('initiate_checkout', 0) or 0)
-                gt_ctr = (gt_clicks / gt_impr * 100.0) if gt_impr > 0 else 0.0
-                gt_bounce = ((gt_clicks - gt_lpv) / gt_clicks * 100.0) if gt_clicks > 0 else 0.0
-                gt_checkout = (gt_ic / gt_lpv * 100.0) if gt_lpv > 0 else 0.0
-                gt_conv = (float(gt.get('shopify_orders', 0) or 0) / gt_clicks * 100.0) if gt_clicks > 0 else 0.0
-
-                orr(1, f"Rs {float(gt.get('spend', total_spend)):.2f}")
-                orr(2, f"Rs {float(gt.get('shopify_revenue', total_sales)):.2f}")
-                orr(3, f"Rs {float(gt.get('net_profit', total_net_profit) or 0):.2f}")
-                orr(4, f"{gt_ctr:.2f}%")
-                orr(5, f"{gt_bounce:.2f}%")
-                orr(6, f"{gt_conv:.2f}%")
-                orr(7, f"{float(gt.get('gross_roas', total_gross_roas)):.2f}")
-                orr(8, f"{float(gt.get('net_roas', total_net_roas)):.2f}")
-            except Exception:
-                # Fallback: use locally computed totals
-                orr(1, f"Rs {total_spend:.2f}")
-                orr(2, f"Rs {total_sales:.2f}")
-                orr(3, f"Rs {float(total_net_profit or 0):.2f}")
-                orr(4, f"{total_ctr:.2f}%")
-                orr(5, f"{total_bounce:.2f}%")
-                orr(6, f"{total_cr:.2f}%")
-                orr(7, f"{total_gross_roas:.2f}")
-                orr(8, f"{total_net_roas:.2f}")
-            c.setStrokeColorRGB(*border_color)
-            for i in range(len(col_widths)):
-                c.rect(x_positions[i], y - 6, col_widths[i], 22, stroke=True, fill=False)
-            # Add a note at the bottom of the table with enhanced styling
-            y -= 30
-            c.setFont("Helvetica-Oblique", 9)
-            c.setFillColorRGB(0.5, 0.1, 0.1)
-            c.drawString(table_margin, y, "Note: Campaign totals are computed from the displayed dailyrollup campaign data.")
-            c.setFillColorRGB(0, 0, 0)
-            y -= 25
-        else:
-            # If no campaigns found, add a note with enhanced styling
-            c.setFont("Helvetica", 11)
-            c.setFillColorRGB(*secondary_color)
-            c.drawString(table_margin, y, "No campaigns found")
-            y -= 25
-        
-        # Footer with enhanced styling
-        y -= 30
-        c.setFont("Helvetica", 9)
-        c.setFillColorRGB(*secondary_color)
-        c.drawString(margin, y, "Generated by Marketing Analytics System")
-        
-        c.save()
         logger.info(f"PDF report saved to: {report_name}")
         return report_name
     except Exception as e:
         logger.error(f"Failed to generate PDF report: {str(e)}")
         raise
+
+
+def _simple_email_body(today_str: str, chart_cids: list) -> str:
+    """Minimal fallback email body used when the Jinja2 template can't render."""
+    imgs = "".join(
+        f'<p><img src="cid:{cid}" alt="chart" style="max-width:600px;width:100%;height:auto;"></p>'
+        for cid in chart_cids
+    )
+    return (
+        f'<html><body style="font-family:Arial,sans-serif;color:#333;">'
+        f'<p>Daily Marketing Performance Report — <strong>{today_str}</strong></p>'
+        f'{imgs}'
+        f'<p><em>Full data in attached Excel &amp; PDF.</em></p>'
+        f'</body></html>'
+    )
+
 
 def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, timestamp_str, plot_files_param=None, product_report_param=None, file_paths_to_attach=None):
     logger.info("Preparing to send email via Microsoft Graph API...")
@@ -2056,14 +906,7 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     today_str = today.strftime('%Y-%m-%d') if isinstance(today, datetime) else today
 
     subject = f"Daily Marketing Performance Report - {today_str}"
-    email_body = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-        <p>Dear Team,</p>
-        <p>Please find below the Daily Marketing Performance Report for {today_str}.</p>
-        <h2>Montly Performance</h2>
-    """
-    
+
     daily_plot_cid = None
     historical_plot_cid = None
     shopify_profit_plot_cid = None
@@ -2142,39 +985,26 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
             graph_api_attachments.append(attachment_dict)
             logger.info(f"Added attachment: {descriptive_name} (Inline: {is_inline})")
 
-    # Conditionally add plot images to email_body after processing all attachments
-    if daily_plot_cid:
-        email_body += f"""
-        <p><img src=\"cid:{daily_plot_cid}\" alt=\"Daily Performance Plot\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>
-        """
+    # Collect chart CIDs for template rendering
+    chart_cids = [c for c in [daily_plot_cid, shopify_profit_plot_cid, hourly_sales_plot_cid, sales_by_state_pie_cid] if c]
+
+    # Render rich HTML email using Jinja2 template when PDF context is available
+    if _daily_email_context is not None:
+        try:
+            from report_renderer import render_email_daily
+            _daily_email_context.update({
+                "chart_cids": chart_cids,
+                "report_date": today_str,
+                "report_time": datetime.now(IST).strftime("%H:%M"),
+                "weekday": weekday,
+            })
+            email_body = render_email_daily(_daily_email_context)
+        except Exception as _render_err:
+            logger.warning(f"Email template render failed: {_render_err}; using fallback body")
+            email_body = _simple_email_body(today_str, chart_cids)
     else:
-        email_body += "<p><em>Daily Performance Plot unavailable. No data available for this period.</em></p>"
+        email_body = _simple_email_body(today_str, chart_cids)
 
-    if shopify_profit_plot_cid:
-        email_body += f"""
-        <p><img src=\"cid:{shopify_profit_plot_cid}\" alt=\"Daily Shopify Net Profit Plot\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>
-        """
-    else:
-        email_body += "<p><em>Daily Shopify Net Profit Plot unavailable. No data available for this period.</em></p>"
-
-    # NEW: Add Hourly Sales Plot for Last 7 Days
-    if hourly_sales_plot_cid:
-        email_body += f"""
-        <p><img src=\"cid:{hourly_sales_plot_cid}\" alt=\"Hourly Sales (Last 7 Days) Plot\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>
-        """
-    else:
-        email_body += "<p><em>Hourly Sales (Last 7 Days) Plot unavailable. No data available for this period.</em></p>"
-
-    if sales_by_state_pie_cid:
-        email_body += f"""
-        <p><img src=\"cid:{sales_by_state_pie_cid}\" alt=\"Sales by state\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>
-        """
-
-    email_body += f"""
-        <em>Generated automatically by the Marketing Insights System</em></p>
-    </body>
-    </html>
-    """
     body = {
         "contentType": "HTML",
         "content": email_body

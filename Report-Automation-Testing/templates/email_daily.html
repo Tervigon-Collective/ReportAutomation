@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Daily Marketing Report</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f5f7;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1a1a2e;">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+<tr><td align="center">
+<table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;">
+
+  <!-- HEADER -->
+  <tr>
+    <td style="background:#1a1a2e;border-radius:8px 8px 0 0;padding:24px 32px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td>
+            <div style="font-size:11px;color:#8892b0;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px;">Seleric</div>
+            <div style="font-size:20px;font-weight:700;color:#ffffff;">Daily Marketing Report</div>
+            <div style="font-size:12px;color:#8892b0;margin-top:4px;">{{ report_date }} &nbsp;·&nbsp; {{ report_time }} IST</div>
+          </td>
+          <td align="right" style="vertical-align:top;">
+            <div style="font-size:11px;color:#8892b0;">{{ weekday }}</div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- KPI STRIP -->
+  <tr>
+    <td style="background:#0f3460;padding:0 32px 0 32px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          {% set kpis = [
+            ('Revenue', total.sales | fmt_inr, total.sales_delta),
+            ('Ad Spend', total.ad_spend | fmt_inr, None),
+            ('Net Profit', total.net_profit | fmt_inr, total.profit_delta),
+            ('Blended ROAS', total.gross_roas | fmt_roas, None),
+          ] %}
+          {% for label, value, delta in kpis %}
+          <td width="25%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">
+            <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">{{ label }}</div>
+            <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-top:4px;">{{ value }}</div>
+            {% if delta %}
+            <div style="font-size:10px;color:{{ '#4ade80' if delta.startswith('+') else '#f87171' }};margin-top:2px;">{{ delta }} vs yesterday</div>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- CHANNEL BREAKDOWN -->
+  <tr>
+    <td style="background:#ffffff;padding:24px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:14px;">Channel Performance</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;"></th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Revenue</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Ad Spend</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">COGS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Net Profit</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Gross ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Net ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Orders</th>
+        </tr>
+        {% for ch_name, ch in [('Meta', meta), ('Google', google), ('Organic', organic)] %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;font-weight:600;color:#1a1a2e;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch_name }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.sales | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.ad_spend | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.cogs | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:600;color:{{ '#16a34a' if ch.net_profit >= 0 else '#dc2626' }};text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.net_profit | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.gross_roas | fmt_roas }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.net_roas | fmt_roas }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.order_count }}</td>
+        </tr>
+        {% endfor %}
+        <tr style="background:#1a1a2e;">
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;padding:10px 10px;">Total</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.sales | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.ad_spend | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.cogs | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:700;color:{{ '#4ade80' if total.net_profit >= 0 else '#f87171' }};text-align:right;padding:10px 10px;">{{ total.net_profit | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.gross_roas | fmt_roas }}</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.net_roas | fmt_roas }}</td>
+          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.order_count }}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- META FUNNEL -->
+  {% if funnel %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:14px;">Meta Funnel</div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          {% set funnel_steps = [
+            ('Impressions', funnel.impressions | int | fmt_num, '#6366f1'),
+            ('Clicks', funnel.clicks | int | fmt_num, '#8b5cf6'),
+            ('Add to Cart', funnel.add_to_cart | int | fmt_num, '#ec4899'),
+            ('Checkout', funnel.initiate_checkout | int | fmt_num, '#f59e0b'),
+            ('Orders', funnel.orders | int | fmt_num, '#10b981'),
+          ] %}
+          {% for stage, val, color in funnel_steps %}
+          <td style="text-align:center;padding:0 4px;">
+            <div style="background:{{ color }};border-radius:6px;padding:10px 6px;">
+              <div style="font-size:15px;font-weight:700;color:#ffffff;">{{ val }}</div>
+              <div style="font-size:9px;color:rgba(255,255,255,0.8);margin-top:2px;">{{ stage }}</div>
+            </div>
+            {% if not loop.last %}
+            <div style="font-size:16px;color:#cbd5e1;margin-top:6px;">→</div>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+      </table>
+      <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
+        <tr>
+          <td style="font-size:11px;color:#64748b;text-align:center;">CTR {{ funnel.ctr | fmt_pct }}</td>
+          <td style="font-size:11px;color:#64748b;text-align:center;">Bounce {{ funnel.bounce_rate | fmt_pct }}</td>
+          <td style="font-size:11px;color:#64748b;text-align:center;">CVR {{ funnel.conversion_rate | fmt_pct }}</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- TOP CAMPAIGNS -->
+  {% if campaigns %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:14px;">Campaign Performance</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Campaign</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Spend</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Revenue</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Net ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Orders</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Status</th>
+        </tr>
+        {% for row in campaigns %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:11px;color:#1e293b;padding:8px 8px;border-bottom:1px solid #f1f5f9;max-width:180px;overflow:hidden;">
+            {{ row.campaign_name | truncate(38) }}
+          </td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.spend | fmt_inr }}</td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.shopify_revenue | fmt_inr }}</td>
+          <td style="font-size:11px;font-weight:600;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;
+               color:{% if row.net_roas >= 2 %}#16a34a{% elif row.net_roas >= 1 %}#ca8a04{% else %}#dc2626{% endif %};">
+            {{ row.net_roas | fmt_roas }}
+          </td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.shopify_orders | int }}</td>
+          <td style="font-size:10px;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">
+            {% if row.net_roas <= 0 and row.spend > 500 %}
+            <span style="background:#fef2f2;color:#dc2626;padding:2px 6px;border-radius:4px;font-weight:600;">⚠ Review</span>
+            {% elif row.net_roas >= 2 %}
+            <span style="background:#f0fdf4;color:#16a34a;padding:2px 6px;border-radius:4px;font-weight:600;">✓ Strong</span>
+            {% else %}
+            <span style="background:#fafafa;color:#94a3b8;padding:2px 6px;border-radius:4px;">Active</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- INSIGHTS -->
+  {% if insights %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Key Insights</div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        {% for insight in insights %}
+        <tr>
+          <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">
+            <table cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="vertical-align:top;padding-right:10px;padding-top:1px;">
+                  <div style="width:6px;height:6px;border-radius:50%;background:#6366f1;margin-top:5px;"></div>
+                </td>
+                <td style="font-size:12px;color:#334155;line-height:1.6;">{{ insight }}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- CHARTS -->
+  {% if chart_cids %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Performance Charts</div>
+    </td>
+  </tr>
+  {% for cid in chart_cids %}
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ cid }}" alt="Chart" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;">
+    </td>
+  </tr>
+  {% endfor %}
+  {% endif %}
+
+  <!-- FOOTER -->
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 24px 32px;">
+      <div style="border-top:1px solid #e2e8f0;margin-bottom:16px;"></div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="font-size:10px;color:#94a3b8;">Auto-generated · {{ report_date }} {{ report_time }} IST</td>
+          <td style="font-size:10px;color:#94a3b8;text-align:right;">Full data in attached Excel &amp; PDF</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- BOTTOM BORDER -->
+  <tr>
+    <td style="background:#6366f1;border-radius:0 0 8px 8px;height:4px;"></td>
+  </tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

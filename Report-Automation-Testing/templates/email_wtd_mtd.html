@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WTD/MTD Report</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f5f7;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1a1a2e;">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+<tr><td align="center">
+<table width="660" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;">
+
+  <!-- HEADER -->
+  <tr>
+    <td style="background:#1a1a2e;border-radius:8px 8px 0 0;padding:24px 32px;">
+      <div style="font-size:11px;color:#8892b0;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px;">Seleric</div>
+      <div style="font-size:20px;font-weight:700;color:#ffffff;">Weekly &amp; Monthly Performance</div>
+      <div style="font-size:12px;color:#8892b0;margin-top:4px;">{{ report_date }} &nbsp;·&nbsp; {{ weekday }}</div>
+    </td>
+  </tr>
+
+  <!-- PERIOD TABS -->
+  <tr>
+    <td style="background:#0f3460;padding:16px 32px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td width="50%" style="padding-right:8px;">
+            <div style="background:#16213e;border-radius:6px;padding:12px 16px;">
+              <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">Week-to-Date</div>
+              <div style="font-size:11px;color:#cbd5e1;margin-top:2px;">{{ wtd_range }}</div>
+              <div style="font-size:22px;font-weight:700;color:#e2e8f0;margin-top:6px;">{{ wtd.total_revenue | fmt_inr }}</div>
+              <div style="font-size:11px;color:{{ '#4ade80' if wtd.net_profit >= 0 else '#f87171' }};margin-top:2px;">
+                Net {{ 'Profit' if wtd.net_profit >= 0 else 'Loss' }}: {{ wtd.net_profit | fmt_inr }}
+              </div>
+            </div>
+          </td>
+          <td width="50%" style="padding-left:8px;">
+            <div style="background:#16213e;border-radius:6px;padding:12px 16px;">
+              <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">Month-to-Date</div>
+              <div style="font-size:11px;color:#cbd5e1;margin-top:2px;">{{ mtd_range }}</div>
+              <div style="font-size:22px;font-weight:700;color:#e2e8f0;margin-top:6px;">{{ mtd.total_revenue | fmt_inr }}</div>
+              <div style="font-size:11px;color:{{ '#4ade80' if mtd.net_profit >= 0 else '#f87171' }};margin-top:2px;">
+                Net {{ 'Profit' if mtd.net_profit >= 0 else 'Loss' }}: {{ mtd.net_profit | fmt_inr }}
+              </div>
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- WTD CHANNEL TABLE -->
+  <tr>
+    <td style="background:#ffffff;padding:24px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">WTD Channel Breakdown</div>
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:12px;">{{ wtd_range }}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Channel</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Revenue</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Spend</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Net Profit</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Orders</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">CPO</th>
+        </tr>
+        {% for ch_name, ch in wtd_channels %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;font-weight:600;color:#1a1a2e;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch_name }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.sales | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.ad_spend | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:600;color:{{ '#16a34a' if ch.net_profit >= 0 else '#dc2626' }};text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.net_profit | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.gross_roas | fmt_roas }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.order_count }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.cpp | fmt_inr }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+
+  <!-- MTD CHANNEL TABLE -->
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">MTD Channel Breakdown</div>
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:12px;">{{ mtd_range }}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Channel</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Revenue</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Spend</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Net Profit</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Orders</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">CPO</th>
+        </tr>
+        {% for ch_name, ch in mtd_channels %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;font-weight:600;color:#1a1a2e;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch_name }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.sales | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.ad_spend | fmt_inr }}</td>
+          <td style="font-size:12px;font-weight:600;color:{{ '#16a34a' if ch.net_profit >= 0 else '#dc2626' }};text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.net_profit | fmt_inr }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.gross_roas | fmt_roas }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.order_count }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ ch.cpp | fmt_inr }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+
+  <!-- AMAZON -->
+  {% if amazon_wtd or amazon_mtd %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Amazon Performance</div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          {% if amazon_wtd %}
+          <td width="50%" style="padding-right:8px;">
+            <div style="background:#fef9ec;border:1px solid #fde68a;border-radius:6px;padding:14px 16px;">
+              <div style="font-size:10px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">Amazon WTD</div>
+              <div style="font-size:11px;color:#78350f;margin-top:2px;">{{ amazon_wtd.date_range }}</div>
+              <div style="margin-top:10px;">
+                <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">Revenue</span>
+                  <span style="font-size:12px;font-weight:700;color:#1a1a2e;">{{ amazon_wtd.revenue | fmt_inr }}</span>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">Ad Spend: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_wtd.spend | fmt_inr }}</span>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">ROAS: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_wtd.roas | fmt_roas }}</span>
+                </div>
+                <div>
+                  <span style="font-size:11px;color:#92400e;">Orders: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_wtd.orders }}</span>
+                </div>
+              </div>
+            </div>
+          </td>
+          {% endif %}
+          {% if amazon_mtd %}
+          <td width="50%" style="padding-left:8px;">
+            <div style="background:#fef9ec;border:1px solid #fde68a;border-radius:6px;padding:14px 16px;">
+              <div style="font-size:10px;color:#92400e;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">Amazon MTD</div>
+              <div style="font-size:11px;color:#78350f;margin-top:2px;">{{ amazon_mtd.date_range }}</div>
+              <div style="margin-top:10px;">
+                <div style="margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">Revenue: </span>
+                  <span style="font-size:12px;font-weight:700;color:#1a1a2e;">{{ amazon_mtd.revenue | fmt_inr }}</span>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">Ad Spend: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_mtd.spend | fmt_inr }}</span>
+                </div>
+                <div style="margin-bottom:6px;">
+                  <span style="font-size:11px;color:#92400e;">ROAS: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_mtd.roas | fmt_roas }}</span>
+                </div>
+                <div>
+                  <span style="font-size:11px;color:#92400e;">Orders: </span>
+                  <span style="font-size:12px;font-weight:600;color:#1a1a2e;">{{ amazon_mtd.orders }}</span>
+                </div>
+              </div>
+            </div>
+          </td>
+          {% endif %}
+        </tr>
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- INSIGHTS -->
+  {% if insights %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Key Insights</div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        {% for insight in insights %}
+        <tr>
+          <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">
+            <table cellpadding="0" cellspacing="0">
+              <tr>
+                <td style="vertical-align:top;padding-right:10px;padding-top:1px;">
+                  <div style="width:6px;height:6px;border-radius:50%;background:#6366f1;margin-top:5px;"></div>
+                </td>
+                <td style="font-size:12px;color:#334155;line-height:1.6;">{{ insight }}</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- TOP CAMPAIGNS THIS WEEK -->
+  {% if wtd_campaigns %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Top Campaigns (WTD)</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Campaign</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Spend</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Revenue</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Net ROAS</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Orders</th>
+        </tr>
+        {% for row in wtd_campaigns %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:11px;color:#1e293b;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.campaign_name | truncate(40) }}</td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.spend | fmt_inr }}</td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.shopify_revenue | fmt_inr }}</td>
+          <td style="font-size:11px;font-weight:600;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;
+               color:{% if row.net_roas >= 2 %}#16a34a{% elif row.net_roas >= 1 %}#ca8a04{% else %}#dc2626{% endif %};">
+            {{ row.net_roas | fmt_roas }}
+          </td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ row.shopify_orders | int }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- ATTACHED FILES NOTE -->
+  <tr>
+    <td style="background:#ffffff;padding:16px 32px 0 32px;">
+      <div style="background:#f1f5f9;border-radius:6px;padding:12px 16px;">
+        <div style="font-size:11px;font-weight:600;color:#475569;margin-bottom:6px;">Attached Reports</div>
+        <div style="font-size:11px;color:#64748b;line-height:1.8;">
+          📊 WTD/MTD Entity Report (Excel) &nbsp;·&nbsp;
+          📋 Daily Entity Report (Excel) &nbsp;·&nbsp;
+          📦 Amazon Campaign Report (Excel) &nbsp;·&nbsp;
+          📈 Product Profitability (Excel) &nbsp;·&nbsp;
+          📄 PDF Summaries
+        </div>
+      </div>
+    </td>
+  </tr>
+
+  <!-- FOOTER -->
+  <tr>
+    <td style="background:#ffffff;padding:16px 32px 24px 32px;">
+      <div style="border-top:1px solid #e2e8f0;margin-bottom:14px;"></div>
+      <div style="font-size:10px;color:#94a3b8;text-align:center;">
+        Auto-generated &nbsp;·&nbsp; {{ report_date }} &nbsp;·&nbsp; Seleric Marketing Intelligence
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#6366f1;border-radius:0 0 8px 8px;height:4px;"></td>
+  </tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

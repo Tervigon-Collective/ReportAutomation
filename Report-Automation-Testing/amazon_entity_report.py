@@ -389,12 +389,16 @@ def get_amazon_clickhouse_summary(
         pnl_fees_total = -(pnl_commission + pnl_closing + pnl_shipping + pnl_tax_withheld)
         pnl_cogs = pnl_product_cost + pnl_fees_total
 
-        # `items` from the P&L view = coalesce(items_settled, number_of_items_shipped, 0)
-        # is 0 for un-settled orders. Fall back to items_shipped from the orders
-        # table so we always have a meaningful units count.
-        pnl_units = int(_col_sum(pnl_df, "items"))
+        # Total quantity of items sold. Prefer items_shipped from the orders
+        # table (`gold.fct_amazon_sp_orders.number_of_items_shipped`) because
+        # it's populated for every order in the range regardless of settlement
+        # status. The P&L view's `items` column is built from
+        # coalesce(items_settled, number_of_items_shipped) and reads as 0 for
+        # un-settled orders, so summing it understates the true quantity.
+        # Fall back to the P&L items only if the orders table has nothing.
+        pnl_units = int(_col_sum(sp_df, "items_shipped"))
         if pnl_units == 0:
-            pnl_units = int(_col_sum(sp_df, "items_shipped"))
+            pnl_units = int(_col_sum(pnl_df, "items"))
 
         revenue = (
             pnl_gross if pnl_available and pnl_gross > 0

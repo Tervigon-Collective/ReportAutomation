@@ -1,14 +1,20 @@
-version: "3.9"
-
 services:
   report-automation:
     build: .
+    image: report-automation:latest
     container_name: report-automation
     restart: unless-stopped
+    environment:
+      TZ: UTC
     volumes:
       - ./.env:/app/.env:ro        # secrets — never baked into the image
       - reports:/tmp/reports        # persist generated Excel/CSV reports
       - logs:/tmp/logs              # persist job logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   reports:

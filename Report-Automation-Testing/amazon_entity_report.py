@@ -324,15 +324,20 @@ def get_amazon_clickhouse_summary(
 
     Returns Amazon revenue + ads spend + order counts plus the P&L-derived
     fields (cogs, units, net_profit, net_roas, gross_profit_after_fees,
-    net_payout). The Net Profit / Net ROAS use the same formula as the other
-    channels for an apples-to-apples comparison:
+    net_payout).
 
+    Amazon Net Profit uses an Amazon-specific COGS definition that bundles
+    the marketplace fees together with product cost so the bottom line
+    reflects the actual economics of the channel:
+
+        cogs       = product_cost + |commission| + |shipping|
+                                  + |closing|    + |tax_withheld|
         net_profit = revenue - cogs - ad_spend
         net_roas   = (revenue - cogs) / ad_spend   (0 if no spend)
 
-    Amazon-specific fees (commission/closing/shipping/tax_withheld/refunds)
-    are surfaced separately so they can be shown alongside if desired, but
-    don't enter the cross-channel comparison numbers.
+    Fees are stored as negative values in the P&L view (deductions from
+    gross), so we subtract their signed sum to add their magnitudes onto
+    the product cost.
 
     `pnl_available` is True only when the P&L view returned rows for the
     range, so callers can decide whether to render real values or "N/A".
@@ -370,9 +375,19 @@ def get_amazon_clickhouse_summary(
 
         pnl_available = not pnl_df.empty
         pnl_gross = _col_sum(pnl_df, "gross")
-        pnl_cogs = _col_sum(pnl_df, "cogs")
+        pnl_product_cost = _col_sum(pnl_df, "cogs")
         pnl_gross_profit = _col_sum(pnl_df, "gross_profit")
         pnl_net_payout = _col_sum(pnl_df, "net_payout")
+
+        # Marketplace fees are stored as negative values in the P&L view
+        # (deductions from gross). Sum them and flip the sign to get their
+        # magnitudes so they can be added to product cost as a true COGS.
+        pnl_commission = _col_sum(pnl_df, "commission")
+        pnl_closing = _col_sum(pnl_df, "closing")
+        pnl_shipping = _col_sum(pnl_df, "shipping")
+        pnl_tax_withheld = _col_sum(pnl_df, "tax_withheld")
+        pnl_fees_total = -(pnl_commission + pnl_closing + pnl_shipping + pnl_tax_withheld)
+        pnl_cogs = pnl_product_cost + pnl_fees_total
 
         # `items` from the P&L view = coalesce(items_settled, number_of_items_shipped, 0)
         # is 0 for un-settled orders. Fall back to items_shipped from the orders
@@ -399,6 +414,8 @@ def get_amazon_clickhouse_summary(
             "ads_sales": ads_sales,
             "sp_revenue": sp_revenue,
             "cogs": pnl_cogs,
+            "product_cost": pnl_product_cost,
+            "fees_total": pnl_fees_total,
             "units": pnl_units,
             "net_profit": net_profit,
             "net_roas": net_roas,
@@ -417,6 +434,8 @@ def get_amazon_clickhouse_summary(
             "spend": 0.0,
             "orders": 0,
             "cogs": 0.0,
+            "product_cost": 0.0,
+            "fees_total": 0.0,
             "units": 0,
             "net_profit": 0.0,
             "net_roas": 0.0,

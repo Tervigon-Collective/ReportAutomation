@@ -2120,7 +2120,7 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
 
             html_parts.append(f"""
                 <tr style="background-color: #FFF9E6;">
-                    <td style="padding: 7px; border: 1px solid #ddd; font-size: 12px;">Amazon*</td>
+                    <td style="padding: 7px; border: 1px solid #ddd; font-size: 12px;">Amazon</td>
                     <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_revenue:,.2f}</td>
                     {cogs_cell}
                     <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_spend:,.2f}</td>
@@ -2149,33 +2149,6 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         
         # Add separator between WTD and MTD
         html_parts.append("""<hr style="border: none; border-top: 2px solid #ddd; margin: 25px 0;">""")
-    
-    # Add disclaimer about Amazon data
-    if (amazon_wtd and amazon_wtd.get('available', False)) or (amazon_mtd and amazon_mtd.get('available', False)):
-        disclaimer_parts = []
-        
-        if amazon_wtd and amazon_wtd.get('available', False):
-            wtd_range = amazon_wtd.get('date_range', 'N/A')
-            disclaimer_parts.append(f"<strong>WTD:</strong> {wtd_range}")
-        
-        if amazon_mtd and amazon_mtd.get('available', False):
-            mtd_range = amazon_mtd.get('date_range', 'N/A')
-            disclaimer_parts.append(f"<strong>MTD:</strong> {mtd_range}")
-        
-        date_ranges_text = " | ".join(disclaimer_parts)
-        
-        # Amazon data in the WTD/MTD report uses days_lag=1 (yesterday is the last available day).
-        now = datetime.now(IST)
-        yesterday_display = (now - timedelta(days=1)).strftime('%d-%m-%Y')
-
-        html_parts.append(f"""
-            <div style="background-color: #FFF9E6; border-left: 3px solid #FFA500; padding: 10px; margin-top: 20px;">
-                <p style="color: #666; font-size: 11px; margin: 0; line-height: 1.5;">
-                    <strong>* Amazon Disclaimer:</strong> Amazon data ends on <strong>{yesterday_display}</strong> (1 day lag).
-                    Ranges: {date_ranges_text}. Not included in totals. COGS, Net Profit, Net ROAS, and Units unavailable.
-                </p>
-            </div>
-        """)
     
     return '\n'.join(html_parts)
 

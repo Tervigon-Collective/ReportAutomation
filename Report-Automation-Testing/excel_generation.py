@@ -54,7 +54,7 @@ def get_google_funnel_metrics(start_date=None, end_date=None):
                 end_date = end_date.date()
         else:
             # Use timeframe_config if dates not provided
-            timeframe = get_timeframe_config(start_date, end_date, days_range=1, use_fixed_dates=True)
+            timeframe = get_timeframe_config(start_date, end_date, days_range=1)
             start_date = timeframe['start_date'].date() if hasattr(timeframe['start_date'], 'date') else timeframe['start_date']
             end_date = timeframe['end_date'].date() if hasattr(timeframe['end_date'], 'date') else timeframe['end_date']
         
@@ -2061,7 +2061,7 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <p>Dear Team,</p>
         <p>Please find below the Daily Marketing Performance Report for {today_str}.</p>
-        <h2>Montly Performance</h2>
+        <h2>Monthly Performance</h2>
     """
     
     daily_plot_cid = None
@@ -2936,7 +2936,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
 def main():
     try:
         # Use our standardized timeframe configuration
-        timeframe = get_timeframe_config(days_range=1, use_fixed_dates=True)
+        timeframe = get_timeframe_config(days_range=1)
         today, timestamp_str = timeframe['today'], timeframe['timestamp_str']
         from datetime import datetime
         if isinstance(today, str):

@@ -72,29 +72,20 @@ def get_wtd_mtd_timeframes():
     """
     Calculate Week-to-Date (WTD) and Month-to-Date (MTD) timeframes.
     Returns dict with 'wtd' and 'mtd' keys, each containing start_date and end_date.
-    
-    WTD Logic:
-    - Last 7 days (including today)
-    
-    MTD Logic:
-    - Last 30 days (including today)
+
+    WTD: Monday of the current week to today (calendar week, consistent with Amazon).
+    MTD: 1st of the current month to today.
+    Daily: Previous day only.
     """
     now = datetime.now(IST)
-    
-    # HARDCODED DATES FOR TESTING - Comment out for production
-    # wtd_start = datetime(2025, 10, 6, 0, 0, 0, 0, IST)
-    # wtd_end = datetime(2025, 10, 7, 23, 59, 59, 0, IST)
-    # mtd_start = datetime(2025, 10, 1, 0, 0, 0, 0, IST)
-    # mtd_end = datetime(2025, 10, 7, 23, 59, 59, 0, IST)
-    
-    # PRODUCTION CODE
-    # Week-to-Date: Last 7 days (including today)
+
+    # Week-to-Date: Monday of the current week to today
     wtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    wtd_start = (wtd_end - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    # Month-to-Date: Last 30 days (including today)
+    wtd_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # Month-to-Date: 1st of current month to today
     mtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    mtd_start = (mtd_end - timedelta(days=29)).replace(hour=0, minute=0, second=0, microsecond=0)
+    mtd_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     
     # Daily: Previous day only (for daily entity report sheet)
     daily_date = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1418,13 +1409,16 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     f"[{label}] Amazon calendar range: "
                     f"{amz_start.strftime('%Y-%m-%d')} to {amz_end.strftime('%Y-%m-%d')}"
                 )
+                # MTD: no lag — show all orders through today.
+                # WTD/Daily: lag 1 day to avoid empty rows from the ads gold table.
+                lag = 0 if timeframe_key == 'mtd' else 1
                 add_amazon_sheets_for_timeframe(
                     writer,
                     timeframe_key=timeframe_key,
                     start_date=amz_start,
                     end_date=amz_end,
                     round_for_output_fn=round_for_output,
-                    days_lag=1,
+                    days_lag=lag,
                 )
             except Exception as e:
                 print(f"[{label}] Failed to add ClickHouse Amazon sheets: {e}")
@@ -2170,15 +2164,14 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         
         date_ranges_text = " | ".join(disclaimer_parts)
         
-        # Calculate 2 days earlier date for disclaimer
+        # Amazon data in the WTD/MTD report uses days_lag=1 (yesterday is the last available day).
         now = datetime.now(IST)
-        two_days_ago = (now - timedelta(days=2))
-        two_days_ago_display = two_days_ago.strftime('%d-%m-%Y')
-        
+        yesterday_display = (now - timedelta(days=1)).strftime('%d-%m-%Y')
+
         html_parts.append(f"""
             <div style="background-color: #FFF9E6; border-left: 3px solid #FFA500; padding: 10px; margin-top: 20px;">
                 <p style="color: #666; font-size: 11px; margin: 0; line-height: 1.5;">
-                    <strong>* Amazon Disclaimer:</strong> Amazon data ends on <strong>{two_days_ago_display}</strong> (2 days earlier). 
+                    <strong>* Amazon Disclaimer:</strong> Amazon data ends on <strong>{yesterday_display}</strong> (1 day lag).
                     Ranges: {date_ranges_text}. Not included in totals. COGS, Net Profit, Net ROAS, and Units unavailable.
                 </p>
             </div>
@@ -2603,9 +2596,9 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             else:
                 logger.warning("No Amazon data available for WTD")
 
-            # Fetch Amazon data for MTD (1st of month -> yesterday)
+            # Fetch Amazon data for MTD (1st of month -> today, no lag)
             mtd_start = amazon_timeframes['mtd']['start_date']
-            mtd_end = amazon_timeframes['mtd']['end_date'] - timedelta(days=1)
+            mtd_end = amazon_timeframes['mtd']['end_date']
             amazon_mtd = get_amazon_summary_metrics(mtd_start, mtd_end)
             if amazon_mtd.get('available', False):
                 logger.info(f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, Range={amazon_mtd['date_range']}")

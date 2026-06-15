@@ -175,8 +175,9 @@ def get_timeframe_config(start_date=None, end_date=None, days_range: int | None 
             flag_env = os.environ.get('USE_FIXED_DATES', '').strip().lower()
             flag = flag_env in ('1', 'true', 'yes')
         if flag:
-            fixed_start_str = os.environ.get('FIXED_START_DATE', today)
-            fixed_end_str = os.environ.get('FIXED_END_DATE', today)
+            _now_ist_str = datetime.now(IST).strftime('%Y-%m-%d')
+            fixed_start_str = os.environ.get('FIXED_START_DATE', _now_ist_str)
+            fixed_end_str = os.environ.get('FIXED_END_DATE', _now_ist_str)
             start_dt = _parse_date_input(fixed_start_str, is_end=False)
             end_dt = _parse_date_input(fixed_end_str, is_end=True)
     except Exception:
@@ -186,9 +187,8 @@ def get_timeframe_config(start_date=None, end_date=None, days_range: int | None 
     if end_dt < start_dt:
         start_dt, end_dt = end_dt, start_dt
 
-    # Persist the resolved timeframe to globals for future callers
-    # Only set global dates if they weren't already set (to preserve our initialization)
-    if _GLOBAL_START_DT is None or _GLOBAL_END_DT is None:
+    # Persist the resolved timeframe to globals only when both are unset.
+    if _GLOBAL_START_DT is None and _GLOBAL_END_DT is None:
         set_global_dates(start_dt, end_dt)
 
     timestamp_str = f"{end_dt.strftime('%Y-%m-%d')} / {end_dt.strftime('%I:%M %p')} IST"
@@ -209,7 +209,7 @@ def get_current_timestamp():
     return tf['today'], tf['timestamp_str']
 
 
-# Initialize default dates to current date when module is imported
+# Initialize default dates to current IST date when module is imported
 from datetime import datetime
-today = datetime.now().strftime('%Y-%m-%d')
-set_global_dates(today, today)
+_today_ist = datetime.now(IST).strftime('%Y-%m-%d')
+set_global_dates(_today_ist, _today_ist)

@@ -114,35 +114,36 @@ def get_amazon_calendar_timeframes():
     """
     Calendar-based WTD/MTD for Amazon (per business requirement).
 
-    - WTD: start of current week (Monday) -> today (end of day)
-    - MTD: 1st of current month         -> today (end of day)
+    - WTD: start of current week (Monday) -> today (end of day); callers apply
+      `days_lag=1` (or subtract 1 day) so the effective window ends yesterday.
+    - MTD: 1st of current month -> yesterday (end of day)
 
-    Note on lag:
-      gold.fct_amazon_ads_campaigns_daily lags ~1 day, so a `days_lag=1`
-      is still applied at the call site (add_amazon_sheets_for_timeframe()
-      and the email-summary block) to avoid including today's empty row.
+    Amazon gold tables lag ~1 day, so MTD must not include today.
 
     To switch the week to start on Sunday, change `now.weekday()` below to
     `(now.weekday() + 1) % 7`.
     """
     now = datetime.now(IST)
-    end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    yesterday_end = (now - timedelta(days=1)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
     # Monday-start week: weekday() == 0 on Monday, 6 on Sunday.
     wtd_start = (
-        (end - timedelta(days=now.weekday()))
+        (today_end - timedelta(days=now.weekday()))
         .replace(hour=0, minute=0, second=0, microsecond=0)
     )
-    mtd_start = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    mtd_start = today_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return {
         'wtd': {
             'start_date': wtd_start,
-            'end_date': end,
+            'end_date': today_end,
             'label': 'Week-to-Date (calendar, Mon-today)',
         },
         'mtd': {
             'start_date': mtd_start,
-            'end_date': end,
-            'label': 'Month-to-Date (calendar, 1st-today)',
+            'end_date': yesterday_end,
+            'label': 'Month-to-Date (calendar, 1st-yesterday)',
         },
     }
 
@@ -1392,7 +1393,7 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                         summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
             
             # Amazon sheets from ClickHouse gold (separate from Meta/Google/Organic).
-            # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-today),
+            # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
             # unlike Meta/Google which use the rolling 7/30-day window above.
             print(f"\n[{label}] Processing Amazon data (ClickHouse, calendar window)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
@@ -1409,8 +1410,8 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     f"[{label}] Amazon calendar range: "
                     f"{amz_start.strftime('%Y-%m-%d')} to {amz_end.strftime('%Y-%m-%d')}"
                 )
-                # MTD: no lag — show all orders through today.
-                # WTD/Daily: lag 1 day to avoid empty rows from the ads gold table.
+                # MTD calendar end is already yesterday; WTD/Daily use lag=1
+                # so the effective ads window also ends yesterday.
                 lag = 0 if timeframe_key == 'mtd' else 1
                 add_amazon_sheets_for_timeframe(
                     writer,
@@ -1834,12 +1835,27 @@ def get_amazon_summary_metrics(start_date: datetime, end_date: datetime) -> dict
         dict: Amazon metrics including revenue, spend, orders, and date range
     """
     try:
-        # Format dates
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         start_display = start_date.strftime('%d-%m-%Y')
         end_display = end_date.strftime('%d-%m-%Y')
-        
+
+        if end_date < start_date:
+            logger.warning(
+                "Amazon summary range invalid (%s > %s); returning empty metrics",
+                start_str,
+                end_str,
+            )
+            return {
+                'revenue': 0.0,
+                'spend': 0.0,
+                'orders': 0,
+                'start_date': start_display,
+                'end_date': end_display,
+                'date_range': f"{start_display} to {end_display}",
+                'available': False,
+            }
+
         return get_amazon_clickhouse_summary(start_str, end_str)
     except Exception as e:
         logger.error(f"Error fetching Amazon summary metrics: {e}")
@@ -2550,8 +2566,8 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 logger.warning(f"Could not extract daily efficiency metrics: {e}")
         
         # Extract Amazon metrics for WTD and MTD date ranges.
-        # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-today),
-        # then the end is shifted back 1 day to account for gold-table lag.
+        # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
+        # then WTD end is shifted back 1 day to account for gold-table lag.
         amazon_wtd = None
         amazon_mtd = None
         try:
@@ -2569,7 +2585,7 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             else:
                 logger.warning("No Amazon data available for WTD")
 
-            # Fetch Amazon data for MTD (1st of month -> today, no lag)
+            # Fetch Amazon data for MTD (1st of month -> yesterday)
             mtd_start = amazon_timeframes['mtd']['start_date']
             mtd_end = amazon_timeframes['mtd']['end_date']
             amazon_mtd = get_amazon_summary_metrics(mtd_start, mtd_end)

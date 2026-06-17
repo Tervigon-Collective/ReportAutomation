@@ -712,16 +712,18 @@ def add_amazon_sheets_for_timeframe(
     amazon_end = end_date - timedelta(days=days_lag)
 
     # Guard: lag can push end before start (e.g. run on Monday with Mon-start WTD + 1-day lag,
-    # or run on the 1st of the month with a calendar-MTD window + 1-day lag).
+    # or run on the 1st of the month when MTD ends yesterday in the prior month).
     if amazon_end < amazon_start:
         if timeframe_key == 'mtd':
-            # Anchor to 1st of amazon_end's month
-            amazon_start = amazon_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
-            # For WTD (and any other weekly window): anchor to Monday of amazon_end's week
-            amazon_start = (amazon_end - timedelta(days=amazon_end.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
+            print(
+                f"[{timeframe_key}] Amazon MTD has no complete days yet "
+                f"({amazon_start.strftime('%Y-%m-%d')} > {amazon_end.strftime('%Y-%m-%d')}); skipping sheets"
             )
+            return
+        # For WTD (and any other weekly window): anchor to Monday of amazon_end's week
+        amazon_start = (amazon_end - timedelta(days=amazon_end.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
 
     amazon_start_str = amazon_start.strftime("%Y-%m-%d")
     amazon_end_str = amazon_end.strftime("%Y-%m-%d")

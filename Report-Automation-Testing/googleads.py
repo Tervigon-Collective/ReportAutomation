@@ -133,7 +133,7 @@ def get_google_ads_total_spend():
               AND campaign.status != REMOVED
             LIMIT 100
         """
-        endpoint = f"https://googleads.googleapis.com/v20/customers/{customer_id}/googleAds:search"
+        endpoint = f"https://googleads.googleapis.com/v24/customers/{customer_id}/googleAds:search"
         headers = {
             "Content-Type": "application/json",
             "developer-token": developer_token,
@@ -212,7 +212,7 @@ def get_th_account_metrics(date=None):
             WHERE segments.date = '{date}'
         """
         
-        endpoint = f"https://googleads.googleapis.com/v20/customers/{customer_id}/googleAds:search"
+        endpoint = f"https://googleads.googleapis.com/v24/customers/{customer_id}/googleAds:search"
         headers = {
             "Content-Type": "application/json",
             "developer-token": developer_token,
@@ -340,7 +340,7 @@ def extract_google_ads_data():
             LIMIT 100
         """
         
-        endpoint = f"https://googleads.googleapis.com/v20/customers/{customer_id}/googleAds:search"
+        endpoint = f"https://googleads.googleapis.com/v24/customers/{customer_id}/googleAds:search"
         
         headers = {
             "Content-Type": "application/json",

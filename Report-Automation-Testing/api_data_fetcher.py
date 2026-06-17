@@ -511,14 +511,13 @@ def fetch_net_profit_from_db(n_days: int = 30) -> dict:
     """
     Calculate net profit directly from the database for the last n_days.
 
-    Formula per day:
-        net_profit = revenue_ex_gst - cogs - meta_spend - google_spend
-
-    Where:
-        revenue_ex_gst : shopify_orders.total_price_amount / GST_DIVISOR (non-cancelled orders)
-        cogs           : SUM(line_item.quantity * variant.unit_cost_amount)
-        meta_spend     : SUM(dw_meta_ads_attribution.spend)
-        google_spend   : SUM(dw_google_ads_attribution.cost_amount)
+    Sources chosen to match what the backend API computes:
+        revenue_ex_gst : shopify_orders.total_price_amount / GST_DIVISOR (all non-cancelled orders)
+        cogs           : SUM(line_item.quantity * variant.unit_cost_amount) — matches API exactly
+        meta_spend     : SUM(ads_insights_hourly.spend) — raw Meta hourly table, matches API Facebook spend
+        google_spend   : SUM(dw_google_ads_attribution.cost_amount) — comprehensive Google spend
+                         NOTE: the API backend has incomplete Google spend data (shows 0 on most days);
+                         this DB source is more accurate for Google.
 
     Returns:
         {
@@ -531,10 +530,8 @@ def fetch_net_profit_from_db(n_days: int = 30) -> dict:
             }
         }
     """
-    from revenue_gst import _gst_divisor
     try:
         engine = get_db_engine()
-        gst_div = _gst_divisor()
 
         query = text("""
             WITH date_series AS (
@@ -564,11 +561,13 @@ def fetch_net_profit_from_db(n_days: int = 30) -> dict:
                   AND DATE(o.processed_at_ist) >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
                 GROUP BY 1
             ),
+            -- Use ads_insights_hourly for Meta spend (raw Meta table) — matches API Facebook spend.
+            -- dw_meta_ads_attribution.spend only covers campaigns with attributed orders (~40% of actual spend).
             meta_spend AS (
                 SELECT
                     date_start AS sale_date,
                     SUM(spend) AS meta_spend
-                FROM dw_meta_ads_attribution
+                FROM ads_insights_hourly
                 WHERE date_start >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
                 GROUP BY 1
             ),
@@ -582,14 +581,14 @@ def fetch_net_profit_from_db(n_days: int = 30) -> dict:
             )
             SELECT
                 d.sale_date,
-                COALESCE(r.gross_revenue, 0)    AS gross_revenue,
-                COALESCE(c.total_cogs, 0)       AS cogs,
-                COALESCE(ms.meta_spend, 0)      AS meta_spend,
-                COALESCE(gs.google_spend, 0)    AS google_spend
+                COALESCE(r.gross_revenue, 0)     AS gross_revenue,
+                COALESCE(c.total_cogs, 0)        AS cogs,
+                COALESCE(ms.meta_spend, 0)       AS meta_spend,
+                COALESCE(gs.google_spend, 0)     AS google_spend
             FROM date_series d
-            LEFT JOIN revenue r      ON d.sale_date = r.sale_date
-            LEFT JOIN cogs c         ON d.sale_date = c.sale_date
-            LEFT JOIN meta_spend ms  ON d.sale_date = ms.sale_date
+            LEFT JOIN revenue r       ON d.sale_date = r.sale_date
+            LEFT JOIN cogs c          ON d.sale_date = c.sale_date
+            LEFT JOIN meta_spend ms   ON d.sale_date = ms.sale_date
             LEFT JOIN google_spend gs ON d.sale_date = gs.sale_date
             ORDER BY d.sale_date
         """)
@@ -604,7 +603,7 @@ def fetch_net_profit_from_db(n_days: int = 30) -> dict:
             }
 
         df = df.copy()
-        df["revenue"] = pd.to_numeric(df["gross_revenue"], errors="coerce").fillna(0) / gst_div
+        df["revenue"] = apply_net_revenue_column(df["gross_revenue"])
         df["cogs"] = pd.to_numeric(df["cogs"], errors="coerce").fillna(0)
         df["meta_spend"] = pd.to_numeric(df["meta_spend"], errors="coerce").fillna(0)
         df["google_spend"] = pd.to_numeric(df["google_spend"], errors="coerce").fillna(0)

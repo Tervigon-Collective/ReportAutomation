@@ -14,7 +14,7 @@ import logging
 import matplotlib
 from api_data_fetcher import (
     fetch_db_sales,
-    fetch_net_profit_single_day,
+    fetch_net_profit_from_db,
     fetch_shopify_sales_by_state,
     get_api_headers,
     set_api_bearer_token,
@@ -264,51 +264,35 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
     
-    # Fetch net profit data from API to calculate net ROAS date-wise
-    print("Fetching net profit data from API to calculate net ROAS...")
-    net_profit_data = fetch_net_profit_single_day(start_date_str, end_date_str)
-    
-    # Create lookup dictionaries for API data
+    # Fetch net profit data from DB to calculate net ROAS date-wise
+    print("Fetching net profit data from DB to calculate net ROAS...")
+    db_result = fetch_net_profit_from_db(n_days=30)
+    db_df = db_result.get("dailyBreakdown", pd.DataFrame())
+
+    # Create lookup dictionary keyed by date string
     api_data_lookup = {}
-    
-    if net_profit_data and net_profit_data.get('success') and net_profit_data.get('data'):
-        daily_breakdowns = net_profit_data.get('data', {}).get('dailyBreakdowns', [])
-        print(f"Loaded {len(daily_breakdowns)} days of net profit data from API")
-        
-        for record in daily_breakdowns:
-            date_str = record.get('date')
-            if date_str:
-                revenue = float(record.get('revenue', 0) or 0)
-                cogs = float(record.get('cogs', 0) or 0)
-                ad_spend_obj = record.get('adSpend', {})
-                # Handle both object format and single number format
-                if isinstance(ad_spend_obj, dict):
-                    ad_spend = float(ad_spend_obj.get('total', 0) or 0)
-                else:
-                    ad_spend = float(ad_spend_obj or 0)
-                
-                # Calculate net ROAS: (revenue - cogs) / ad_spend
-                if ad_spend > 0:
-                    net_roas = (revenue - cogs) / ad_spend
-                else:
-                    net_roas = 0.0
-                
-                api_data_lookup[date_str] = {
-                    'revenue': revenue,
-                    'ad_spend': ad_spend,
-                    'cogs': cogs,
-                    'net_roas': round(net_roas, 2),
-                    'net_profit': float(record.get('netProfit', 0) or 0)
-                }
-        
+
+    if not db_df.empty:
+        print(f"Loaded {len(db_df)} days of net profit data from DB")
+        for _, row in db_df.iterrows():
+            date_str = str(row['sale_date'])[:10]
+            revenue  = float(row.get('revenue', 0) or 0)
+            cogs     = float(row.get('cogs', 0) or 0)
+            ad_spend = float(row.get('total_ad_spend', 0) or 0)
+            net_roas = round((revenue - cogs) / ad_spend, 2) if ad_spend > 0 else 0.0
+            api_data_lookup[date_str] = {
+                'revenue':    revenue,
+                'ad_spend':   ad_spend,
+                'cogs':       cogs,
+                'net_roas':   net_roas,
+                'net_profit': float(row.get('net_profit', 0) or 0),
+            }
         print(f"Processed {len(api_data_lookup)} days of data with calculated net ROAS")
-        # Verify we're using net_roas, not gross_roas
-        sample_record = next(iter(api_data_lookup.values())) if api_data_lookup else {}
-        if sample_record:
-            print(f"Sample API record - revenue: {sample_record.get('revenue', 0)}, cogs: {sample_record.get('cogs', 0)}, ad_spend: {sample_record.get('ad_spend', 0)}, net_roas: {sample_record.get('net_roas', 0)}")
-            print("Using calculated net_roas for plotting (accounts for COGS and costs)")
+        sample = next(iter(api_data_lookup.values())) if api_data_lookup else {}
+        if sample:
+            print(f"Sample DB record - revenue: {sample['revenue']}, cogs: {sample['cogs']}, ad_spend: {sample['ad_spend']}, net_roas: {sample['net_roas']}")
     else:
-            logger.warning("Failed to fetch net profit data from API. Falling back to gross ROAS fallback.")
+        logger.warning("Failed to fetch net profit data from DB. Falling back to gross ROAS fallback.")
 
     # Process data for plotting
     dates = []
@@ -1043,48 +1027,40 @@ def plot_daily_shopify_profit(save_path=None):
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         
-        logger.info(f"Fetching net profit data from {start_str} to {end_str}")
-        
-        # Fetch data from the net_profit_single_day API endpoint via api_data_fetcher
-        api_response = fetch_net_profit_single_day(start_str, end_str)
-        
-        if not api_response.get('success', False):
-            logger.error("Failed to fetch net profit data from API")
+        logger.info(f"Fetching net profit data from DB for last 30 days")
+
+        db_result = fetch_net_profit_from_db(n_days=30)
+        db_df = db_result.get("dailyBreakdown", pd.DataFrame())
+        totals = db_result["totals"]
+
+        if db_df.empty:
+            logger.error("No net profit data returned from DB")
             return None
-            
-        data = api_response['data']
-        daily_breakdowns = data['dailyBreakdowns']
-        totals = data['totals']
-        
-        logger.info(f"Successfully fetched {len(daily_breakdowns)} days of net profit data from /api/net_profit_single_day")
-        logger.info(f"API response totals: Revenue=₹{totals['revenue']:,.2f}, COGS=₹{totals['cogs']:,.2f}, Ad Spend=₹{totals['adSpend']:,.2f}, Net Profit=₹{totals['netProfit']:,.2f}")
-        
-        # Process data for plotting from API response
-        # Each day_data contains: date, revenue, cogs, adSpend{facebook, google, total}, netProfit
+
+        logger.info(f"Fetched {len(db_df)} days of net profit data from DB")
+        logger.info(f"DB totals: Revenue=₹{totals['revenue']:,.2f}, COGS=₹{totals['cogs']:,.2f}, Ad Spend=₹{totals['adSpend']:,.2f}, Net Profit=₹{totals['netProfit']:,.2f}")
+
         dates = []
         revenues = []
         cogs = []
         ad_spends = []
         net_profits = []
-        
-        for day_data in daily_breakdowns:
+
+        for _, row in db_df.iterrows():
             try:
-                date = pd.to_datetime(day_data['date'])
-                dates.append(date)
-                revenues.append(float(day_data['revenue']))
-                cogs.append(float(day_data['cogs']))
-                # adSpend is an object with facebook, google, and total keys
-                ad_spends.append(float(day_data['adSpend']['total']))
-                net_profits.append(float(day_data['netProfit']))
+                dates.append(pd.to_datetime(row['sale_date']))
+                revenues.append(float(row['revenue']))
+                cogs.append(float(row['cogs']))
+                ad_spends.append(float(row['total_ad_spend']))
+                net_profits.append(float(row['net_profit']))
             except (ValueError, KeyError) as e:
-                logger.warning(f"Skipping invalid day data: {day_data}, error: {e}")
+                logger.warning(f"Skipping invalid DB row: {row.to_dict()}, error: {e}")
                 continue
-        
+
         if not dates:
             logger.error("No valid data points for net profit plotting")
             return None
-        
-        # Create DataFrame
+
         df = pd.DataFrame({
             'Date': dates,
             'Revenue': revenues,

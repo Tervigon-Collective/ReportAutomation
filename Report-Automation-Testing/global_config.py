@@ -46,7 +46,7 @@ class GlobalConfig:
                 os.environ[key_name] = config['value']
             
             # Load service-specific configurations
-            services = ['Google Ads', 'Facebook Ads', 'Shopify', 'Gemini']
+            services = ['Google Ads', 'Facebook Ads', 'Shopify', 'Azure OpenAI']
             for service in services:
                 service_config = env_config.get_by_service(service)
                 if service_config:
@@ -105,9 +105,9 @@ class GlobalConfig:
         """Get Shopify configuration."""
         return self.get_service_config('Shopify')
     
-    def get_gemini_config(self) -> Dict[str, Any]:
-        """Get Gemini configuration."""
-        return self.get_service_config('Gemini')
+    def get_azure_openai_config(self) -> Dict[str, Any]:
+        """Get Azure OpenAI configuration."""
+        return self.get_service_config('Azure OpenAI')
     
     def reload(self) -> bool:
         """
@@ -198,9 +198,9 @@ def get_shopify_config() -> Dict[str, Any]:
     """Get Shopify configuration."""
     return global_config.get_shopify_config()
 
-def get_gemini_config() -> Dict[str, Any]:
-    """Get Gemini configuration."""
-    return global_config.get_gemini_config()
+def get_azure_openai_config() -> Dict[str, Any]:
+    """Get Azure OpenAI configuration."""
+    return global_config.get_azure_openai_config()
 
 def reload_global_config() -> bool:
     """Reload all global configurations."""
@@ -276,7 +276,7 @@ if __name__ == "__main__":
     
     # Show service configurations
     print("\nService Configurations:")
-    for service in ['Google Ads', 'Facebook Ads', 'Shopify', 'Gemini']:
+    for service in ['Google Ads', 'Facebook Ads', 'Shopify', 'Azure OpenAI']:
         config = global_config.get_service_config(service)
         print(f"  {service}: {len(config)} variables")
     
@@ -286,7 +286,9 @@ if __name__ == "__main__":
         'TH_GOOGLE_ADS_CUSTOMER_ID',
         'TH_SHOPIFY_STORE',
         'Socialpepper_FB_AD_ACCOUNT_ID',
-        'GEMINI_API_KEY'
+        'AZURE_OPENAI_API_KEY',
+        'AZURE_OPENAI_ENDPOINT',
+        'AZURE_DEPLOYMENT',
     ]
     
     for key in example_keys:

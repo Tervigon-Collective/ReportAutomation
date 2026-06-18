@@ -22,6 +22,7 @@ from api_data_fetcher import (
 )
 from revenue_gst import apply_net_revenue_column
 from global_config import get_global_config, get_facebook_ads_config
+from channel_performance import plot_channel_performance_daily
 matplotlib.use('Agg')
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 
@@ -1704,6 +1705,22 @@ def generate_plots_for_email(
         logger.info(f"Sales by state pie chart saved to: {saved_path}")
     else:
         logger.warning("Sales by state pie chart not generated (no data or error)")
+
+    logger.info(
+        "Generating daily channel performance chart for %s...",
+        sales_range_end,
+    )
+    plot_file = os.path.join(
+        report_path, f"channel_performance_daily_{sales_range_end}.png"
+    )
+    saved_path = plot_channel_performance_daily(
+        sales_range_end, save_path=plot_file
+    )
+    if saved_path and saved_path.endswith(".png"):
+        plot_files.append(saved_path)
+        logger.info(f"Channel performance chart saved to: {saved_path}")
+    else:
+        logger.warning("Channel performance chart not generated (no data or error)")
 
     # Plot Hourly AOV if data is provided
     if hourly_aov_data is not None and not hourly_aov_data.empty:

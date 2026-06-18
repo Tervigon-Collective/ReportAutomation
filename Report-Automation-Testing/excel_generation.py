@@ -2069,6 +2069,7 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     shopify_profit_plot_cid = None
     hourly_sales_plot_cid = None  # NEW: For hourly sales plot
     sales_by_state_pie_cid = None
+    channel_performance_cid = None
 
     graph_api_attachments = [] # This will hold the attachments in Graph API format
 
@@ -2111,6 +2112,13 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
                 descriptive_name = f"Sales by state — pie chart - {today_str}.png"
                 sales_by_state_pie_cid = f"sales_by_state_pie_{today_str}"
                 content_id = sales_by_state_pie_cid
+                is_inline = True
+            elif 'channel_performance_daily' in base_filename:
+                descriptive_name = f"Channel Performance (Daily) - {today_str}.png"
+                m = re.search(r"channel_performance_daily_(\d{4}-\d{2}-\d{2})", base_filename)
+                chart_day = m.group(1) if m else today_str
+                channel_performance_cid = f"channel_performance_daily_{chart_day}"
+                content_id = channel_performance_cid
                 is_inline = True
             elif 'historical_insights' in base_filename:
                 descriptive_name = f"Historical Trends Plot - {today_str}.png"
@@ -2157,7 +2165,15 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     else:
         email_body += "<p><em>Daily Shopify Net Profit Plot unavailable. No data available for this period.</em></p>"
 
-    # NEW: Add Hourly Sales Plot for Last 7 Days
+    if channel_performance_cid:
+        email_body += f"""
+        <h3 style=\"font-size: 14px; color: #333;\">Channel Performance (Daily)</h3>
+        <p><img src=\"cid:{channel_performance_cid}\" alt=\"Channel Performance Daily\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>
+        """
+    else:
+        email_body += "<p><em>Channel Performance (Daily) chart unavailable. No data available for this period.</em></p>"
+
+    # Hourly Sales Plot for Last 7 Days
     if hourly_sales_plot_cid:
         email_body += f"""
         <p><img src=\"cid:{hourly_sales_plot_cid}\" alt=\"Hourly Sales (Last 7 Days) Plot\" style=\"max-width: 600px; width: 100%; height: auto;\"></p>

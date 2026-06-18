@@ -34,6 +34,7 @@ from excel_generation import generate_pdf_report, get_google_funnel_metrics
 
 # Amazon (ClickHouse gold) sheets for the WTD/MTD report
 from amazon_entity_report import add_amazon_sheets_for_timeframe, get_amazon_clickhouse_summary
+from channel_performance import plot_channel_performance_last_7_days
 
 # Set up logging
 _temp_dir = get_temp_dir()
@@ -2496,7 +2497,7 @@ def format_daily_performers_html(performers: dict, yesterday_str: str) -> str:
     
     return '\n'.join(html_parts)
 
-def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file_path: str, summary_data: dict, pdf_paths: dict = None, product_profitability_file_path: str = None):
+def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file_path: str, summary_data: dict, pdf_paths: dict = None, product_profitability_file_path: str = None, channel_performance_plot_path: str = None):
     """
     Send WTD/MTD report, daily report, Amazon report, and optional Product Profitability report via email using Microsoft Graph API.
     Similar to send_email() in excel_generation.py but simplified for WTD/MTD reports.
@@ -2508,6 +2509,7 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
         summary_data: Dictionary containing summary metrics for WTD and MTD
         pdf_paths: Dictionary with 'wtd' and 'mtd' keys containing paths to PDF reports
         product_profitability_file_path: Optional path to Product Profitability Excel (previous day)
+        channel_performance_plot_path: Optional path to last-7-days channel chart (inline, WTD/MTD email only)
     """
     if not EMAIL_ENABLED:
         logger.warning("Email sending is disabled due to incomplete configuration")
@@ -2607,6 +2609,36 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 daily_performers_html = format_daily_performers_html(daily_performers, yesterday_str)
             except Exception as e:
                 logger.warning(f"Could not extract daily performers: {e}")
+
+        channel_performance_7d_cid = None
+        channel_plot_attachment = None
+        if channel_performance_plot_path and os.path.exists(channel_performance_plot_path):
+            try:
+                with open(channel_performance_plot_path, "rb") as f:
+                    ch_content = base64.b64encode(f.read()).decode("utf-8")
+                channel_performance_7d_cid = f"channel_performance_7d_{today_str}"
+                channel_plot_attachment = {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": f"Channel_Performance_Last_7_Days_{today_str}.png",
+                    "contentBytes": ch_content,
+                    "contentId": channel_performance_7d_cid,
+                    "isInline": True,
+                }
+                logger.info(f"Prepared channel performance plot for email: {channel_performance_plot_path}")
+            except Exception as e:
+                logger.warning(f"Failed to read channel performance plot: {e}")
+
+        if channel_performance_7d_cid:
+            channel_performance_html = (
+                f'<h2 style="font-size: 16px; color: #333; margin-top: 24px;">'
+                f"Channel Performance (Last 7 Days)</h2>"
+                f'<p><img src="cid:{channel_performance_7d_cid}" alt="Channel Performance Last 7 Days" '
+                f'style="max-width: 600px; width: 100%; height: auto;"></p>'
+            )
+        else:
+            channel_performance_html = (
+                "<p><em>Channel Performance chart (last 7 days) unavailable.</em></p>"
+            )
         
         email_body = f"""
         <html>
@@ -2622,6 +2654,8 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             
             {summary_html}
             
+            {channel_performance_html}
+            
             {daily_performers_html}
             
             <p style="font-size: 12px; color: #666; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px;">
@@ -2633,6 +2667,8 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
         
         # Prepare attachments list
         attachments = []
+        if channel_plot_attachment:
+            attachments.append(channel_plot_attachment)
         
         # Add WTD/MTD report attachment
         with open(wtd_mtd_file_path, "rb") as f:
@@ -2798,7 +2834,7 @@ def generate_wtd_mtd_pdf_reports(out_dir: str = None) -> dict:
         out_dir: Output directory for PDF files
         
     Returns:
-        dict: Dictionary with 'wtd' and 'mtd' keys, each containing the path to the generated PDF
+        dict: 'wtd' and 'mtd' PDF paths, plus 'channel_chart' (last 7 days PNG for WTD/MTD email)
     """
     if out_dir is None:
         out_dir = get_report_dir()
@@ -2808,6 +2844,22 @@ def generate_wtd_mtd_pdf_reports(out_dir: str = None) -> dict:
     timeframes = get_wtd_mtd_timeframes()
     
     pdf_paths = {}
+
+    # Last 7 days channel chart for WTD/MTD email only (not daily — that is in the daily marketing email)
+    try:
+        chart_end = (datetime.now(IST) - timedelta(days=1)).date()
+        channel_chart_path = os.path.join(
+            out_dir,
+            f"channel_performance_last_7_days_{chart_end}.png",
+        )
+        saved = plot_channel_performance_last_7_days(chart_end, save_path=channel_chart_path)
+        if saved:
+            pdf_paths["channel_chart"] = saved
+            logger.info("Channel performance chart (last 7 days, WTD/MTD email): %s", saved)
+        else:
+            logger.warning("Channel performance chart (last 7 days) not generated")
+    except Exception as e:
+        logger.warning("Failed to generate channel performance chart for WTD/MTD email: %s", e)
     
     for timeframe_key, timeframe_config in timeframes.items():
         start_date = timeframe_config['start_date']
@@ -2939,7 +2991,7 @@ def generate_wtd_mtd_pdf_reports(out_dir: str = None) -> dict:
                 timestamp_str,
                 timeframe_start=start_date,
                 timeframe_end=end_date,
-                report_type=timeframe_key  # Pass 'wtd' or 'mtd' as report type
+                report_type=timeframe_key,  # Pass 'wtd' or 'mtd' as report type
             )
             
             pdf_paths[timeframe_key] = pdf_file
@@ -3044,12 +3096,35 @@ def main():
             logger.error(f"Failed to generate Product Profitability report: {e}")
             print(f"Warning: Could not generate Product Profitability report, continuing without it")
             pp_path = None
+
+        # Last 7 days channel chart — WTD/MTD email only (daily chart is in the daily marketing email)
+        channel_plot_path = pdf_paths.get("channel_chart") if pdf_paths else None
+        if not channel_plot_path:
+            try:
+                report_end = (datetime.now(IST) - timedelta(days=1)).date()
+                channel_plot_path = os.path.join(
+                    get_report_dir(),
+                    f"channel_performance_last_7_days_{report_end}.png",
+                )
+                saved = plot_channel_performance_last_7_days(report_end, save_path=channel_plot_path)
+                channel_plot_path = saved or None
+            except Exception as e:
+                logger.warning(f"Failed to generate channel performance chart: {e}")
+                channel_plot_path = None
         
         # Send via email if enabled
         if EMAIL_ENABLED:
             try:
                 logger.info("Sending WTD/MTD, daily, Amazon, and Product Profitability reports via email...")
-                send_wtd_mtd_email(wtd_mtd_path, daily_path, amazon_path, summary_data, pdf_paths, product_profitability_file_path=pp_path)
+                send_wtd_mtd_email(
+                    wtd_mtd_path,
+                    daily_path,
+                    amazon_path,
+                    summary_data,
+                    pdf_paths,
+                    product_profitability_file_path=pp_path,
+                    channel_performance_plot_path=channel_plot_path,
+                )
                 logger.info("Reports sent via email successfully")
                 return "WTD/MTD, daily, Amazon, and Product Profitability reports generated and emailed successfully"
             except Exception as e:

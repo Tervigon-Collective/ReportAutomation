@@ -15,6 +15,7 @@ import matplotlib
 from api_data_fetcher import (
     fetch_db_sales,
     fetch_net_profit_from_db,
+    fetch_net_profit_single_day,
     fetch_shopify_sales_by_state,
     get_api_headers,
     set_api_bearer_token,
@@ -1036,6 +1037,25 @@ def plot_daily_shopify_profit(save_path=None):
         if db_df.empty:
             logger.error("No net profit data returned from DB")
             return None
+
+        # For today, DB data is partial (ad spend syncs with a lag).
+        # Override today's net_profit with the real-time API value.
+        ist = pytz.timezone('Asia/Kolkata')
+        today_ist = datetime.now(pytz.utc).astimezone(ist).date()
+        today_str = today_ist.strftime('%Y-%m-%d')
+        db_df['sale_date'] = pd.to_datetime(db_df['sale_date']).dt.date
+        today_mask = db_df['sale_date'] == today_ist
+        if today_mask.any():
+            try:
+                # fetch_net_profit_single_day applies GST adjustment (ex-GST revenue), matching the daily report
+                api_today = fetch_net_profit_single_day(start_date=today_str, end_date=today_str)
+                api_net_profit = float(
+                    (api_today.get('data') or {}).get('totals', {}).get('netProfit', 0) or 0
+                )
+                db_df.loc[today_mask, 'net_profit'] = api_net_profit
+                logger.info(f"[Today override] DB net_profit replaced with API (ex-GST) value: {api_net_profit:.2f}")
+            except Exception as e:
+                logger.warning(f"[Today override] Failed to fetch API net profit for today, keeping DB value: {e}")
 
         logger.info(f"Fetched {len(db_df)} days of net profit data from DB")
         logger.info(f"DB totals: Revenue=₹{totals['revenue']:,.2f}, COGS=₹{totals['cogs']:,.2f}, Ad Spend=₹{totals['adSpend']:,.2f}, Net Profit=₹{totals['netProfit']:,.2f}")

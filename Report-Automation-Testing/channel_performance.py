@@ -1,6 +1,6 @@
 """
 Channel performance metrics from ClickHouse gold tables.
-Used for daily / WTD / MTD report bar charts (revenue, ad spend, orders by platform).
+Used for daily / WTD / MTD report bar charts (revenue, COGS, ad spend, net profit, orders by platform).
 """
 from __future__ import annotations
 
@@ -46,12 +46,16 @@ PLATFORM_MARKERS = {
 
 METRIC_COLORS = {
     "revenue": "#1A7F4E",
+    "cogs": "#7B1FA2",
     "ad_spend": "#E07B00",
+    "net_profit": "#1565C0",
     "orders": "#4A56E2",
 }
 METRIC_LABELS = {
     "revenue": "Gross Revenue",
+    "cogs": "COGS",
     "ad_spend": "Ad Spend",
+    "net_profit": "Net Profit",
     "orders": "Orders",
 }
 
@@ -135,13 +139,18 @@ def fetch_channel_performance(
             ch.platform AS platform,
             coalesce(c.attributed_orders, 0) AS attributed_orders,
             round(coalesce(c.gross_revenue_excl_gst, 0), 2) AS gross_revenue_excl_gst,
+            round(coalesce(g.cogs, 0), 2) AS cogs,
             coalesce(s.ad_spend, 0) AS ad_spend,
             round(
+                coalesce(c.gross_revenue_excl_gst, 0) - coalesce(g.cogs, 0) - coalesce(s.ad_spend, 0),
+                2
+            ) AS net_profit,
+            round(
                 if(coalesce(s.ad_spend, 0) > 0,
-                   coalesce(c.gross_revenue_excl_gst, 0) / s.ad_spend,
+                   (coalesce(c.gross_revenue_excl_gst, 0) - coalesce(g.cogs, 0)) / s.ad_spend,
                    NULL),
                 2
-            ) AS gross_roas
+            ) AS net_roas
         FROM (
             SELECT DISTINCT report_date
             FROM gold.fct_daily_pnl
@@ -165,6 +174,31 @@ def fetch_channel_performance(
             GROUP BY report_date, platform
         ) AS c
             ON d.report_date = c.report_date AND ch.platform = c.platform
+        LEFT JOIN (
+            SELECT
+                a.order_date AS report_date,
+                coalesce(nullIf(a.lt_platform, ''), 'other') AS platform,
+                toFloat64(sum(coalesce(ic.cogs, 0))) AS cogs
+            FROM gold.fct_order_attribution AS a
+            LEFT JOIN (
+                SELECT
+                    brand_id,
+                    order_id,
+                    sum(toFloat64(net_cost)) AS cogs
+                FROM gold.fct_order_items
+                WHERE brand_id = %(brand_id)s
+                  AND order_date >= toDate(%(start_date)s)
+                  AND order_date <= toDate(%(end_date)s)
+                  AND coalesce(included_in_pnl_cogs, 1) = 1
+                GROUP BY brand_id, order_id
+            ) AS ic
+                ON a.brand_id = ic.brand_id AND a.order_id = ic.order_id
+            WHERE a.brand_id = %(brand_id)s
+              AND a.order_date >= toDate(%(start_date)s)
+              AND a.order_date <= toDate(%(end_date)s)
+            GROUP BY report_date, platform
+        ) AS g
+            ON d.report_date = g.report_date AND ch.platform = g.platform
         LEFT JOIN (
             SELECT 'meta' AS platform, report_date, toFloat64(meta_spend) AS ad_spend
             FROM gold.fct_daily_pnl
@@ -204,11 +238,11 @@ def fetch_channel_performance(
     if df.empty:
         return df
 
-    for col in ("attributed_orders", "gross_revenue_excl_gst", "ad_spend"):
+    for col in ("attributed_orders", "gross_revenue_excl_gst", "cogs", "ad_spend", "net_profit"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    if "gross_roas" in df.columns:
-        df["gross_roas"] = pd.to_numeric(df["gross_roas"], errors="coerce")
+    if "net_roas" in df.columns:
+        df["net_roas"] = pd.to_numeric(df["net_roas"], errors="coerce")
     if "attributed_orders" in df.columns:
         df["attributed_orders"] = df["attributed_orders"].astype(int)
     return df
@@ -223,17 +257,21 @@ def aggregate_channel_performance(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             attributed_orders=("attributed_orders", "sum"),
             gross_revenue_excl_gst=("gross_revenue_excl_gst", "sum"),
+            cogs=("cogs", "sum"),
             ad_spend=("ad_spend", "sum"),
         )
     )
-    agg["gross_roas"] = np.where(
+    agg["net_profit"] = agg["gross_revenue_excl_gst"] - agg["cogs"] - agg["ad_spend"]
+    agg["net_roas"] = np.where(
         agg["ad_spend"] > 0,
-        agg["gross_revenue_excl_gst"] / agg["ad_spend"],
+        (agg["gross_revenue_excl_gst"] - agg["cogs"]) / agg["ad_spend"],
         np.nan,
     )
     agg["gross_revenue_excl_gst"] = agg["gross_revenue_excl_gst"].round(2)
+    agg["cogs"] = agg["cogs"].round(2)
     agg["ad_spend"] = agg["ad_spend"].round(2)
-    agg["gross_roas"] = agg["gross_roas"].round(2)
+    agg["net_profit"] = agg["net_profit"].round(2)
+    agg["net_roas"] = agg["net_roas"].round(2)
     order_map = {p: i for i, p in enumerate(PLATFORM_ORDER)}
     agg["_sort"] = agg["platform"].map(order_map).fillna(99)
     return agg.sort_values("_sort").drop(columns=["_sort"]).reset_index(drop=True)
@@ -270,21 +308,29 @@ def _platform_palette(platform: str) -> dict[str, str]:
 
 
 def _add_bar_labels(ax, bars, values, fmt_fn, min_height_frac=0.0):
-    """Place value labels above bars; skip near-zero bars."""
+    """Place value labels above (or below) bars; skip near-zero bars."""
     vals = [float(v) for v in values]
-    ymax = max(vals) if vals else 1
-    pad = ymax * 0.03 if ymax > 0 else 0.5
+    ymax = max(max(vals), 0.0) if vals else 1
+    ymin = min(min(vals), 0.0) if vals else 0
+    span = max(ymax - ymin, ymax, 1.0)
+    pad = span * 0.03
     for bar, val in zip(bars, vals):
-        if val <= 0:
+        if val == 0:
             continue
-        if ymax > 0 and val / ymax < min_height_frac:
+        if ymax > 0 and val > 0 and val / ymax < min_height_frac:
             continue
+        if val >= 0:
+            y_pos = bar.get_height() + pad
+            va = "bottom"
+        else:
+            y_pos = bar.get_height() - pad
+            va = "top"
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + pad,
+            y_pos,
             fmt_fn(val),
             ha="center",
-            va="bottom",
+            va=va,
             fontsize=8.5,
             fontweight="600",
             color="#1a1a1a",
@@ -300,15 +346,15 @@ def _day_count_in_range(start_str: str, end_str: str) -> int:
         return 1
 
 
-def _prepare_daily_roas(raw: pd.DataFrame) -> pd.DataFrame:
-    """Daily gross ROAS per platform; NaN where ad spend is zero."""
+def _prepare_daily_net_roas(raw: pd.DataFrame) -> pd.DataFrame:
+    """Daily net ROAS per platform; NaN where ad spend is zero."""
     if raw.empty:
         return raw
     daily = raw.copy()
     daily["report_date"] = pd.to_datetime(daily["report_date"])
-    daily["gross_roas"] = np.where(
+    daily["net_roas"] = np.where(
         daily["ad_spend"] > 0,
-        daily["gross_revenue_excl_gst"] / daily["ad_spend"],
+        (daily["gross_revenue_excl_gst"] - daily["cogs"]) / daily["ad_spend"],
         np.nan,
     )
     order_map = {p: i for i, p in enumerate(PLATFORM_ORDER)}
@@ -316,9 +362,9 @@ def _prepare_daily_roas(raw: pd.DataFrame) -> pd.DataFrame:
     return daily.sort_values(["report_date", "_sort"]).drop(columns=["_sort"])
 
 
-def _plot_roas_by_day(ax, raw: pd.DataFrame) -> None:
-    """Line chart: gross ROAS per channel for each day in the window."""
-    daily = _prepare_daily_roas(raw)
+def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
+    """Line chart: net ROAS per channel for each day in the window."""
+    daily = _prepare_daily_net_roas(raw)
     if daily.empty:
         ax.set_visible(False)
         return
@@ -336,7 +382,7 @@ def _plot_roas_by_day(ax, raw: pd.DataFrame) -> None:
         if plat.empty:
             continue
         series = (
-            plat.set_index("report_date")["gross_roas"]
+            plat.set_index("report_date")["net_roas"]
             .reindex(dates)
         )
         y = series.values.astype(float)
@@ -372,10 +418,10 @@ def _plot_roas_by_day(ax, raw: pd.DataFrame) -> None:
                 color=color,
             )
 
-    ax.set_title("Gross ROAS by Channel (Daily)", fontsize=11, fontweight="bold", color="#1a1a1a", pad=10)
+    ax.set_title("Net ROAS by Channel (Daily)", fontsize=11, fontweight="bold", color="#1a1a1a", pad=10)
     ax.set_xticks(x)
     ax.set_xticklabels(date_labels, fontsize=9, rotation=0)
-    ax.set_ylabel("Gross ROAS", fontsize=10, color="#333333", labelpad=8)
+    ax.set_ylabel("Net ROAS", fontsize=10, color="#333333", labelpad=8)
     ax.set_facecolor("#FAFBFC")
     ax.grid(axis="y", alpha=0.32, linestyle="-", color="#CCCCCC", zorder=0)
     ax.set_axisbelow(True)
@@ -384,7 +430,7 @@ def _plot_roas_by_day(ax, raw: pd.DataFrame) -> None:
     ax.spines["left"].set_color("#BBBBBB")
     ax.spines["bottom"].set_color("#BBBBBB")
 
-    valid = daily.loc[daily["ad_spend"] > 0, "gross_roas"].dropna()
+    valid = daily.loc[daily["ad_spend"] > 0, "net_roas"].dropna()
     if not valid.empty:
         ymax = float(valid.max())
         ax.set_ylim(0, max(ymax * 1.25, 0.5))
@@ -411,8 +457,8 @@ def plot_channel_performance(
     roas_trend_days: int = 7,
 ) -> Optional[str]:
     """
-    Grouped bar chart: revenue, ad spend, and orders by channel for the requested window.
-    Optionally adds a daily gross ROAS trend panel below (last N days ending on end_date).
+    Grouped bar chart: revenue, COGS, ad spend, net profit, and orders by channel.
+    Optionally adds a daily net ROAS trend panel below (last N days ending on end_date).
     """
     try:
         raw = fetch_channel_performance(start_date, end_date, brand_id=brand_id)
@@ -427,6 +473,7 @@ def plot_channel_performance(
         df = aggregate_channel_performance(raw)
         if df.empty or (
             df["gross_revenue_excl_gst"].sum() == 0
+            and df["cogs"].sum() == 0
             and df["ad_spend"].sum() == 0
             and df["attributed_orders"].sum() == 0
         ):
@@ -459,17 +506,22 @@ def plot_channel_performance(
                 title = f"Channel Performance — {start_str} to {end_str}"
 
         total_rev = float(plot_df["gross_revenue_excl_gst"].sum())
+        total_cogs = float(plot_df["cogs"].sum())
         total_spend = float(plot_df["ad_spend"].sum())
+        total_net_profit = float(plot_df["net_profit"].sum())
         total_orders = int(plot_df["attributed_orders"].sum())
-        total_roas = total_rev / total_spend if total_spend > 0 else 0
+        total_net_roas = (total_rev - total_cogs) / total_spend if total_spend > 0 else 0
 
         rev_vals = plot_df["gross_revenue_excl_gst"].values.astype(float)
+        cogs_vals = plot_df["cogs"].values.astype(float)
         spend_vals = plot_df["ad_spend"].values.astype(float)
+        profit_vals = plot_df["net_profit"].values.astype(float)
         order_vals = plot_df["attributed_orders"].values.astype(float)
 
         n = len(platforms)
         x = np.arange(n)
-        bar_w = 0.24
+        bar_w = 0.15
+        offsets = np.array([-2, -1, 0, 1, 2], dtype=float) * bar_w
 
         num_days = _day_count_in_range(start_str, end_str)
         end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
@@ -485,22 +537,27 @@ def plot_channel_performance(
         ) >= 2
 
         if show_roas_panel:
-            fig = plt.figure(figsize=(13, 10), facecolor="white")
-            gs = fig.add_gridspec(2, 1, height_ratios=[1.35, 1], hspace=0.42)
+            fig = plt.figure(figsize=(14, 10.5), facecolor="white")
+            gs = fig.add_gridspec(2, 1, height_ratios=[1.45, 1], hspace=0.42)
             ax1 = fig.add_subplot(gs[0])
             ax2 = ax1.twinx()
             ax_roas = fig.add_subplot(gs[1])
         else:
-            fig, ax1 = plt.subplots(figsize=(13, 6.5), facecolor="white")
+            fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
             ax2 = ax1.twinx()
             ax_roas = None
 
         rev_colors = [METRIC_COLORS["revenue"]] * n
+        cogs_colors = [METRIC_COLORS["cogs"]] * n
         spend_colors = [METRIC_COLORS["ad_spend"]] * n
+        profit_colors = [
+            METRIC_COLORS["net_profit"] if val >= 0 else "#C62828"
+            for val in profit_vals
+        ]
         order_colors = [_platform_palette(p)["orders"] for p in platforms]
 
         bars_rev = ax1.bar(
-            x - bar_w,
+            x + offsets[0],
             rev_vals,
             bar_w,
             color=rev_colors,
@@ -508,8 +565,17 @@ def plot_channel_performance(
             linewidth=1.0,
             zorder=3,
         )
+        bars_cogs = ax1.bar(
+            x + offsets[1],
+            cogs_vals,
+            bar_w,
+            color=cogs_colors,
+            edgecolor="white",
+            linewidth=1.0,
+            zorder=3,
+        )
         bars_spend = ax1.bar(
-            x,
+            x + offsets[2],
             spend_vals,
             bar_w,
             color=spend_colors,
@@ -517,8 +583,17 @@ def plot_channel_performance(
             linewidth=1.0,
             zorder=3,
         )
+        bars_profit = ax1.bar(
+            x + offsets[3],
+            profit_vals,
+            bar_w,
+            color=profit_colors,
+            edgecolor="white",
+            linewidth=1.0,
+            zorder=3,
+        )
         bars_orders = ax2.bar(
-            x + bar_w,
+            x + offsets[4],
             order_vals,
             bar_w,
             color=order_colors,
@@ -533,7 +608,7 @@ def plot_channel_performance(
         for tick, platform in zip(tick_labels, platforms):
             tick.set_color(PLATFORM_COLORS.get(platform, "#222222"))
         ax1.set_ylabel(
-            f"Revenue / Ad Spend ({_currency_symbol()})",
+            f"Revenue / COGS / Spend / Profit ({_currency_symbol()})",
             fontsize=10,
             color="#333333",
             labelpad=10,
@@ -554,22 +629,31 @@ def plot_channel_performance(
         ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: _format_inr(v)))
         ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
-        money_max = max(float(rev_vals.max()), float(spend_vals.max()), 1.0)
+        money_vals = np.concatenate([rev_vals, cogs_vals, spend_vals, profit_vals])
+        money_max = max(float(np.max(money_vals)), 1.0)
+        money_min = min(float(np.min(profit_vals)), 0.0)
         order_max = max(float(order_vals.max()), 1.0)
-        ax1.set_ylim(0, money_max * 1.22)
+        y_span = money_max - money_min
+        ax1.set_ylim(money_min - y_span * 0.08, money_max * 1.22)
+        if money_min < 0:
+            ax1.axhline(0, color="#999999", linewidth=0.8, zorder=1)
         ax2.set_ylim(0, order_max * 1.28)
 
         _add_bar_labels(ax1, bars_rev, rev_vals, _format_inr)
+        _add_bar_labels(ax1, bars_cogs, cogs_vals, _format_inr)
         _add_bar_labels(ax1, bars_spend, spend_vals, _format_inr)
+        _add_bar_labels(ax1, bars_profit, profit_vals, _format_inr, min_height_frac=0.02)
         _add_bar_labels(ax2, bars_orders, order_vals, lambda v: f"{int(v):,}")
 
-        ax1.set_xlim(-0.6, n - 0.4)
+        ax1.set_xlim(-0.75, n - 0.25)
 
         subtitle = (
             f"Total revenue: {_format_inr(total_rev)}   ·   "
+            f"Total COGS: {_format_inr(total_cogs)}   ·   "
             f"Total ad spend: {_format_inr(total_spend)}   ·   "
-            f"Total orders: {total_orders:,}   ·   "
-            f"Blended gross ROAS: {total_roas:.2f}x"
+            f"Net profit: {_format_inr(total_net_profit)}   ·   "
+            f"Orders: {total_orders:,}   ·   "
+            f"Blended net ROAS: {total_net_roas:.2f}x"
         )
 
         fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=0.98 if show_roas_panel else 0.97)
@@ -579,7 +663,9 @@ def plot_channel_performance(
 
         metric_handles = [
             Patch(facecolor=METRIC_COLORS["revenue"], edgecolor="white", label=METRIC_LABELS["revenue"]),
+            Patch(facecolor=METRIC_COLORS["cogs"], edgecolor="white", label=METRIC_LABELS["cogs"]),
             Patch(facecolor=METRIC_COLORS["ad_spend"], edgecolor="white", label=METRIC_LABELS["ad_spend"]),
+            Patch(facecolor=METRIC_COLORS["net_profit"], edgecolor="white", label=METRIC_LABELS["net_profit"]),
         ]
         platform_handles = [
             Patch(
@@ -595,7 +681,7 @@ def plot_channel_performance(
             handles=metric_handles + platform_handles,
             loc="upper center",
             bbox_to_anchor=(0.5, legend_y),
-            ncol=min(len(metric_handles) + len(platform_handles), 6),
+            ncol=min(len(metric_handles) + len(platform_handles), 8),
             frameon=True,
             fontsize=8.5,
             edgecolor="#DDDDDD",
@@ -604,7 +690,7 @@ def plot_channel_performance(
         fig.text(
             0.5,
             legend_y - 0.045 if show_roas_panel else legend_y - 0.048,
-            "Bar order per channel (left → right): Revenue · Ad Spend · Orders  |  ROAS lines = channel colors",
+            "Bar order per channel (left → right): Revenue · COGS · Ad Spend · Net Profit · Orders  |  Net ROAS lines = channel colors",
             ha="center",
             va="top",
             fontsize=8.5,
@@ -613,7 +699,7 @@ def plot_channel_performance(
         )
 
         if show_roas_panel and ax_roas is not None:
-            _plot_roas_by_day(ax_roas, roas_raw)
+            _plot_net_roas_by_day(ax_roas, roas_raw)
             fig.subplots_adjust(top=0.88, bottom=0.10, hspace=0.38)
         else:
             plt.tight_layout(rect=[0.04, 0.06, 0.96, 0.82])

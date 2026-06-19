@@ -86,6 +86,8 @@ PG_DATABASE = os.getenv('DB_NAME', 'seleric_db')
 
 # Global connection pool
 _connection_pool = None
+_pg_cache_ready = False
+_pg_cache_available = False
 
 def get_pg_conn():
     global _connection_pool
@@ -97,7 +99,8 @@ def get_pg_conn():
             port=PG_PORT,
             user=PG_USER,
             password=PG_PASSWORD,
-            dbname=PG_DATABASE
+            dbname=PG_DATABASE,
+            connect_timeout=10,
         )
     return _connection_pool.getconn()
 
@@ -121,33 +124,56 @@ def init_pg_cache():
         cur.close()
     finally:
         return_pg_conn(conn)
-init_pg_cache()
+
+def ensure_pg_cache():
+    """Lazily initialize the summary cache table; skip caching if DB is unreachable."""
+    global _pg_cache_ready, _pg_cache_available
+    if _pg_cache_ready:
+        return _pg_cache_available
+    _pg_cache_ready = True
+    try:
+        init_pg_cache()
+        _pg_cache_available = True
+    except Exception as e:
+        print(f"[metaActivityTrack] PostgreSQL summary cache unavailable: {e}")
+    return _pg_cache_available
 
 def get_cache_key(change_text):
     return hashlib.sha256(change_text.encode('utf-8')).hexdigest()
 
 def get_cached_summary(change_text):
+    if not ensure_pg_cache():
+        return None
     key = get_cache_key(change_text)
-    conn = get_pg_conn()
     try:
-        cur = conn.cursor()
-        cur.execute('SELECT summary FROM gemini_summary_cache WHERE hash=%s', (key,))
-        row = cur.fetchone()
-        cur.close()
-        return row[0] if row else None
-    finally:
-        return_pg_conn(conn)
+        conn = get_pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('SELECT summary FROM gemini_summary_cache WHERE hash=%s', (key,))
+            row = cur.fetchone()
+            cur.close()
+            return row[0] if row else None
+        finally:
+            return_pg_conn(conn)
+    except Exception as e:
+        print(f"[metaActivityTrack] Cache read failed: {e}")
+        return None
 
 def set_cached_summary(change_text, summary):
+    if not ensure_pg_cache():
+        return
     key = get_cache_key(change_text)
-    conn = get_pg_conn()
     try:
-        cur = conn.cursor()
-        cur.execute('INSERT INTO gemini_summary_cache (hash, change_text, summary) VALUES (%s, %s, %s) ON CONFLICT (hash) DO UPDATE SET summary=EXCLUDED.summary', (key, change_text, summary))
-        conn.commit()
-        cur.close()
-    finally:
-        return_pg_conn(conn)
+        conn = get_pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('INSERT INTO gemini_summary_cache (hash, change_text, summary) VALUES (%s, %s, %s) ON CONFLICT (hash) DO UPDATE SET summary=EXCLUDED.summary', (key, change_text, summary))
+            conn.commit()
+            cur.close()
+        finally:
+            return_pg_conn(conn)
+    except Exception as e:
+        print(f"[metaActivityTrack] Cache write failed: {e}")
 
 # --- API REQUEST (moved to function level to avoid import-time errors) ---
 def fetch_activity_data():

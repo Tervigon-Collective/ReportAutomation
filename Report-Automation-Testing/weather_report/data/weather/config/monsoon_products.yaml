@@ -1,0 +1,27 @@
+monsoon_products:
+  rain_protection:
+    - StormGuard Jacket
+    - WildTrail Boots
+    - SnugSole Pet Boots
+    - TenderTrek Silicone Boots
+    - Zoomie Boots
+
+  post_rain_care:
+    - LumiRinse Spa Shower
+    - FluffMist Pet Brush
+
+  travel:
+    - AeroPod Luxury Pet Carrier
+    - PocketPup Tote Bag
+
+  indoor_comfort:
+    - ComfortCrib
+    - LumenPool Bed
+
+# Weather condition -> product group recommendation
+weather_to_product_group:
+  active_rain: rain_protection
+  heavy_rain_watch: rain_protection
+  high_humidity: post_rain_care
+  rainy_indoor: indoor_comfort
+  travel_disruption: travel

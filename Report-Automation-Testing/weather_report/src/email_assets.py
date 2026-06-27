@@ -134,9 +134,19 @@ def build_weather_email_bundle(
     report_df = pd.read_csv(attach_csv)
     insights = generate_weather_insights(report_df)
 
+    report_time = ""
+    weather_fetched_at = ""
+    if not report_df.empty:
+        if "report_time" in report_df.columns:
+            report_time = str(report_df["report_time"].iloc[0] or "")
+        if "weather_fetched_at" in report_df.columns:
+            weather_fetched_at = str(report_df["weather_fetched_at"].iloc[0] or "")
+
     return {
         "combined_plot": str(combined),
         "csv_path": str(attach_csv),
         "insights": insights,
         "report_date": report_date,
+        "report_time": report_time,
+        "weather_fetched_at": weather_fetched_at,
     }

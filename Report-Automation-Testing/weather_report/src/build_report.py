@@ -47,6 +47,24 @@ SCORING_RULES_PATH = DATA_DIR / "config" / "scoring_rules.json"
 PRODUCTS_PATH = DATA_DIR / "config" / "monsoon_products.yaml"
 
 IST = timezone(timedelta(hours=5, minutes=30))
+CURRENT_DIR = DATA_DIR / "weather" / "current"
+
+
+def _load_weather_fetched_at(report_date: str) -> str:
+    """Return Open-Meteo fetch timestamp from the Phase 3 JSON payload, if present."""
+    path = CURRENT_DIR / f"{report_date}.json"
+    if not path.exists():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return str(payload.get("fetched_at") or "")
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def _title_stamp(report_date: str, report_time: str) -> str:
+    return f"{report_date} {report_time} IST"
+
 
 # weather_bucket -> monsoon product group key
 BUCKET_TO_GROUP = {
@@ -66,7 +84,7 @@ GROUP_LABEL = {
 }
 
 REPORT_COLUMNS = [
-    "report_date", "rank", "city_id", "city", "state", "region", "city_tier",
+    "report_date", "report_time", "weather_fetched_at", "rank", "city_id", "city", "state", "region", "city_tier",
     "weather_status", "rain_now", "max_rain_probability_next_72h",
     "rainfall_next_3d_mm", "precipitation_hours_next_3d",
     "orders_7d", "orders_30d", "revenue_30d", "sales_momentum",
@@ -183,12 +201,16 @@ def build(report_date: str, products: dict, rules: dict) -> pd.DataFrame:
     df["recommended_products"] = grp_keys.map(
         lambda g: ", ".join(products.get(g, [])) if g else "")
 
-    df["created_at"] = datetime.now(IST).isoformat(timespec="seconds")
+    now = datetime.now(IST)
+    df["report_time"] = now.strftime("%H:%M")
+    df["weather_fetched_at"] = _load_weather_fetched_at(report_date)
+    df["created_at"] = now.isoformat(timespec="seconds")
     return df[REPORT_COLUMNS]
 
 
 # ----------------------------- plotting --------------------------------------
-def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path, report_date: str) -> None:
+def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path,
+                  report_date: str, report_time: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -205,8 +227,10 @@ def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path, report_date: s
     im = ax.imshow(mat, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
     ax.set_xticks(range(len(col_labels)), labels=col_labels)
     ax.set_yticks(range(len(d)), labels=ylabels, fontsize=8)
-    ax.set_title(f"Weather Campaign Opportunity - top {len(d)} cities ({report_date})",
-                 fontsize=12, pad=12)
+    ax.set_title(
+        f"Weather Campaign Opportunity - top {len(d)} cities ({_title_stamp(report_date, report_time)})",
+        fontsize=12, pad=12,
+    )
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
             v = mat[i, j]
@@ -220,7 +244,7 @@ def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path, report_date: s
 
 
 def _plot_geo(report: pd.DataFrame, master_path: Path, out_path: Path,
-              report_date: str) -> None:
+              report_date: str, report_time: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -230,7 +254,7 @@ def _plot_geo(report: pd.DataFrame, master_path: Path, out_path: Path,
     sizes = 30 + (d["orders_30d"].clip(lower=0) ** 0.5) * 12
 
     fig, ax = plt.subplots(figsize=(8, 9))
-    sc = ax.scatter(d["longitude"], d["latitude"], c=d["opportunity_score"],
+    sc = ax.scatter(d["longitude"], d["latitude"], c=d["weather_score"],
                     s=sizes, cmap="RdYlGn", vmin=0, vmax=100,
                     edgecolors="black", linewidths=0.4, alpha=0.9)
     for _, r in d.head(15).iterrows():
@@ -238,10 +262,13 @@ def _plot_geo(report: pd.DataFrame, master_path: Path, out_path: Path,
                     xytext=(3, 3), textcoords="offset points")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
-    ax.set_title(f"Opportunity geo-heatmap ({report_date})\n"
-                 f"colour = opportunity_score, size = orders_30d", fontsize=11)
+    ax.set_title(
+        f"Weather geo-heatmap ({_title_stamp(report_date, report_time)})\n"
+        f"colour = weather_score, size = orders_30d",
+        fontsize=11,
+    )
     cbar = fig.colorbar(sc, ax=ax, fraction=0.035, pad=0.02)
-    cbar.set_label("opportunity_score")
+    cbar.set_label("weather_score")
     ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
@@ -254,6 +281,7 @@ def _plot_combined_canvas(
     top: int,
     out_path: Path,
     report_date: str,
+    report_time: str,
 ) -> None:
     """Single PNG with score heatmap (top) and geo scatter (bottom) for email inline display."""
     import matplotlib
@@ -278,7 +306,10 @@ def _plot_combined_canvas(
     im = ax_hm.imshow(mat, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
     ax_hm.set_xticks(range(len(col_labels)), labels=col_labels)
     ax_hm.set_yticks(range(len(heat)), labels=ylabels, fontsize=8)
-    ax_hm.set_title(f"Top {len(heat)} cities — sub-scores ({report_date})", fontsize=11, pad=8)
+    ax_hm.set_title(
+        f"Top {len(heat)} cities — sub-scores ({_title_stamp(report_date, report_time)})",
+        fontsize=11, pad=8,
+    )
     for i in range(mat.shape[0]):
         for j in range(mat.shape[1]):
             v = mat[i, j]
@@ -286,7 +317,7 @@ def _plot_combined_canvas(
                        color="black" if 25 <= v <= 80 else "white")
 
     ax_geo = fig.add_subplot(gs[1])
-    sc = ax_geo.scatter(geo["longitude"], geo["latitude"], c=geo["opportunity_score"],
+    sc = ax_geo.scatter(geo["longitude"], geo["latitude"], c=geo["weather_score"],
                         s=sizes, cmap="RdYlGn", vmin=0, vmax=100,
                         edgecolors="black", linewidths=0.4, alpha=0.9)
     for _, r in geo.head(12).iterrows():
@@ -294,12 +325,15 @@ def _plot_combined_canvas(
                         xytext=(3, 3), textcoords="offset points")
     ax_geo.set_xlabel("Longitude")
     ax_geo.set_ylabel("Latitude")
-    ax_geo.set_title("Opportunity map — colour = score, size = orders (30d)", fontsize=11)
+    ax_geo.set_title("Weather map — colour = weather_score, size = orders (30d)", fontsize=11)
     ax_geo.grid(True, alpha=0.2)
 
     fig.colorbar(im, ax=ax_hm, fraction=0.02, pad=0.02, label="Score (0-100)")
-    fig.colorbar(sc, ax=ax_geo, fraction=0.02, pad=0.02, label="opportunity_score")
-    fig.suptitle(f"Weather Campaign Opportunity — {report_date}", fontsize=13, y=0.98)
+    fig.colorbar(sc, ax=ax_geo, fraction=0.02, pad=0.02, label="weather_score")
+    fig.suptitle(
+        f"Weather Campaign Opportunity — {_title_stamp(report_date, report_time)}",
+        fontsize=13, y=0.98,
+    )
     fig.subplots_adjust(top=0.93, hspace=0.45)
     fig.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close(fig)
@@ -316,6 +350,8 @@ def run(
     rules = json.loads(SCORING_RULES_PATH.read_text(encoding="utf-8")).get("action_rules", {})
 
     report = build(report_date, products, rules)
+    report_time = str(report["report_time"].iloc[0]) if not report.empty else datetime.now(IST).strftime("%H:%M")
+    weather_fetched_at = str(report["weather_fetched_at"].iloc[0]) if not report.empty else _load_weather_fetched_at(report_date)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     out_csv = csv_path or (REPORTS_DIR / f"campaign_opportunity_{report_date}.csv")
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -335,16 +371,24 @@ def run(
         ["rank", "city", "city_tier", "weather_status", "opportunity_score",
          "opportunity_type", "recommended_product_group"]].to_string(index=False))
 
-    out: dict = {"csv_path": out_csv, "heatmap": None, "map": None, "combined": None}
+    out: dict = {
+        "csv_path": out_csv,
+        "report_date": report_date,
+        "report_time": report_time,
+        "weather_fetched_at": weather_fetched_at,
+        "heatmap": None,
+        "map": None,
+        "combined": None,
+    }
 
     if plots:
         hm = REPORTS_DIR / f"campaign_opportunity_{report_date}_heatmap.png"
         gm = REPORTS_DIR / f"campaign_opportunity_{report_date}_map.png"
-        _plot_heatmap(report, top, hm, report_date)
+        _plot_heatmap(report, top, hm, report_date, report_time)
         out["heatmap"] = hm
         logger.info("Wrote heatmap -> %s", hm)
         try:
-            _plot_geo(report, DATA_DIR / "city_master.csv", gm, report_date)
+            _plot_geo(report, DATA_DIR / "city_master.csv", gm, report_date, report_time)
             out["map"] = gm
             logger.info("Wrote geo-heatmap -> %s", gm)
         except Exception as exc:  # noqa: BLE001
@@ -353,7 +397,7 @@ def run(
     if combined_path is not None:
         try:
             _plot_combined_canvas(report, DATA_DIR / "city_master.csv", top,
-                                  combined_path, report_date)
+                                  combined_path, report_date, report_time)
             out["combined"] = combined_path
             logger.info("Wrote combined canvas -> %s", combined_path)
         except Exception as exc:  # noqa: BLE001

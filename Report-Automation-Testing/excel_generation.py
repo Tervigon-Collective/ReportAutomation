@@ -799,21 +799,55 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             start_str = end_str = None
         report_time = datetime.now(IST).strftime('%H:%M')
 
-        # Fetch supplementary data (errors are non-fatal)
+        # Fetch supplementary data (errors are non-fatal).
+        # Funnel + campaign performance are sourced from ClickHouse gold when
+        # USE_CLICKHOUSE_FUNNEL is enabled (default), with automatic fallback to the
+        # Postgres builders on any error or empty result.
+        _use_ch_funnel = os.getenv("USE_CLICKHOUSE_FUNNEL", "true").lower() in ("1", "true", "yes")
         try:
-            funnel_metrics = get_meta_funnel_metrics(start_date=start_str, end_date=end_str) if start_str else get_meta_funnel_metrics()
+            import clickhouse_report as _chr
+        except Exception as _ie:
+            logger.warning(f"clickhouse_report import failed; using Postgres funnel/campaigns: {_ie}")
+            _use_ch_funnel = False
+
+        try:
+            funnel_metrics = None
+            if _use_ch_funnel:
+                try:
+                    funnel_metrics = _chr.get_meta_funnel_metrics_ch(start_str, end_str)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse Meta funnel failed; falling back to Postgres: {_che}")
+                    funnel_metrics = None
+            if not funnel_metrics:
+                funnel_metrics = get_meta_funnel_metrics(start_date=start_str, end_date=end_str) if start_str else get_meta_funnel_metrics()
         except Exception as _fe:
             logger.warning(f"Meta funnel fetch failed: {_fe}")
             funnel_metrics = None
 
         try:
-            google_funnel = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
+            google_funnel = None
+            if _use_ch_funnel:
+                try:
+                    google_funnel = _chr.get_google_funnel_metrics_ch(timeframe_start, timeframe_end)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse Google funnel failed; falling back to Postgres: {_che}")
+                    google_funnel = None
+            if not google_funnel:
+                google_funnel = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
         except Exception as _ge:
             logger.warning(f"Google funnel fetch failed: {_ge}")
             google_funnel = None
 
         try:
-            campaign_df = get_campaign_data(start_date=start_str, end_date=end_str) if start_str else get_campaign_data()
+            campaign_df = None
+            if _use_ch_funnel:
+                try:
+                    campaign_df = _chr.get_campaign_data_ch(start_str, end_str)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse campaign data failed; falling back to Postgres: {_che}")
+                    campaign_df = None
+            if campaign_df is None or campaign_df.empty:
+                campaign_df = get_campaign_data(start_date=start_str, end_date=end_str) if start_str else get_campaign_data()
         except Exception as _ce:
             logger.warning(f"Campaign data fetch failed: {_ce}")
             campaign_df = None
@@ -1919,6 +1953,9 @@ def main():
                 attachments.append(weather_bundle["combined_plot"])
                 if _daily_email_context is not None:
                     _daily_email_context["weather_insights"] = weather_bundle["insights"]
+                    _daily_email_context["weather_report_date"] = weather_bundle.get("report_date", today_str)
+                    _daily_email_context["weather_report_time"] = weather_bundle.get("report_time", "")
+                    _daily_email_context["weather_fetched_at"] = weather_bundle.get("weather_fetched_at", "")
                 logger.info("Added weather report to email: %s", weather_bundle["csv_path"])
         except Exception as e:
             logger.warning("Weather report email section skipped: %s", e)

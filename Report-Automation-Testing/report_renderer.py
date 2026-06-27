@@ -27,33 +27,57 @@ def _get_env() -> jinja2.Environment:
     # --- Custom filters ---
 
     def fmt_inr(val) -> str:
+        """Format INR for PDF/email. Uses 'Rs.' — xhtml2pdf fonts lack the rupee glyph."""
         try:
             v = float(val)
         except Exception:
-            return "₹0"
+            return "Rs.0"
         neg = v < 0
         v = abs(v)
         if v >= 1_00_000:
-            s = f"₹{v/1_00_000:.1f}L"
+            s = f"Rs.{v/1_00_000:.1f}L"
         elif v >= 1_000:
-            s = f"₹{v/1_000:.1f}K"
+            s = f"Rs.{v/1_000:.1f}K"
         else:
-            s = f"₹{v:.0f}"
-        return f"−{s}" if neg else s
+            s = f"Rs.{v:.0f}"
+        return f"-{s}" if neg else s
 
     def fmt_roas(val) -> str:
         try:
             v = float(val)
         except Exception:
-            return "—"
+            return "-"
         return f"{v:.2f}x"
 
     def fmt_pct(val) -> str:
         try:
             v = float(val)
         except Exception:
-            return "—"
+            return "-"
         return f"{v:.1f}%"
+
+    def fmt_pct2(val) -> str:
+        try:
+            v = float(val)
+        except Exception:
+            return "-"
+        return f"{v:.2f}%"
+
+    def fmt_inr_detail(val) -> str:
+        try:
+            v = float(val)
+        except Exception:
+            return "Rs 0.00"
+        neg = v < 0
+        v = abs(v)
+        return f"-Rs {v:,.2f}" if neg else f"Rs {v:,.2f}"
+
+    def fmt_metric(val) -> str:
+        try:
+            v = float(val)
+        except Exception:
+            return "-"
+        return f"{v:.2f}"
 
     def fmt_num(val) -> str:
         try:
@@ -62,15 +86,18 @@ def _get_env() -> jinja2.Environment:
             return "0"
         return f"{v:,}"
 
-    def truncate_filter(s, length=38, end="…") -> str:
+    def truncate_filter(s, length=38, end="...") -> str:
         s = str(s)
         if len(s) <= length:
             return s
         return s[: length - len(end)] + end
 
     _env.filters["fmt_inr"] = fmt_inr
+    _env.filters["fmt_inr_detail"] = fmt_inr_detail
     _env.filters["fmt_roas"] = fmt_roas
+    _env.filters["fmt_metric"] = fmt_metric
     _env.filters["fmt_pct"] = fmt_pct
+    _env.filters["fmt_pct2"] = fmt_pct2
     _env.filters["fmt_num"] = fmt_num
     _env.filters["truncate"] = truncate_filter
 
@@ -102,6 +129,20 @@ def _strip_page_css_for_xhtml2pdf(html: str) -> str:
     # Match @page { ... } including nested braces
     pattern = r'@page\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
     return re.sub(pattern, '', html, flags=re.DOTALL)
+
+
+def _sanitize_for_xhtml2pdf(html: str) -> str:
+    """Replace glyphs missing from Helvetica/ReportLab built-in fonts."""
+    return (
+        html.replace("\u20b9", "Rs.")
+        .replace("\u2212", "-")
+        .replace("\u2014", " - ")
+        .replace("\u2013", "-")
+        .replace("\u2026", "...")
+        .replace("\u26a0", "")
+        .replace("\u2713", "")
+        .replace("\ufe0f", "")
+    )
 
 
 def html_to_pdf(html: str, output_path: str) -> str:
@@ -136,7 +177,7 @@ def html_to_pdf(html: str, output_path: str) -> str:
     # Preprocess HTML to remove unsupported @page CSS rules
     try:
         from xhtml2pdf import pisa
-        cleaned_html = _strip_page_css_for_xhtml2pdf(html)
+        cleaned_html = _sanitize_for_xhtml2pdf(_strip_page_css_for_xhtml2pdf(html))
         with open(output_path, "wb") as pdf_file:
             pisa_status = pisa.CreatePDF(cleaned_html, dest=pdf_file)
             if pisa_status.err:
@@ -178,6 +219,110 @@ def _normalize_funnel(f: dict | None) -> dict | None:
     return out
 
 
+def _bounce_bg(bounce: float) -> str:
+    """Light-blue heatmap cell background; 0% bounce stays white."""
+    try:
+        v = float(bounce)
+    except Exception:
+        return "#FFFFFF"
+    if v <= 0:
+        return "#FFFFFF"
+    ratio = min(v / 100.0, 1.0)
+    r = int(255 - (255 - 217) * ratio)
+    g = int(255 - (255 - 234) * ratio)
+    b = int(255 - (255 - 251) * ratio)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _campaign_revenue(row: dict) -> float:
+    return float(row.get("shopify_revenue") or row.get("sales") or 0)
+
+
+def _aggregate_campaign_rows(rows: list[dict]) -> dict | None:
+    if not rows:
+        return None
+    spend = sum(float(r.get("spend") or 0) for r in rows)
+    revenue = sum(_campaign_revenue(r) for r in rows)
+    cogs = sum(float(r.get("cogs") or 0) for r in rows)
+    net_profit = sum(float(r.get("net_profit") or 0) for r in rows)
+    clicks = sum(float(r.get("clicks") or 0) for r in rows)
+    impressions = sum(float(r.get("impressions") or 0) for r in rows)
+    orders = sum(float(r.get("shopify_orders") or r.get("purchases") or 0) for r in rows)
+
+    if impressions > 0:
+        ctr = clicks / impressions * 100.0
+    else:
+        ctr = sum(float(r.get("ctr") or 0) for r in rows) / len(rows)
+
+    if clicks > 0:
+        bounce_rate = sum(float(r.get("bounce_rate") or 0) * float(r.get("clicks") or 0) for r in rows) / clicks
+        conversion_rate = orders / clicks * 100.0
+    else:
+        bounce_rate = sum(float(r.get("bounce_rate") or 0) for r in rows) / len(rows)
+        conversion_rate = sum(float(r.get("conversion_rate") or 0) for r in rows) / len(rows)
+
+    gross_roas = revenue / spend if spend else 0.0
+    net_roas = (revenue - cogs) / spend if spend else 0.0
+
+    return {
+        "spend": spend,
+        "shopify_revenue": revenue,
+        "net_profit": net_profit,
+        "ctr": ctr,
+        "bounce_rate": bounce_rate,
+        "conversion_rate": conversion_rate,
+        "gross_roas": gross_roas,
+        "net_roas": net_roas,
+    }
+
+
+def _decorate_campaign_row(row: dict) -> dict:
+    out = dict(row)
+    bounce = float(out.get("bounce_rate") or 0)
+    net_roas = float(out.get("net_roas") or 0)
+    out["bounce_bg"] = _bounce_bg(bounce)
+    out["nr_low"] = net_roas < 1
+    return out
+
+
+def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict], dict | None]:
+    """
+    Group campaigns into Net ROAS segments for the PDF marketing summary.
+
+    Segments (only non-empty segments are returned):
+      - Net ROAS > 1
+      - 0.8 < Net ROAS <= 1
+      - Net ROAS <= 0.8
+    """
+    if not campaign_rows:
+        return [], None
+
+    segment_defs = [
+        ("Net ROAS > 1", lambda nr: nr > 1, False),
+        ("0.8 < Net ROAS <= 1", lambda nr: 0.8 < nr <= 1, False),
+        ("Net ROAS <= 0.8", lambda nr: nr <= 0.8, True),
+    ]
+
+    grand = _aggregate_campaign_rows(campaign_rows)
+    grand_spend = grand["spend"] if grand else 0
+    grand_revenue = grand["shopify_revenue"] if grand else 0
+
+    segments: list[dict] = []
+    for label, predicate, sort_asc in segment_defs:
+        bucket = [r for r in campaign_rows if predicate(float(r.get("net_roas") or 0))]
+        if not bucket:
+            continue
+        bucket.sort(key=lambda r: float(r.get("net_roas") or 0), reverse=not sort_asc)
+        rows = [_decorate_campaign_row(r) for r in bucket]
+        total = _aggregate_campaign_rows(bucket)
+        if total:
+            total["spend_pct"] = (total["spend"] / grand_spend * 100.0) if grand_spend else 0.0
+            total["revenue_pct"] = (total["shopify_revenue"] / grand_revenue * 100.0) if grand_revenue else 0.0
+        segments.append({"label": label, "rows": rows, "total": total})
+
+    return segments, grand
+
+
 def build_daily_pdf_context(
     api_metrics: dict,
     campaign_df,
@@ -207,6 +352,7 @@ def build_daily_pdf_context(
     ]
 
     campaigns = []
+    campaign_segments = []
     campaign_total = None
     if campaign_df is not None and not campaign_df.empty:
         df = campaign_df.copy()
@@ -227,30 +373,13 @@ def build_daily_pdf_context(
                 df["shopify_revenue"] = 0
 
         for col in ["spend", "shopify_revenue", "net_profit", "net_roas", "gross_roas",
-                    "ctr", "bounce_rate", "conversion_rate", "shopify_orders"]:
+                    "ctr", "bounce_rate", "conversion_rate", "shopify_orders", "cogs", "clicks", "impressions"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        df = df.sort_values("spend", ascending=False)
-        campaigns = df.to_dict("records")
 
-        rev_col = "shopify_revenue" if "shopify_revenue" in df.columns else "sales"
-        ord_col = "shopify_orders" if "shopify_orders" in df.columns else "purchases"
-        totals = {
-            "spend": df["spend"].sum() if "spend" in df.columns else 0,
-            "shopify_revenue": df[rev_col].sum() if rev_col in df.columns else 0,
-            "shopify_orders": df[ord_col].sum() if ord_col in df.columns else 0,
-            "net_profit": df["net_profit"].sum() if "net_profit" in df.columns else 0,
-        }
-        if totals["spend"]:
-            totals["gross_roas"] = totals["shopify_revenue"] / totals["spend"]
-            totals["net_roas"] = totals["shopify_revenue"] / totals["spend"]
-        else:
-            totals["gross_roas"] = 0
-            totals["net_roas"] = 0
-        totals["ctr"] = df["ctr"].mean() if "ctr" in df.columns else 0
-        totals["bounce_rate"] = df["bounce_rate"].mean() if "bounce_rate" in df.columns else 0
-        totals["conversion_rate"] = df["conversion_rate"].mean() if "conversion_rate" in df.columns else 0
-        campaign_total = totals
+        campaign_rows = df.to_dict("records")
+        campaign_segments, campaign_total = build_campaign_roas_segments(campaign_rows)
+        campaigns = campaign_rows
 
     return {
         "report_title": "Daily Marketing Performance Report",
@@ -261,6 +390,7 @@ def build_daily_pdf_context(
         "funnel": _normalize_funnel(funnel_metrics),
         "google_funnel": google_funnel,
         "campaigns": campaigns,
+        "campaign_segments": campaign_segments,
         "campaign_total": campaign_total,
         "insights": insights,
     }

@@ -7,16 +7,16 @@ import pandas as pd
 
 
 def _fmt_inr(val: float) -> str:
-    """Format a number as ₹ with K/L suffix."""
+    """Format a number as Rs. with K/L suffix (PDF-safe; no rupee glyph)."""
     try:
         v = float(val)
     except (TypeError, ValueError):
-        return "₹0"
+        return "Rs.0"
     if abs(v) >= 1_00_000:
-        return f"₹{v/1_00_000:.1f}L"
+        return f"Rs.{v/1_00_000:.1f}L"
     if abs(v) >= 1_000:
-        return f"₹{v/1_000:.1f}K"
-    return f"₹{v:.0f}"
+        return f"Rs.{v/1_000:.1f}K"
+    return f"Rs.{v:.0f}"
 
 
 def _pct_change(now: float, prev: float) -> str | None:

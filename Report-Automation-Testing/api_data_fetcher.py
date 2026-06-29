@@ -507,6 +507,135 @@ def fetch_order_count(start_date: Optional[str] = None, end_date: Optional[str] 
         print(f"Error fetching order count data: {e}")
         return {"orderCount": 0, "totalQuantity": 0, "metaQuantity": 0, "googleQuantity": 0, "organicQuantity": 0}
 
+def fetch_net_profit_from_db(n_days: int = 30) -> dict:
+    """
+    Calculate net profit directly from the database for the last n_days.
+
+    Sources chosen to match what the backend API computes:
+        revenue_ex_gst : shopify_orders.total_price_amount / GST_DIVISOR (all non-cancelled orders)
+        cogs           : SUM(line_item.quantity * variant.unit_cost_amount) — matches API exactly
+        meta_spend     : SUM(ads_insights_hourly.spend) — raw Meta hourly table, matches API Facebook spend
+        google_spend   : SUM(dw_google_ads_attribution.cost_amount) — comprehensive Google spend
+                         NOTE: the API backend has incomplete Google spend data (shows 0 on most days);
+                         this DB source is more accurate for Google.
+
+    Returns:
+        {
+            "dailyBreakdown": DataFrame with columns
+                [sale_date, revenue, cogs, meta_spend, google_spend, total_ad_spend, net_profit],
+            "totals": {
+                "revenue": float, "cogs": float,
+                "metaSpend": float, "googleSpend": float,
+                "adSpend": float, "netProfit": float,
+            }
+        }
+    """
+    try:
+        engine = get_db_engine()
+
+        query = text("""
+            WITH date_series AS (
+                SELECT generate_series(
+                    CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day',
+                    CURRENT_DATE,
+                    INTERVAL '1 day'
+                )::date AS sale_date
+            ),
+            revenue AS (
+                SELECT
+                    DATE(processed_at_ist) AS sale_date,
+                    SUM(total_price_amount) AS gross_revenue
+                FROM shopify_orders
+                WHERE cancelled_at_ist IS NULL
+                  AND DATE(processed_at_ist) >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
+                GROUP BY 1
+            ),
+            cogs AS (
+                SELECT
+                    DATE(o.processed_at_ist) AS sale_date,
+                    SUM(li.quantity * COALESCE(spv.unit_cost_amount, 0)) AS total_cogs
+                FROM shopify_order_line_items li
+                JOIN shopify_orders o ON li.order_id = o.order_id
+                JOIN shopify_product_variants spv ON li.variant_id = spv.variant_id
+                WHERE o.cancelled_at_ist IS NULL
+                  AND DATE(o.processed_at_ist) >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
+                GROUP BY 1
+            ),
+            -- Use ads_insights_hourly for Meta spend (raw Meta table) — matches API Facebook spend.
+            -- dw_meta_ads_attribution.spend only covers campaigns with attributed orders (~40% of actual spend).
+            meta_spend AS (
+                SELECT
+                    date_start AS sale_date,
+                    SUM(spend) AS meta_spend
+                FROM ads_insights_hourly
+                WHERE date_start >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
+                GROUP BY 1
+            ),
+            google_spend AS (
+                SELECT
+                    date_start AS sale_date,
+                    SUM(cost_amount) AS google_spend
+                FROM dw_google_ads_attribution
+                WHERE date_start >= CURRENT_DATE - CAST(:n_days - 1 AS int) * INTERVAL '1 day'
+                GROUP BY 1
+            )
+            SELECT
+                d.sale_date,
+                COALESCE(r.gross_revenue, 0)     AS gross_revenue,
+                COALESCE(c.total_cogs, 0)        AS cogs,
+                COALESCE(ms.meta_spend, 0)       AS meta_spend,
+                COALESCE(gs.google_spend, 0)     AS google_spend
+            FROM date_series d
+            LEFT JOIN revenue r       ON d.sale_date = r.sale_date
+            LEFT JOIN cogs c          ON d.sale_date = c.sale_date
+            LEFT JOIN meta_spend ms   ON d.sale_date = ms.sale_date
+            LEFT JOIN google_spend gs ON d.sale_date = gs.sale_date
+            ORDER BY d.sale_date
+        """)
+
+        df = pd.read_sql(query, engine, params={"n_days": n_days})
+
+        if df.empty:
+            logger.warning("[DB] fetch_net_profit_from_db: no data found for last %d days", n_days)
+            return {
+                "dailyBreakdown": df,
+                "totals": {"revenue": 0, "cogs": 0, "metaSpend": 0, "googleSpend": 0, "adSpend": 0, "netProfit": 0},
+            }
+
+        df = df.copy()
+        df["revenue"] = apply_net_revenue_column(df["gross_revenue"])
+        df["cogs"] = pd.to_numeric(df["cogs"], errors="coerce").fillna(0)
+        df["meta_spend"] = pd.to_numeric(df["meta_spend"], errors="coerce").fillna(0)
+        df["google_spend"] = pd.to_numeric(df["google_spend"], errors="coerce").fillna(0)
+        df["total_ad_spend"] = df["meta_spend"] + df["google_spend"]
+        df["net_profit"] = df["revenue"] - df["cogs"] - df["total_ad_spend"]
+        df = df.drop(columns=["gross_revenue"])
+
+        totals = {
+            "revenue": float(df["revenue"].sum()),
+            "cogs": float(df["cogs"].sum()),
+            "metaSpend": float(df["meta_spend"].sum()),
+            "googleSpend": float(df["google_spend"].sum()),
+            "adSpend": float(df["total_ad_spend"].sum()),
+            "netProfit": float(df["net_profit"].sum()),
+        }
+
+        logger.info(
+            "[DB] Net profit (last %d days): revenue=%.2f cogs=%.2f adSpend=%.2f netProfit=%.2f",
+            n_days, totals["revenue"], totals["cogs"], totals["adSpend"], totals["netProfit"],
+        )
+        return {"dailyBreakdown": df, "totals": totals}
+
+    except Exception as e:
+        logger.exception("[DB] Error in fetch_net_profit_from_db: %s", e)
+        return {
+            "dailyBreakdown": pd.DataFrame(
+                columns=["sale_date", "revenue", "cogs", "meta_spend", "google_spend", "total_ad_spend", "net_profit"]
+            ),
+            "totals": {"revenue": 0, "cogs": 0, "metaSpend": 0, "googleSpend": 0, "adSpend": 0, "netProfit": 0},
+        }
+
+
 def fetch_db_sales(n_days=30):
     """
     Fetch sales data from database using the provided SQL query.

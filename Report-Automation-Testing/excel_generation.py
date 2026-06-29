@@ -57,7 +57,7 @@ def get_google_funnel_metrics(start_date=None, end_date=None):
                 end_date = end_date.date()
         else:
             # Use timeframe_config if dates not provided
-            timeframe = get_timeframe_config(start_date, end_date, days_range=1, use_fixed_dates=True)
+            timeframe = get_timeframe_config(start_date, end_date, days_range=1)
             start_date = timeframe['start_date'].date() if hasattr(timeframe['start_date'], 'date') else timeframe['start_date']
             end_date = timeframe['end_date'].date() if hasattr(timeframe['end_date'], 'date') else timeframe['end_date']
         
@@ -799,21 +799,55 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             start_str = end_str = None
         report_time = datetime.now(IST).strftime('%H:%M')
 
-        # Fetch supplementary data (errors are non-fatal)
+        # Fetch supplementary data (errors are non-fatal).
+        # Funnel + campaign performance are sourced from ClickHouse gold when
+        # USE_CLICKHOUSE_FUNNEL is enabled (default), with automatic fallback to the
+        # Postgres builders on any error or empty result.
+        _use_ch_funnel = os.getenv("USE_CLICKHOUSE_FUNNEL", "true").lower() in ("1", "true", "yes")
         try:
-            funnel_metrics = get_meta_funnel_metrics(start_date=start_str, end_date=end_str) if start_str else get_meta_funnel_metrics()
+            import clickhouse_report as _chr
+        except Exception as _ie:
+            logger.warning(f"clickhouse_report import failed; using Postgres funnel/campaigns: {_ie}")
+            _use_ch_funnel = False
+
+        try:
+            funnel_metrics = None
+            if _use_ch_funnel:
+                try:
+                    funnel_metrics = _chr.get_meta_funnel_metrics_ch(start_str, end_str)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse Meta funnel failed; falling back to Postgres: {_che}")
+                    funnel_metrics = None
+            if not funnel_metrics:
+                funnel_metrics = get_meta_funnel_metrics(start_date=start_str, end_date=end_str) if start_str else get_meta_funnel_metrics()
         except Exception as _fe:
             logger.warning(f"Meta funnel fetch failed: {_fe}")
             funnel_metrics = None
 
         try:
-            google_funnel = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
+            google_funnel = None
+            if _use_ch_funnel:
+                try:
+                    google_funnel = _chr.get_google_funnel_metrics_ch(timeframe_start, timeframe_end)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse Google funnel failed; falling back to Postgres: {_che}")
+                    google_funnel = None
+            if not google_funnel:
+                google_funnel = get_google_funnel_metrics(start_date=timeframe_start, end_date=timeframe_end)
         except Exception as _ge:
             logger.warning(f"Google funnel fetch failed: {_ge}")
             google_funnel = None
 
         try:
-            campaign_df = get_campaign_data(start_date=start_str, end_date=end_str) if start_str else get_campaign_data()
+            campaign_df = None
+            if _use_ch_funnel:
+                try:
+                    campaign_df = _chr.get_campaign_data_ch(start_str, end_str)
+                except Exception as _che:
+                    logger.warning(f"ClickHouse campaign data failed; falling back to Postgres: {_che}")
+                    campaign_df = None
+            if campaign_df is None or campaign_df.empty:
+                campaign_df = get_campaign_data(start_date=start_str, end_date=end_str) if start_str else get_campaign_data()
         except Exception as _ce:
             logger.warning(f"Campaign data fetch failed: {_ce}")
             campaign_df = None
@@ -877,6 +911,29 @@ def _simple_email_body(today_str: str, chart_cids: list) -> str:
     )
 
 
+def _cleanup_paths(paths: list) -> None:
+    """Remove temp files and empty parent dirs after a successful email send."""
+    seen_dirs: set[str] = set()
+    for file_path in paths:
+        if not file_path or not os.path.exists(file_path):
+            continue
+        try:
+            parent = os.path.dirname(file_path)
+            if parent:
+                seen_dirs.add(parent)
+            os.remove(file_path)
+            logger.info("Deleted file: %s", file_path)
+        except Exception as e:
+            logger.warning("Failed to delete file %s: %s", file_path, e)
+    for parent in seen_dirs:
+        try:
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+                logger.info("Removed empty directory: %s", parent)
+        except Exception as e:
+            logger.warning("Failed to remove directory %s: %s", parent, e)
+
+
 def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, timestamp_str, plot_files_param=None, product_report_param=None, file_paths_to_attach=None):
     logger.info("Preparing to send email via Microsoft Graph API...")
     # Use the global config values loaded from database at the top of the file
@@ -912,6 +969,8 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     shopify_profit_plot_cid = None
     hourly_sales_plot_cid = None  # NEW: For hourly sales plot
     sales_by_state_pie_cid = None
+    channel_performance_cid = None
+    weather_plot_cid = None
 
     graph_api_attachments = [] # This will hold the attachments in Graph API format
 
@@ -955,11 +1014,25 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
                 sales_by_state_pie_cid = f"sales_by_state_pie_{today_str}"
                 content_id = sales_by_state_pie_cid
                 is_inline = True
+            elif 'channel_performance_daily' in base_filename:
+                descriptive_name = f"Channel Performance (Daily) - {today_str}.png"
+                m = re.search(r"channel_performance_daily_(\d{4}-\d{2}-\d{2})", base_filename)
+                chart_day = m.group(1) if m else today_str
+                channel_performance_cid = f"channel_performance_daily_{chart_day}"
+                content_id = channel_performance_cid
+                is_inline = True
             elif 'historical_insights' in base_filename:
                 descriptive_name = f"Historical Trends Plot - {today_str}.png"
                 historical_plot_cid = f"historical_plot_{today_str}"
                 content_id = historical_plot_cid
                 is_inline = True
+            elif 'campaign_opportunity_combined' in base_filename:
+                descriptive_name = f"Weather Campaign Opportunity - {today_str}.png"
+                weather_plot_cid = f"weather_campaign_{today_str}"
+                content_id = weather_plot_cid
+                is_inline = True
+            elif base_filename.startswith('campaign_opportunity_') and base_filename.endswith('.csv'):
+                descriptive_name = f"Weather Campaign Opportunity - {today_str}.csv"
             elif 'AdLevelReport' in base_filename:
                 descriptive_name = f"Ad-Level Report - {today_str}.xlsx"
             elif 'DailySummary-PDF' in base_filename:
@@ -986,7 +1059,15 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
             logger.info(f"Added attachment: {descriptive_name} (Inline: {is_inline})")
 
     # Collect chart CIDs for template rendering
-    chart_cids = [c for c in [daily_plot_cid, shopify_profit_plot_cid, hourly_sales_plot_cid, sales_by_state_pie_cid] if c]
+    chart_cids = [
+        c for c in [
+            daily_plot_cid,
+            shopify_profit_plot_cid,
+            hourly_sales_plot_cid,
+            sales_by_state_pie_cid,
+            channel_performance_cid,
+        ] if c
+    ]
 
     # Render rich HTML email using Jinja2 template when PDF context is available
     if _daily_email_context is not None:
@@ -994,6 +1075,7 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
             from report_renderer import render_email_daily
             _daily_email_context.update({
                 "chart_cids": chart_cids,
+                "weather_chart_cid": weather_plot_cid,
                 "report_date": today_str,
                 "report_time": datetime.now(IST).strftime("%H:%M"),
                 "weekday": weekday,
@@ -1030,14 +1112,7 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
         logger.info("Email sent successfully")
         
         # Use the original list of paths for deletion
-        for file_path in file_paths_to_attach:
-            if not file_path:
-                continue  # Skip None or empty paths
-            try:
-                os.remove(file_path)
-                logger.info(f"Deleted file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to delete file {file_path}: {e}")
+        _cleanup_paths([p for p in (file_paths_to_attach or []) if p])
         
         # Delete ad level report if it exists
         if ad_level_report_param and os.path.exists(ad_level_report_param):
@@ -1766,7 +1841,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
 def main():
     try:
         # Use our standardized timeframe configuration
-        timeframe = get_timeframe_config(days_range=1, use_fixed_dates=True)
+        timeframe = get_timeframe_config(days_range=1)
         today, timestamp_str = timeframe['today'], timeframe['timestamp_str']
         from datetime import datetime
         if isinstance(today, str):
@@ -1858,6 +1933,32 @@ def main():
         if plot_files:
             attachments.extend(plot_files)
             logger.info(f"Added {len(plot_files)} plot files to attachments")
+
+        # 5. Weather campaign opportunity (inline graph + CSV attachment)
+        weather_bundle = None
+        try:
+            import sys
+            _wr_src = os.path.join(os.path.dirname(__file__), "weather_report", "src")
+            if _wr_src not in sys.path:
+                sys.path.insert(0, _wr_src)
+            from email_assets import build_weather_email_bundle
+
+            today_str = datetime.now(IST).strftime('%Y-%m-%d')
+            logger.info("Fetching live weather campaign data for %s (DB + Open-Meteo)...", today_str)
+            weather_bundle = build_weather_email_bundle(
+                today_str, get_temp_dir(), top=15,
+            )
+            if weather_bundle:
+                attachments.append(weather_bundle["csv_path"])
+                attachments.append(weather_bundle["combined_plot"])
+                if _daily_email_context is not None:
+                    _daily_email_context["weather_insights"] = weather_bundle["insights"]
+                    _daily_email_context["weather_report_date"] = weather_bundle.get("report_date", today_str)
+                    _daily_email_context["weather_report_time"] = weather_bundle.get("report_time", "")
+                    _daily_email_context["weather_fetched_at"] = weather_bundle.get("weather_fetched_at", "")
+                logger.info("Added weather report to email: %s", weather_bundle["csv_path"])
+        except Exception as e:
+            logger.warning("Weather report email section skipped: %s", e)
 
         # Send the email with attachments
         send_email(None, pdf_file, metrics['ad_level_report'], today, timestamp_str, plot_files, None, attachments)

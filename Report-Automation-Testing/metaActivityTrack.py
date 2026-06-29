@@ -2,13 +2,63 @@ import requests
 import json
 import pandas as pd
 from datetime import datetime, timedelta
-import google.generativeai as genai
 import os
+from dotenv import load_dotenv
+from openai import AzureOpenAI
 import psycopg2
 from psycopg2 import pool
 import hashlib
 from pytz import timezone
 from global_config import get_temp_dir
+
+load_dotenv()
+
+AZURE_OPENAI_API_KEY = os.getenv('AZURE_OPENAI_API_KEY')
+AZURE_OPENAI_ENDPOINT = os.getenv('AZURE_OPENAI_ENDPOINT')
+AZURE_DEPLOYMENT = os.getenv('AZURE_DEPLOYMENT')
+AZURE_OPENAI_API_VERSION = os.getenv('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+
+_azure_openai_client = None
+
+def get_azure_openai_client():
+    global _azure_openai_client
+    if _azure_openai_client is None:
+        _azure_openai_client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        )
+    return _azure_openai_client
+
+SUMMARY_PROMPT = (
+    "You are a Performance Marketing Manager reviewing Meta Ads activity logs. "
+    "Summarize the following change log in a short, clear, and consistent manner, focusing only on the essential details. "
+    "For ad creative changes, specify only the fields that were modified—do not include the entire creative or unnecessary details. "
+    "Avoid options or alternatives; provide a single, direct summary suitable for a daily report. "
+    "Maintain a professional and concise tone.\n\n"
+    "Change log:\n{change_text}"
+)
+
+def llm_summarize(change_text):
+    cached = get_cached_summary(change_text)
+    if cached:
+        print(f"[Azure OpenAI Summarization] Cache hit for: {change_text}")
+        return cached
+    try:
+        print(f"[Azure OpenAI Summarization] Input: {change_text}")
+        client = get_azure_openai_client()
+        response = client.chat.completions.create(
+            model=AZURE_DEPLOYMENT,
+            messages=[{'role': 'user', 'content': SUMMARY_PROMPT.format(change_text=change_text)}],
+            max_completion_tokens=500,
+        )
+        summary = (response.choices[0].message.content or '').strip()
+        print(f"[Azure OpenAI Summarization] Output: {summary}")
+        set_cached_summary(change_text, summary)
+        return summary
+    except Exception as e:
+        print(f"[Azure OpenAI Summarization] Error: {e}")
+        return f"Azure OpenAI error: {e}"
 
 # --- CONFIGURATION ---
 ACCESS_TOKEN = 'EAAJ1b4rDAIQBO4WmTAhBdhLyTCZCfBVvOr2iAbYMLVWpIKfZAP2bWVp49ucZBzlRTpud5ZCRZB7Ae6pcEleUrZCgfER9enRiPQdCFcGW6TRHXtfcfNO5IVFBZCOj1HDZBaIp8EFJL2ZAZCABXYVrV5Qg7lWZAjuVuMfFX1uZBfPUPATvJ0OwY5w7tcoXqmK6LNwZBtQZDZD'
@@ -36,6 +86,8 @@ PG_DATABASE = os.getenv('DB_NAME', 'seleric_db')
 
 # Global connection pool
 _connection_pool = None
+_pg_cache_ready = False
+_pg_cache_available = False
 
 def get_pg_conn():
     global _connection_pool
@@ -47,7 +99,8 @@ def get_pg_conn():
             port=PG_PORT,
             user=PG_USER,
             password=PG_PASSWORD,
-            dbname=PG_DATABASE
+            dbname=PG_DATABASE,
+            connect_timeout=10,
         )
     return _connection_pool.getconn()
 
@@ -71,33 +124,56 @@ def init_pg_cache():
         cur.close()
     finally:
         return_pg_conn(conn)
-init_pg_cache()
+
+def ensure_pg_cache():
+    """Lazily initialize the summary cache table; skip caching if DB is unreachable."""
+    global _pg_cache_ready, _pg_cache_available
+    if _pg_cache_ready:
+        return _pg_cache_available
+    _pg_cache_ready = True
+    try:
+        init_pg_cache()
+        _pg_cache_available = True
+    except Exception as e:
+        print(f"[metaActivityTrack] PostgreSQL summary cache unavailable: {e}")
+    return _pg_cache_available
 
 def get_cache_key(change_text):
     return hashlib.sha256(change_text.encode('utf-8')).hexdigest()
 
 def get_cached_summary(change_text):
+    if not ensure_pg_cache():
+        return None
     key = get_cache_key(change_text)
-    conn = get_pg_conn()
     try:
-        cur = conn.cursor()
-        cur.execute('SELECT summary FROM gemini_summary_cache WHERE hash=%s', (key,))
-        row = cur.fetchone()
-        cur.close()
-        return row[0] if row else None
-    finally:
-        return_pg_conn(conn)
+        conn = get_pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('SELECT summary FROM gemini_summary_cache WHERE hash=%s', (key,))
+            row = cur.fetchone()
+            cur.close()
+            return row[0] if row else None
+        finally:
+            return_pg_conn(conn)
+    except Exception as e:
+        print(f"[metaActivityTrack] Cache read failed: {e}")
+        return None
 
 def set_cached_summary(change_text, summary):
+    if not ensure_pg_cache():
+        return
     key = get_cache_key(change_text)
-    conn = get_pg_conn()
     try:
-        cur = conn.cursor()
-        cur.execute('INSERT INTO gemini_summary_cache (hash, change_text, summary) VALUES (%s, %s, %s) ON CONFLICT (hash) DO UPDATE SET summary=EXCLUDED.summary', (key, change_text, summary))
-        conn.commit()
-        cur.close()
-    finally:
-        return_pg_conn(conn)
+        conn = get_pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute('INSERT INTO gemini_summary_cache (hash, change_text, summary) VALUES (%s, %s, %s) ON CONFLICT (hash) DO UPDATE SET summary=EXCLUDED.summary', (key, change_text, summary))
+            conn.commit()
+            cur.close()
+        finally:
+            return_pg_conn(conn)
+    except Exception as e:
+        print(f"[metaActivityTrack] Cache write failed: {e}")
 
 # --- API REQUEST (moved to function level to avoid import-time errors) ---
 def fetch_activity_data():
@@ -210,34 +286,6 @@ for item in data.get('data', []):
         base['change_summary'] = summary
         rows.append(base)
 
-GEMINI_API_KEY = 'AIzaSyAGX5XBtXfHPo4WkUepUC0XIXsiyEfUeOA'  # <-- Replace with your Gemini API key
-
-def gemini_summarize(change_text):
-    cached = get_cached_summary(change_text)
-    if cached:
-        print(f"[Gemini Summarization] Cache hit for: {change_text}")
-        return cached
-    try:
-        print(f"[Gemini Summarization] Input: {change_text}")
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        prompt = (
-            "You are a Performance Marketing Manager reviewing Meta Ads activity logs. "
-            "Summarize the following change log in a short, clear, and consistent manner, focusing only on the essential details. "
-            "For ad creative changes, specify only the fields that were modified—do not include the entire creative or unnecessary details. "
-            "Avoid options or alternatives; provide a single, direct summary suitable for a daily report. "
-            "Maintain a professional and concise tone.\n\n"
-            f"Change log:\n{change_text}"
-        )
-        response = model.generate_content(prompt)
-        summary = response.text.strip()
-        print(f"[Gemini Summarization] Output: {summary}")
-        set_cached_summary(change_text, summary)
-        return summary
-    except Exception as e:
-        print(f"[Gemini Summarization] Error: {e}")
-        return f"Gemini error: {e}"
-
 def generate_meta_activity_excel():
     """
     Generates the meta activity Excel file and returns the file path.
@@ -268,50 +316,9 @@ def generate_meta_activity_excel():
         if 'actor_id' in df.columns:
             df = df.drop(columns=['actor_id'])
 
-        # Add LLM-generated summary column using Gemini with optimized caching
+        # Add LLM-generated summary column using Azure OpenAI with optimized caching
         print("Processing LLM summaries with optimized caching...")
-        
-        # Get unique change summaries to minimize database calls
-        unique_summaries = df['change_summary'].unique()
-        summary_cache = {}
-        
-        # Pre-fetch all cached summaries
-        for summary in unique_summaries:
-            cached = get_cached_summary(summary)
-            if cached:
-                summary_cache[summary] = cached
-        
-        # Process summaries that need LLM generation
-        def process_summary_with_cache(change_text):
-            if change_text in summary_cache:
-                return summary_cache[change_text]
-            
-            # Generate new summary
-            try:
-                print(f"[Gemini Summarization] Input: {change_text}")
-                genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel('gemini-2.5-flash')
-                prompt = (
-                    "You are a Performance Marketing Manager reviewing Meta Ads activity logs. "
-                    "Summarize the following change log in a short, clear, and consistent manner, focusing only on the essential details. "
-                    "For ad creative changes, specify only the fields that were modified—do not include the entire creative or unnecessary details. "
-                    "Avoid options or alternatives; provide a single, direct summary suitable for a daily report. "
-                    "Maintain a professional and concise tone.\n\n"
-                    f"Change log:\n{change_text}"
-                )
-                response = model.generate_content(prompt)
-                summary = response.text.strip()
-                print(f"[Gemini Summarization] Output: {summary}")
-                
-                # Cache the result
-                set_cached_summary(change_text, summary)
-                summary_cache[change_text] = summary
-                return summary
-            except Exception as e:
-                print(f"[Gemini Summarization] Error: {e}")
-                return f"Gemini error: {e}"
-        
-        df['llm_summary'] = df['change_summary'].apply(process_summary_with_cache)
+        df['llm_summary'] = df['change_summary'].apply(llm_summarize)
 
         # Map object_type values for readability BEFORE exporting
         object_type_map = {
@@ -417,4 +424,4 @@ if __name__ == "__main__":
     finally:
         cleanup_connections()
 
-# Note: You need to install the required packages with: pip install google-generativeai pytz
+# Note: You need to install the required packages with: pip install openai pytz

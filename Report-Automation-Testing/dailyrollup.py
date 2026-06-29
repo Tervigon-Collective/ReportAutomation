@@ -76,8 +76,7 @@ def fetch_campaign_statuses(campaign_ids: list[int], campaign_names: list[str] =
         # Build query to get current status for each campaign
         # Get the most recent status where valid_to IS NULL or covers the date range
         if not start_date or not end_date:
-            from datetime import datetime
-            today = datetime.now().strftime('%Y-%m-%d')
+            today = get_timeframe_config()['today']
             start_date = start_date or today
             end_date = end_date or today
         
@@ -2655,8 +2654,8 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
             
             # Drop unwanted columns for organic sheet presentation
             drop_cols = [c for c in [
-                'campaign_name', 'shopify_revenue', 'shopify_cogs'  # Remove these specific columns (net_profit, gross_roas removed)
-                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity', 'unit_price', 'unit_cost', 'shopify_cogs'
+                'campaign_name', 'shopify_revenue', 'shopify_cogs',
+                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity', 'unit_price', 'unit_cost',
             ] if c in organic_campaigns.columns]
             organic_campaigns = organic_campaigns.drop(columns=drop_cols)
             

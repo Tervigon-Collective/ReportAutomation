@@ -35,24 +35,25 @@
   .header h1 { font-size: 16pt; font-weight: 700; margin: 4px 0 2px; color: #fff; }
   .header .subtitle { font-size: 8pt; color: #8892b0; }
 
-  /* KPI STRIP */
+  /* KPI STRIP - table layout (xhtml2pdf does not support flexbox) */
   .kpi-strip {
+    width: 100%;
     background: #0f3460;
     border-radius: 6px;
-    display: flex;
+    border-collapse: collapse;
     margin-bottom: 14px;
-    overflow: hidden;
   }
   .kpi-cell {
-    flex: 1;
-    padding: 12px 10px;
+    width: 20%;
+    padding: 12px 8px;
     text-align: center;
     border-right: 1px solid #16213e;
+    vertical-align: top;
   }
   .kpi-cell:last-child { border-right: none; }
-  .kpi-label { font-size: 7pt; color: #8892b0; text-transform: uppercase; letter-spacing: 0.8px; }
+  .kpi-label { font-size: 7pt; color: #a8b4c8; text-transform: uppercase; letter-spacing: 0.8px; }
   .kpi-value { font-size: 14pt; font-weight: 700; color: #e2e8f0; margin-top: 3px; }
-  .kpi-sub { font-size: 7pt; color: #64748b; margin-top: 2px; }
+  .kpi-sub { font-size: 7pt; color: #94a3b8; margin-top: 2px; }
 
   /* SECTION HEADING */
   h2 {
@@ -129,14 +130,42 @@
   .funnel-arrow { flex: 0 0 12px; display: flex; align-items: center; justify-content: center; color: #cbd5e1; font-size: 12pt; }
 
   /* INSIGHTS */
-  .insight { display: flex; align-items: flex-start; margin-bottom: 6px; }
-  .insight-dot { width: 6px; height: 6px; border-radius: 50%; background: #6366f1; margin: 4px 8px 0 0; flex-shrink: 0; }
+  .insight { margin-bottom: 6px; padding-left: 12px; }
+  .insight-bullet { color: #6366f1; font-weight: 700; margin-right: 6px; }
   .insight-text { font-size: 8.5pt; color: #334155; line-height: 1.5; }
 
   /* CAMPAIGN STATUS BADGE */
   .badge-review { background: #fef2f2; color: #dc2626; padding: 1px 5px; border-radius: 3px; font-size: 7pt; font-weight: 600; }
   .badge-strong { background: #f0fdf4; color: #16a34a; padding: 1px 5px; border-radius: 3px; font-size: 7pt; font-weight: 600; }
   .badge-active { background: #f8fafc; color: #94a3b8; padding: 1px 5px; border-radius: 3px; font-size: 7pt; }
+
+  /* CAMPAIGN ROAS SEGMENTS */
+  .campaign-table th { font-size: 7pt; padding: 4px 5px; }
+  .campaign-table td { font-size: 7.5pt; padding: 4px 5px; }
+  .segment-header td {
+    background: #f1f5f9 !important;
+    font-weight: 700;
+    color: #1a1a2e;
+    font-size: 7.5pt;
+    border-top: 1.5px solid #e2e8f0;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .section-total td {
+    background: #f8fafc !important;
+    font-weight: 700;
+    color: #334155;
+    border-top: 1px solid #e2e8f0;
+  }
+  .section-total .pct { font-size: 6.5pt; color: #64748b; font-weight: 600; }
+  .overall-total td {
+    background: #e2e8f0 !important;
+    font-weight: 700;
+    color: #1a1a2e;
+    border-top: 2px solid #94a3b8;
+    border-bottom: none;
+  }
+  .nr-low { background: #ffebee !important; }
+  .campaign-note { font-size: 7pt; color: #dc2626; font-style: italic; margin-top: 4px; }
 
   /* DIVIDER */
   .divider { border: none; border-top: 1px solid #e2e8f0; margin: 12px 0; }
@@ -152,33 +181,35 @@
 </div>
 
 <!-- KPI STRIP -->
-<div class="kpi-strip">
-  <div class="kpi-cell">
+<table class="kpi-strip">
+  <tr>
+  <td class="kpi-cell">
     <div class="kpi-label">Revenue</div>
     <div class="kpi-value">{{ total.sales | fmt_inr }}</div>
     <div class="kpi-sub">Net of GST</div>
-  </div>
-  <div class="kpi-cell">
+  </td>
+  <td class="kpi-cell">
     <div class="kpi-label">Ad Spend</div>
     <div class="kpi-value">{{ total.ad_spend | fmt_inr }}</div>
     <div class="kpi-sub">Meta + Google</div>
-  </div>
-  <div class="kpi-cell">
+  </td>
+  <td class="kpi-cell">
     <div class="kpi-label">Net Profit</div>
     <div class="kpi-value {% if total.net_profit < 0 %}negative{% else %}positive{% endif %}">{{ total.net_profit | fmt_inr }}</div>
     <div class="kpi-sub">After COGS &amp; spend</div>
-  </div>
-  <div class="kpi-cell">
+  </td>
+  <td class="kpi-cell">
     <div class="kpi-label">Blended ROAS</div>
     <div class="kpi-value">{{ total.gross_roas | fmt_roas }}</div>
     <div class="kpi-sub">{{ total.order_count }} orders</div>
-  </div>
-  <div class="kpi-cell">
+  </td>
+  <td class="kpi-cell">
     <div class="kpi-label">MER</div>
     <div class="kpi-value">{{ total.net_roas | fmt_roas }}</div>
     <div class="kpi-sub">Net ROAS</div>
-  </div>
-</div>
+  </td>
+  </tr>
+</table>
 
 <!-- CHANNEL PERFORMANCE -->
 <h2>Channel Performance</h2>
@@ -246,8 +277,8 @@
     <tr>
       <td>Impressions</td>
       <td>{{ funnel.impressions | int | fmt_num }}</td>
-      <td>—</td>
-      <td>—</td>
+      <td>-</td>
+      <td>-</td>
     </tr>
     <tr>
       <td>Clicks</td>
@@ -270,8 +301,8 @@
     <tr>
       <td>Initiate Checkout</td>
       <td>{{ funnel.initiate_checkout | int | fmt_num }}</td>
-      <td>—</td>
-      <td>—</td>
+      <td>-</td>
+      <td>-</td>
     </tr>
     <tr>
       <td>Orders</td>
@@ -300,7 +331,77 @@
 {% endif %}
 
 <!-- CAMPAIGN BREAKDOWN -->
-{% if campaigns %}
+{% if campaign_segments %}
+<h2>Campaigns by Net ROAS Segments</h2>
+<table class="campaign-table">
+  <thead>
+    <tr>
+      <th>Campaign Name</th>
+      <th>Spend</th>
+      <th>Revenue</th>
+      <th>Net Profit</th>
+      <th>CTR</th>
+      <th>Bounce</th>
+      <th>CR</th>
+      <th>GR</th>
+      <th>NR</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for segment in campaign_segments %}
+    <tr class="segment-header">
+      <td colspan="9">{{ segment.label }}</td>
+    </tr>
+    {% for row in segment.rows %}
+    <tr>
+      <td style="font-size:7pt;word-wrap:break-word;">{{ row.campaign_name | truncate(48) }}</td>
+      <td>{{ row.spend | fmt_inr_detail }}</td>
+      <td>{{ row.shopify_revenue | fmt_inr_detail }}</td>
+      <td class="{{ 'positive' if row.net_profit >= 0 else 'negative' }}">{{ row.net_profit | fmt_inr_detail }}</td>
+      <td>{{ row.ctr | fmt_pct2 }}</td>
+      <td style="background:{{ row.bounce_bg }};">{{ row.bounce_rate | fmt_pct2 }}</td>
+      <td>{{ row.conversion_rate | fmt_pct2 }}</td>
+      <td>{{ row.gross_roas | fmt_metric }}</td>
+      <td class="{{ 'nr-low' if row.nr_low else '' }}">{{ row.net_roas | fmt_metric }}</td>
+    </tr>
+    {% endfor %}
+    {% if segment.total %}
+    <tr class="section-total">
+      <td>Section Total</td>
+      <td>
+        {{ segment.total.spend | fmt_inr_detail }}<br/>
+        <span class="pct">[{{ segment.total.spend_pct | fmt_metric }}%]</span>
+      </td>
+      <td>
+        {{ segment.total.shopify_revenue | fmt_inr_detail }}<br/>
+        <span class="pct">[{{ segment.total.revenue_pct | fmt_metric }}%]</span>
+      </td>
+      <td class="{{ 'positive' if segment.total.net_profit >= 0 else 'negative' }}">{{ segment.total.net_profit | fmt_inr_detail }}</td>
+      <td>{{ segment.total.ctr | fmt_pct2 }}</td>
+      <td>{{ segment.total.bounce_rate | fmt_pct2 }}</td>
+      <td>{{ segment.total.conversion_rate | fmt_pct2 }}</td>
+      <td>{{ segment.total.gross_roas | fmt_metric }}</td>
+      <td>{{ segment.total.net_roas | fmt_metric }}</td>
+    </tr>
+    {% endif %}
+    {% endfor %}
+    {% if campaign_total %}
+    <tr class="overall-total">
+      <td>Overall Total</td>
+      <td>{{ campaign_total.spend | fmt_inr_detail }}</td>
+      <td>{{ campaign_total.shopify_revenue | fmt_inr_detail }}</td>
+      <td class="{{ 'positive' if campaign_total.net_profit >= 0 else 'negative' }}">{{ campaign_total.net_profit | fmt_inr_detail }}</td>
+      <td>{{ campaign_total.ctr | fmt_pct2 }}</td>
+      <td>{{ campaign_total.bounce_rate | fmt_pct2 }}</td>
+      <td>{{ campaign_total.conversion_rate | fmt_pct2 }}</td>
+      <td>{{ campaign_total.gross_roas | fmt_metric }}</td>
+      <td>{{ campaign_total.net_roas | fmt_metric }}</td>
+    </tr>
+    {% endif %}
+  </tbody>
+</table>
+<p class="campaign-note">Note: Campaign totals are computed from the displayed dailyrollup campaign data.</p>
+{% elif campaigns %}
 <h2>Meta Campaign Performance</h2>
 <table>
   <thead>
@@ -321,10 +422,10 @@
   <tbody>
     {% for row in campaigns %}
     <tr>
-      <td style="max-width:120pt;overflow:hidden;font-size:7.5pt;">{{ row.campaign_name | truncate(42) }}</td>
+      <td style="font-size:7.5pt;word-wrap:break-word;">{{ row.campaign_name | truncate(42) }}</td>
       <td style="font-size:7pt;">
-        {% if row.net_roas <= 0 and row.spend > 500 %}<span class="badge-review">⚠ Review</span>
-        {% elif row.net_roas >= 2 %}<span class="badge-strong">✓ Strong</span>
+        {% if row.net_roas <= 0 and row.spend > 500 %}<span class="badge-review">Review</span>
+        {% elif row.net_roas >= 2 %}<span class="badge-strong">Strong</span>
         {% else %}<span class="badge-active">Active</span>{% endif %}
       </td>
       <td>{{ row.spend | fmt_inr }}</td>
@@ -362,8 +463,8 @@
 <h2>Key Insights &amp; Recommendations</h2>
 {% for insight in insights %}
 <div class="insight">
-  <div class="insight-dot"></div>
-  <div class="insight-text">{{ insight }}</div>
+  <span class="insight-bullet">*</span>
+  <span class="insight-text">{{ insight }}</span>
 </div>
 {% endfor %}
 {% endif %}

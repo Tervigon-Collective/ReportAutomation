@@ -12,6 +12,23 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 _env: jinja2.Environment | None = None
 
 
+def _indian_group(v: float) -> str:
+    """Format a non-negative number with Indian digit grouping, no decimals (e.g. 1,40,289)."""
+    n = int(round(v))
+    s = str(n)
+    if len(s) <= 3:
+        return s
+    head, tail = s[:-3], s[-3:]
+    # group the head in pairs from the right
+    parts = []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return ",".join(parts) + "," + tail
+
+
 def _get_env() -> jinja2.Environment:
     global _env
     if _env is not None:
@@ -27,19 +44,27 @@ def _get_env() -> jinja2.Environment:
     # --- Custom filters ---
 
     def fmt_inr(val) -> str:
-        """Format INR for PDF/email. Uses 'Rs.' — xhtml2pdf fonts lack the rupee glyph."""
+        """Format INR for PDF/email. Uses 'Rs.' — xhtml2pdf fonts lack the rupee glyph.
+
+        Shows full comma-grouped numbers by default (e.g. Rs.1,40,289). Set
+        PDF_ABBREVIATE_INR=true to use the compact L/K form instead.
+        """
         try:
             v = float(val)
         except Exception:
             return "Rs.0"
         neg = v < 0
         v = abs(v)
-        if v >= 1_00_000:
-            s = f"Rs.{v/1_00_000:.1f}L"
-        elif v >= 1_000:
-            s = f"Rs.{v/1_000:.1f}K"
+        if os.getenv("PDF_ABBREVIATE_INR", "false").lower() in ("1", "true", "yes"):
+            if v >= 1_00_000:
+                s = f"Rs.{v/1_00_000:.1f}L"
+            elif v >= 1_000:
+                s = f"Rs.{v/1_000:.1f}K"
+            else:
+                s = f"Rs.{v:.0f}"
         else:
-            s = f"Rs.{v:.0f}"
+            # Full (untrimmed) number, Indian grouping
+            s = f"Rs.{_indian_group(v)}"
         return f"-{s}" if neg else s
 
     def fmt_roas(val) -> str:
@@ -323,6 +348,39 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
     return segments, grand
 
 
+def build_returns_row(total: dict, channels: list[dict]) -> dict:
+    """
+    Reconciling "Returned / Cancelled" row: the gap between the all-up dashboard ``total``
+    (event-date returns/cancels, marketplace adjustments) and the sum of the attributed
+    ``channels`` shown in a Channel Performance table. Adding this row to those channel
+    rows reconciles them to Total exactly so the net profit lines up.
+
+    ``channels`` is a list of channel metric dicts (the rows displayed in that table).
+    """
+    def _num(d, key):
+        try:
+            return float(d.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    ch_sales = sum(_num(c, "sales") for c in channels)
+    ch_ad_spend = sum(_num(c, "ad_spend") for c in channels)
+    ch_cogs = sum(_num(c, "cogs") for c in channels)
+    ch_net_profit = sum(_num(c, "net_profit") for c in channels)
+    ch_orders = sum(int(c.get("order_count") or 0) for c in channels)
+
+    row = {
+        "sales": round(_num(total, "sales") - ch_sales, 2),
+        "ad_spend": round(_num(total, "ad_spend") - ch_ad_spend, 2),
+        "cogs": round(_num(total, "cogs") - ch_cogs, 2),
+        "net_profit": round(_num(total, "net_profit") - ch_net_profit, 2),
+        "order_count": int(total.get("order_count") or 0) - ch_orders,
+    }
+    # Only show the row when the gap is material (avoid a noise row of ~Rs.0).
+    row["show"] = any(abs(row[k]) >= 1 for k in ("sales", "cogs", "net_profit"))
+    return row
+
+
 def build_daily_pdf_context(
     api_metrics: dict,
     campaign_df,
@@ -331,6 +389,7 @@ def build_daily_pdf_context(
     insights: list[str],
     report_date: str,
     report_time: str,
+    roas_reconciliation: dict | None = None,
 ) -> dict:
     """
     Assemble the template context dict for the daily PDF.
@@ -344,12 +403,17 @@ def build_daily_pdf_context(
     meta = api_metrics.get("meta", {})
     google = api_metrics.get("google", {})
     organic = api_metrics.get("organic", {})
+    amazon = api_metrics.get("amazon", {})
 
     channels = [
         ("Meta", meta),
         ("Google", google),
         ("Organic", organic),
     ]
+    # Amazon is a separate marketplace; include it as a channel row only when the
+    # source provides it (dashboard_stats). The legacy hourly source omits it.
+    if amazon:
+        channels.append(("Amazon", amazon))
 
     campaigns = []
     campaign_segments = []
@@ -381,16 +445,21 @@ def build_daily_pdf_context(
         campaign_segments, campaign_total = build_campaign_roas_segments(campaign_rows)
         campaigns = campaign_rows
 
+    # Reconciling "Returned / Cancelled" row so the channel rows + this row sum to Total.
+    returns_row = build_returns_row(total, [c for _, c in channels])
+
     return {
         "report_title": "Daily Marketing Performance Report",
         "date_range": report_date,
         "report_time": report_time,
         "total": total,
         "channels": channels,
+        "returns_row": returns_row,
         "funnel": _normalize_funnel(funnel_metrics),
         "google_funnel": google_funnel,
         "campaigns": campaigns,
         "campaign_segments": campaign_segments,
         "campaign_total": campaign_total,
         "insights": insights,
+        "roas_reconciliation": roas_reconciliation,
     }

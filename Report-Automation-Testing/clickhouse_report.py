@@ -239,7 +239,7 @@ def get_campaign_data_ch(start_date=None, end_date=None, brand_id: Optional[int]
 
     sql = """
         WITH ads AS (
-            SELECT campaign_id,
+            SELECT toString(campaign_id) AS campaign_key,
                    any(campaign_name) AS campaign_name,
                    sum(impressions) AS impressions,
                    sum(clicks) AS clicks,
@@ -249,35 +249,80 @@ def get_campaign_data_ch(start_date=None, end_date=None, brand_id: Optional[int]
                    sum(initiate_checkout) AS ic
             FROM gold.fct_meta_ads_daily
             WHERE brand_id = %(b)s AND report_date >= toDate(%(s)s) AND report_date <= toDate(%(e)s)
-            GROUP BY campaign_id
+            GROUP BY campaign_key
+        ),
+        meta_attr AS (
+            -- one row per Meta-attributed order with its campaign (matches the dashboard
+            -- channel mapping: meta/facebook/instagram/fb/ig), deduped, non-test, non-voided.
+            -- Orders with no/zero campaign id are bucketed under 'UNKNOWN'.
+            SELECT brand_id, order_id,
+                   coalesce(nullIf(nullIf(toString(argMax(lt_campaign_id, _loaded_at)), ''), '0'), 'UNKNOWN') AS campaign_key,
+                   argMax(lt_campaign_name, _loaded_at) AS attr_campaign_name
+            FROM gold.fct_order_attribution
+            WHERE brand_id = %(b)s AND order_date >= toDate(%(s)s) AND order_date <= toDate(%(e)s)
+              AND lower(trimBoth(coalesce(lt_platform, ''))) IN ('meta','facebook','instagram','fb','ig')
+              AND coalesce(is_test, 0) = 0
+              AND lower(trimBoth(coalesce(order_status, ''))) != 'voided'
+            GROUP BY brand_id, order_id
+        ),
+        orders_dedup AS (
+            SELECT brand_id, order_id,
+                   argMax(order_status, _loaded_at) AS order_status,
+                   argMax(is_revenue_adjustment, _loaded_at) AS is_revenue_adjustment,
+                   toFloat64(argMax(net_revenue, _loaded_at)) AS net_revenue,
+                   toFloat64(argMax(net_revenue_excl_tax, _loaded_at)) AS net_revenue_excl_tax,
+                   toFloat64(argMax(gross_revenue, _loaded_at)) AS gross_revenue,
+                   toFloat64(argMax(gross_revenue_excl_tax, _loaded_at)) AS gross_revenue_excl_tax,
+                   toFloat64(argMax(total_discounts, _loaded_at)) AS total_discounts,
+                   toFloat64(argMax(total_tax, _loaded_at)) AS total_tax
+            FROM gold.fct_orders WHERE brand_id = %(b)s GROUP BY brand_id, order_id
         ),
         ordr AS (
-            SELECT a.lt_campaign_id AS campaign_id,
+            -- revenue = canonical net-attributed-sales (same rule as the dashboard / channel
+            -- breakdown), NOT gross_revenue/GST, so campaign totals reconcile with the Meta channel
+            SELECT m.campaign_key AS campaign_key,
+                   any(m.attr_campaign_name) AS attr_campaign_name,
                    count() AS orders,
-                   sum(a.gross_revenue) / %(gst)s AS revenue,
+                   sum(if(lower(trimBoth(coalesce(o.order_status,''))) = 'cancelled', 0,
+                       if(o.is_revenue_adjustment = 1, 0,
+                       if(o.net_revenue > 0, o.net_revenue_excl_tax,
+                          greatest(0, o.gross_revenue_excl_tax -
+                            if(o.net_revenue > 0 AND o.gross_revenue_excl_tax > o.net_revenue_excl_tax,
+                               o.gross_revenue_excl_tax - o.net_revenue_excl_tax,
+                               if(o.total_tax > 0 AND o.gross_revenue > 0,
+                                  o.total_discounts * ((o.gross_revenue - o.total_tax) / o.gross_revenue),
+                                  o.total_discounts))))))) AS revenue,
                    sum(coalesce(ic.net_cogs, 0)) AS cogs
-            FROM gold.fct_order_attribution AS a
+            FROM meta_attr AS m
+            INNER JOIN orders_dedup AS o ON o.brand_id = m.brand_id AND o.order_id = m.order_id
             LEFT JOIN (
                 SELECT order_id, sum(toFloat64(net_cogs)) AS net_cogs
                 FROM gold.fct_order_items
                 WHERE brand_id = %(b)s AND order_date >= toDate(%(s)s) AND order_date <= toDate(%(e)s)
+                  AND coalesce(is_gift_card, 0) = 0
                 GROUP BY order_id
-            ) AS ic ON a.order_id = ic.order_id
-            WHERE a.brand_id = %(b)s AND a.order_date >= toDate(%(s)s) AND a.order_date <= toDate(%(e)s)
-              AND lower(coalesce(a.lt_platform, '')) = 'meta'
-            GROUP BY campaign_id
+            ) AS ic ON ic.order_id = m.order_id
+            GROUP BY campaign_key
         )
-        SELECT ads.campaign_name AS campaign_name,
-               ads.impressions AS impressions,
-               ads.clicks AS clicks,
-               ads.spend AS spend,
-               ads.lpv AS lpv,
+        -- FULL OUTER JOIN so EVERY attributed order is shown: spend-bearing campaigns,
+        -- order-only campaigns (spend 0), and a single 'Unknown Campaign' row for orders
+        -- with no campaign id. Overall total then ties out to the Meta channel.
+        SELECT multiIf(
+                   o.campaign_key = 'UNKNOWN', 'Unknown Campaign',
+                   ads.campaign_name != '', ads.campaign_name,
+                   o.attr_campaign_name != '', o.attr_campaign_name,
+                   if(ads.campaign_key != '', ads.campaign_key, o.campaign_key)
+               ) AS campaign_name,
+               coalesce(ads.impressions, 0) AS impressions,
+               coalesce(ads.clicks, 0) AS clicks,
+               coalesce(ads.spend, 0) AS spend,
+               coalesce(ads.lpv, 0) AS lpv,
                coalesce(o.orders, 0) AS purchases,
                coalesce(o.revenue, 0) AS shopify_revenue,
                coalesce(o.cogs, 0) AS cogs
-        FROM ads LEFT JOIN ordr AS o ON ads.campaign_id = o.campaign_id
-        WHERE ads.spend > 0 OR coalesce(o.orders, 0) > 0
-        ORDER BY ads.spend DESC
+        FROM ads FULL OUTER JOIN ordr AS o ON ads.campaign_key = o.campaign_key
+        WHERE coalesce(ads.spend, 0) > 0 OR coalesce(o.orders, 0) > 0
+        ORDER BY coalesce(ads.spend, 0) DESC, shopify_revenue DESC
     """
     result = client.query(sql, parameters=params)
     df = pd.DataFrame(result.result_rows, columns=result.column_names)

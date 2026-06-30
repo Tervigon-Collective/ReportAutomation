@@ -262,6 +262,11 @@ def aggregate_channel_performance(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     agg["net_profit"] = agg["gross_revenue_excl_gst"] - agg["cogs"] - agg["ad_spend"]
+    agg["gross_roas"] = np.where(
+        agg["ad_spend"] > 0,
+        agg["gross_revenue_excl_gst"] / agg["ad_spend"],
+        np.nan,
+    )
     agg["net_roas"] = np.where(
         agg["ad_spend"] > 0,
         (agg["gross_revenue_excl_gst"] - agg["cogs"]) / agg["ad_spend"],
@@ -271,10 +276,243 @@ def aggregate_channel_performance(df: pd.DataFrame) -> pd.DataFrame:
     agg["cogs"] = agg["cogs"].round(2)
     agg["ad_spend"] = agg["ad_spend"].round(2)
     agg["net_profit"] = agg["net_profit"].round(2)
+    agg["gross_roas"] = agg["gross_roas"].round(2)
     agg["net_roas"] = agg["net_roas"].round(2)
     order_map = {p: i for i, p in enumerate(PLATFORM_ORDER)}
     agg["_sort"] = agg["platform"].map(order_map).fillna(99)
     return agg.sort_values("_sort").drop(columns=["_sort"]).reset_index(drop=True)
+
+
+def fetch_channel_attributed_canonical(
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+    brand_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Independent per-channel attribution recompute using the SAME canonical definitions as
+    the dashboard / PDF channel table: net-attributed-sales (deduped fct_orders join) and
+    ad spend from the daily ad tables (fct_meta_ads_daily / fct_google_ads_daily).
+
+    Returns a DataFrame [platform, net_sales, ad_spend] for meta / google / organic.
+    Used by the ROAS reconciliation so the Calc side matches the PDF side (no method gap).
+    """
+    if get_clickhouse_client is None:
+        raise ImportError("clickhouse-connect is required.")
+    start_str = _to_date_str(start_date)
+    end_str = _to_date_str(end_date)
+    if brand_id is None:
+        brand_id = get_brand_id()
+    client = get_clickhouse_client()
+    p = {"b": int(brand_id), "s": start_str, "e": end_str}
+
+    sales_sql = """
+        WITH order_channel AS (
+            SELECT a.brand_id, a.order_id,
+                any(multiIf(
+                    lowerUTF8(trimBoth(coalesce(a.lt_platform,''))) IN ('meta','facebook','instagram','fb','ig'),'meta',
+                    lowerUTF8(trimBoth(coalesce(a.lt_platform,''))) IN ('google','google_ads'),'google',
+                    'organic')) AS channel
+            FROM gold.fct_order_attribution AS a
+            WHERE a.brand_id=%(b)s AND a.order_date>=toDate(%(s)s) AND a.order_date<=toDate(%(e)s)
+              AND coalesce(a.is_test,0)=0 AND lowerUTF8(trimBoth(coalesce(a.order_status,'')))!='voided'
+            GROUP BY a.brand_id, a.order_id
+        ),
+        orders_dedup AS (
+            SELECT brand_id, order_id, argMax(order_date,_loaded_at) order_date,
+                argMax(order_status,_loaded_at) order_status, argMax(is_test,_loaded_at) is_test,
+                argMax(is_revenue_adjustment,_loaded_at) is_rev_adj,
+                toFloat64(argMax(net_revenue,_loaded_at)) nr, toFloat64(argMax(net_revenue_excl_tax,_loaded_at)) nret,
+                toFloat64(argMax(gross_revenue,_loaded_at)) gr, toFloat64(argMax(gross_revenue_excl_tax,_loaded_at)) gret,
+                toFloat64(argMax(total_discounts,_loaded_at)) td, toFloat64(argMax(total_tax,_loaded_at)) tt
+            FROM gold.fct_orders WHERE brand_id=%(b)s GROUP BY brand_id, order_id
+        ),
+        base AS (
+            SELECT coalesce(oc.channel,'organic') AS channel,
+                if(o.nr>0 AND o.gret>o.nret, o.gret-o.nret, if(o.tt>0 AND o.gr>0, o.td*((o.gr-o.tt)/o.gr), o.td)) AS disc_excl,
+                o.order_status, o.is_rev_adj, o.nr, o.nret, o.gret
+            FROM orders_dedup o LEFT JOIN order_channel oc ON oc.brand_id=o.brand_id AND oc.order_id=o.order_id
+            WHERE o.order_date>=toDate(%(s)s) AND o.order_date<=toDate(%(e)s)
+              AND coalesce(o.is_test,0)=0 AND lowerUTF8(trimBoth(coalesce(o.order_status,'')))!='voided'
+        )
+        SELECT channel, round(sum(if(lowerUTF8(trimBoth(coalesce(order_status,'')))='cancelled',0,
+            if(is_rev_adj=1,0,if(nr>0,nret,greatest(0,gret-disc_excl))))),2) AS net_sales
+        FROM base GROUP BY channel
+    """
+    sales = {r[0]: float(r[1]) for r in client.query(sales_sql, parameters=p).result_rows}
+
+    def _spend(table):
+        q = (f"SELECT round(sum(toFloat64(spend)),2) FROM gold.{table} "
+             "WHERE brand_id=%(b)s AND report_date>=toDate(%(s)s) AND report_date<=toDate(%(e)s)")
+        v = client.query(q, parameters=p).result_rows[0][0]
+        return float(v or 0)
+
+    spend = {"meta": _spend("fct_meta_ads_daily"), "google": _spend("fct_google_ads_daily"), "organic": 0.0}
+    rows = [{"platform": ch, "net_sales": round(sales.get(ch, 0.0), 2), "ad_spend": round(spend.get(ch, 0.0), 2)}
+            for ch in ("meta", "google", "organic")]
+    return pd.DataFrame(rows)
+
+
+def reconcile_roas_with_pdf_metrics(
+    api_metrics: dict,
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+    brand_id: Optional[int] = None,
+    roas_tolerance: float = 0.03,
+    revenue_tolerance_pct: float = 0.01,
+) -> Optional[dict]:
+    """
+    Compare gross ROAS and revenue from channel_performance (ClickHouse attribution)
+    against the dashboard PDF metrics (api_metrics).
+
+    Returns per-channel rows with pdf vs calculated values, or None on fetch failure.
+    """
+    try:
+        # Independent attribution recompute using the SAME canonical definitions as the PDF
+        # channel table (net-attributed-sales + daily ad spend), so the two sides reconcile
+        # without a method gap.
+        calc_df = fetch_channel_attributed_canonical(start_date, end_date, brand_id=brand_id)
+    except Exception as exc:
+        logger.warning("ROAS reconciliation skipped: %s", exc)
+        return None
+
+    if calc_df.empty:
+        return None
+
+    calc_by_platform = calc_df.set_index("platform")
+
+    def _row(platform: str, pdf_key: str) -> dict:
+        pdf_ch = api_metrics.get(pdf_key, {})
+        pdf_sales = float(pdf_ch.get("sales", 0) or 0)
+        pdf_spend = float(pdf_ch.get("ad_spend", 0) or 0)
+        pdf_gross_roas = float(pdf_ch.get("gross_roas", 0) or 0)
+
+        if platform in calc_by_platform.index:
+            calc = calc_by_platform.loc[platform]
+            calc_revenue = float(calc["net_sales"])
+            calc_spend = float(calc["ad_spend"])
+        else:
+            calc_revenue = 0.0
+            calc_spend = 0.0
+
+        calc_gross_roas = (calc_revenue / calc_spend) if calc_spend > 0 else None
+        sales_delta_pct = (
+            (calc_revenue - pdf_sales) / pdf_sales * 100.0 if pdf_sales else None
+        )
+        roas_delta = (
+            (calc_gross_roas - pdf_gross_roas)
+            if calc_gross_roas is not None and pdf_spend > 0
+            else None
+        )
+        revenue_match = (
+            sales_delta_pct is None
+            or abs(sales_delta_pct) <= revenue_tolerance_pct * 100.0
+        )
+        roas_match = (
+            roas_delta is None
+            or abs(roas_delta) <= roas_tolerance
+        )
+
+        return {
+            "platform": platform,
+            "label": PLATFORM_LABELS.get(platform, platform.title()),
+            "pdf_sales": round(pdf_sales, 2),
+            "calc_revenue": round(calc_revenue, 2),
+            "sales_delta_pct": round(sales_delta_pct, 2) if sales_delta_pct is not None else None,
+            "pdf_ad_spend": round(pdf_spend, 2),
+            "calc_ad_spend": round(calc_spend, 2),
+            "pdf_gross_roas": round(pdf_gross_roas, 2),
+            "calc_gross_roas": round(calc_gross_roas, 2) if calc_gross_roas is not None else None,
+            "roas_delta": round(roas_delta, 2) if roas_delta is not None else None,
+            "revenue_match": revenue_match,
+            "roas_match": roas_match,
+        }
+
+    channels = [_row(p, p) for p in ("meta", "google", "organic")]
+    # "Attributed Total" = sum of the attributed channels on BOTH sides (not the all-up
+    # dashboard total, which also includes Amazon and event-date returns/cancels and would
+    # introduce a spurious gap).
+    total_pdf_sales = sum(c["pdf_sales"] for c in channels)
+    total_pdf_spend = sum(c["pdf_ad_spend"] for c in channels)
+    total_pdf_gross = (total_pdf_sales / total_pdf_spend) if total_pdf_spend else 0.0
+    total_calc_revenue = sum(c["calc_revenue"] for c in channels)
+    total_calc_spend = sum(c["calc_ad_spend"] for c in channels)
+    total_calc_gross = (
+        total_calc_revenue / total_calc_spend if total_calc_spend > 0 else None
+    )
+    total_sales_delta = (
+        (total_calc_revenue - total_pdf_sales) / total_pdf_sales * 100.0
+        if total_pdf_sales
+        else None
+    )
+    total_roas_delta = (
+        (total_calc_gross - total_pdf_gross)
+        if total_calc_gross is not None and total_pdf_spend > 0
+        else None
+    )
+    total_revenue_match = (
+        total_sales_delta is None
+        or abs(total_sales_delta) <= revenue_tolerance_pct * 100.0
+    )
+    total_roas_match = (
+        total_roas_delta is None
+        or abs(total_roas_delta) <= roas_tolerance
+    )
+
+    return {
+        "channels": channels,
+        "total": {
+            "pdf_sales": round(total_pdf_sales, 2),
+            "calc_revenue": round(total_calc_revenue, 2),
+            "sales_delta_pct": round(total_sales_delta, 2) if total_sales_delta is not None else None,
+            "pdf_gross_roas": round(total_pdf_gross, 2),
+            "calc_gross_roas": round(total_calc_gross, 2) if total_calc_gross is not None else None,
+            "roas_delta": round(total_roas_delta, 2) if total_roas_delta is not None else None,
+            "revenue_match": total_revenue_match,
+            "roas_match": total_roas_match,
+        },
+        "all_match": all(r["revenue_match"] and r["roas_match"] for r in channels)
+        and total_revenue_match
+        and total_roas_match,
+    }
+
+
+def roas_reconciliation_insights(reconciliation: Optional[dict]) -> list[str]:
+    """Narrative bullets when PDF dashboard ROAS diverges from attribution query."""
+    if not reconciliation or reconciliation.get("all_match"):
+        return []
+
+    bullets: list[str] = []
+    for row in reconciliation.get("channels", []):
+        if row.get("revenue_match") and row.get("roas_match"):
+            continue
+        parts: list[str] = []
+        if not row.get("revenue_match") and row.get("sales_delta_pct") is not None:
+            parts.append(
+                f"revenue {row['pdf_sales']:,.0f} (PDF) vs {row['calc_revenue']:,.0f} "
+                f"(attribution), Δ{row['sales_delta_pct']:+.1f}%"
+            )
+        if not row.get("roas_match") and row.get("calc_gross_roas") is not None:
+            parts.append(
+                f"gross ROAS {row['pdf_gross_roas']:.2f}x (PDF) vs "
+                f"{row['calc_gross_roas']:.2f}x (attribution), "
+                f"Δ{row.get('roas_delta', 0):+.2f}"
+            )
+        if parts:
+            bullets.append(f"{row['label']}: " + "; ".join(parts) + ".")
+
+    total = reconciliation.get("total", {})
+    if total and not (total.get("revenue_match") and total.get("roas_match")):
+        parts = []
+        if not total.get("revenue_match") and total.get("sales_delta_pct") is not None:
+            parts.append(f"blended revenue Δ{total['sales_delta_pct']:+.1f}%")
+        if not total.get("roas_match") and total.get("calc_gross_roas") is not None:
+            parts.append(
+                f"blended gross ROAS {total['pdf_gross_roas']:.2f}x (PDF) vs "
+                f"{total['calc_gross_roas']:.2f}x (attribution)"
+            )
+        if parts:
+            bullets.append("Total: " + "; ".join(parts) + ".")
+    return bullets
 
 
 def _format_inr(value: float) -> str:
@@ -283,6 +521,17 @@ def _format_inr(value: float) -> str:
         return f"{sym}{value / 100_000:.1f}L"
     if abs(value) >= 1_000:
         return f"{sym}{value / 1_000:.1f}K"
+    return f"{sym}{value:,.0f}"
+
+
+def _format_inr_axis(value: float, _pos=None) -> str:
+    """Linear y-axis ticks: keep one unit (K or L) so spacing reads correctly."""
+    sym = _currency_symbol()
+    av = abs(value)
+    if av >= 1_000_000:
+        return f"{sym}{value / 100_000:.1f}L"
+    if av >= 1_000:
+        return f"{sym}{value / 1_000:.0f}K"
     return f"{sym}{value:,.0f}"
 
 
@@ -307,8 +556,8 @@ def _platform_palette(platform: str) -> dict[str, str]:
     }
 
 
-def _add_bar_labels(ax, bars, values, fmt_fn, min_height_frac=0.0):
-    """Place value labels above (or below) bars; skip near-zero bars."""
+def _add_bar_labels(ax, bars, values, fmt_fn, min_height_frac=0.0, zero_label: Optional[str] = None):
+    """Place value labels above (or below) bars; skip near-zero bars unless zero_label set."""
     vals = [float(v) for v in values]
     ymax = max(max(vals), 0.0) if vals else 1
     ymin = min(min(vals), 0.0) if vals else 0
@@ -316,6 +565,17 @@ def _add_bar_labels(ax, bars, values, fmt_fn, min_height_frac=0.0):
     pad = span * 0.03
     for bar, val in zip(bars, vals):
         if val == 0:
+            if zero_label:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    pad * 0.35,
+                    zero_label,
+                    ha="center",
+                    va="bottom",
+                    fontsize=7.5,
+                    fontweight="500",
+                    color="#999999",
+                )
             continue
         if ymax > 0 and val > 0 and val / ymax < min_height_frac:
             continue
@@ -480,7 +740,18 @@ def plot_channel_performance(
             logger.warning("All channel performance metrics zero — skipping chart.")
             return None
 
-        platforms = [p for p in PLATFORM_ORDER if p in df["platform"].values]
+        platforms = [
+            p
+            for p in PLATFORM_ORDER
+            if p in df["platform"].values
+            and (
+                df.loc[df["platform"] == p, "gross_revenue_excl_gst"].sum()
+                + df.loc[df["platform"] == p, "cogs"].sum()
+                + df.loc[df["platform"] == p, "ad_spend"].sum()
+                + df.loc[df["platform"] == p, "attributed_orders"].sum()
+            )
+            > 0
+        ]
         plot_df = df.set_index("platform").reindex(platforms).fillna(0).reset_index()
         channel_labels = [PLATFORM_LABELS.get(p, p.title()) for p in platforms]
 
@@ -510,7 +781,7 @@ def plot_channel_performance(
         total_spend = float(plot_df["ad_spend"].sum())
         total_net_profit = float(plot_df["net_profit"].sum())
         total_orders = int(plot_df["attributed_orders"].sum())
-        total_net_roas = (total_rev - total_cogs) / total_spend if total_spend > 0 else 0
+        total_gross_roas = total_rev / total_spend if total_spend > 0 else 0
 
         rev_vals = plot_df["gross_revenue_excl_gst"].values.astype(float)
         cogs_vals = plot_df["cogs"].values.astype(float)
@@ -520,32 +791,11 @@ def plot_channel_performance(
 
         n = len(platforms)
         x = np.arange(n)
-        bar_w = 0.15
-        offsets = np.array([-2, -1, 0, 1, 2], dtype=float) * bar_w
+        bar_w = 0.18
+        offsets = np.array([-1.5, -0.5, 0.5, 1.5], dtype=float) * bar_w
 
-        num_days = _day_count_in_range(start_str, end_str)
-        end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
-        roas_start = end_dt - timedelta(days=roas_trend_days - 1)
-        if num_days >= 2:
-            roas_raw = raw
-        elif include_roas_trend:
-            roas_raw = fetch_channel_performance(roas_start, end_dt, brand_id=brand_id)
-        else:
-            roas_raw = None
-        show_roas_panel = roas_raw is not None and not roas_raw.empty and len(
-            roas_raw["report_date"].unique()
-        ) >= 2
-
-        if show_roas_panel:
-            fig = plt.figure(figsize=(14, 10.5), facecolor="white")
-            gs = fig.add_gridspec(2, 1, height_ratios=[1.45, 1], hspace=0.42)
-            ax1 = fig.add_subplot(gs[0])
-            ax2 = ax1.twinx()
-            ax_roas = fig.add_subplot(gs[1])
-        else:
-            fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
-            ax2 = ax1.twinx()
-            ax_roas = None
+        fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
+        ax2 = ax1.twinx()
 
         rev_colors = [METRIC_COLORS["revenue"]] * n
         cogs_colors = [METRIC_COLORS["cogs"]] * n
@@ -554,7 +804,6 @@ def plot_channel_performance(
             METRIC_COLORS["net_profit"] if val >= 0 else "#C62828"
             for val in profit_vals
         ]
-        order_colors = [_platform_palette(p)["orders"] for p in platforms]
 
         bars_rev = ax1.bar(
             x + offsets[0],
@@ -592,15 +841,19 @@ def plot_channel_performance(
             linewidth=1.0,
             zorder=3,
         )
-        bars_orders = ax2.bar(
-            x + offsets[4],
+
+        ax2.plot(
+            x,
             order_vals,
-            bar_w,
-            color=order_colors,
-            edgecolor="white",
-            linewidth=1.0,
-            alpha=0.95,
-            zorder=3,
+            color=METRIC_COLORS["orders"],
+            marker="o",
+            markersize=9,
+            markeredgecolor="white",
+            markeredgewidth=1.2,
+            linewidth=2.2,
+            linestyle="-",
+            zorder=4,
+            label=METRIC_LABELS["orders"],
         )
 
         ax1.set_xticks(x)
@@ -626,7 +879,10 @@ def plot_channel_performance(
         ax1.spines["bottom"].set_color("#BBBBBB")
         ax2.spines["right"].set_color("#BBBBBB")
 
-        ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: _format_inr(v)))
+        from matplotlib.ticker import MaxNLocator
+
+        ax1.yaxis.set_major_locator(MaxNLocator(nbins=6, prune=None))
+        ax1.yaxis.set_major_formatter(plt.FuncFormatter(_format_inr_axis))
         ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{int(v):,}"))
 
         money_vals = np.concatenate([rev_vals, cogs_vals, spend_vals, profit_vals])
@@ -641,9 +897,21 @@ def plot_channel_performance(
 
         _add_bar_labels(ax1, bars_rev, rev_vals, _format_inr)
         _add_bar_labels(ax1, bars_cogs, cogs_vals, _format_inr)
-        _add_bar_labels(ax1, bars_spend, spend_vals, _format_inr)
+        _add_bar_labels(ax1, bars_spend, spend_vals, _format_inr, zero_label="—")
         _add_bar_labels(ax1, bars_profit, profit_vals, _format_inr, min_height_frac=0.02)
-        _add_bar_labels(ax2, bars_orders, order_vals, lambda v: f"{int(v):,}")
+        for xi, val in zip(x, order_vals):
+            if val <= 0:
+                continue
+            ax2.annotate(
+                f"{int(val):,}",
+                (xi, val),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=8.5,
+                fontweight="600",
+                color="#1a1a1a",
+            )
 
         ax1.set_xlim(-0.75, n - 0.25)
 
@@ -653,35 +921,36 @@ def plot_channel_performance(
             f"Total ad spend: {_format_inr(total_spend)}   ·   "
             f"Net profit: {_format_inr(total_net_profit)}   ·   "
             f"Orders: {total_orders:,}   ·   "
-            f"Blended net ROAS: {total_net_roas:.2f}x"
+            f"Blended gross ROAS: {total_gross_roas:.2f}x"
         )
 
-        fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=0.98 if show_roas_panel else 0.97)
-        fig.text(0.5, 0.935 if show_roas_panel else 0.905, subtitle, ha="center", va="top", fontsize=10, color="#555555")
+        fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=0.97)
+        fig.text(0.5, 0.905, subtitle, ha="center", va="top", fontsize=10, color="#555555")
 
         from matplotlib.patches import Patch
+        from matplotlib.lines import Line2D
 
         metric_handles = [
             Patch(facecolor=METRIC_COLORS["revenue"], edgecolor="white", label=METRIC_LABELS["revenue"]),
             Patch(facecolor=METRIC_COLORS["cogs"], edgecolor="white", label=METRIC_LABELS["cogs"]),
             Patch(facecolor=METRIC_COLORS["ad_spend"], edgecolor="white", label=METRIC_LABELS["ad_spend"]),
             Patch(facecolor=METRIC_COLORS["net_profit"], edgecolor="white", label=METRIC_LABELS["net_profit"]),
+            Line2D(
+                [0],
+                [0],
+                color=METRIC_COLORS["orders"],
+                marker="o",
+                markersize=7,
+                linewidth=2,
+                label=METRIC_LABELS["orders"],
+            ),
         ]
-        platform_handles = [
-            Patch(
-                facecolor=PLATFORM_COLORS.get(p, "#666666"),
-                edgecolor="white",
-                linewidth=0.8,
-                label=f"{PLATFORM_LABELS.get(p, p.title())} orders",
-            )
-            for p in platforms
-        ]
-        legend_y = 0.91 if show_roas_panel else 0.875
+        legend_y = 0.875
         fig.legend(
-            handles=metric_handles + platform_handles,
+            handles=metric_handles,
             loc="upper center",
             bbox_to_anchor=(0.5, legend_y),
-            ncol=min(len(metric_handles) + len(platform_handles), 8),
+            ncol=len(metric_handles),
             frameon=True,
             fontsize=8.5,
             edgecolor="#DDDDDD",
@@ -689,8 +958,8 @@ def plot_channel_performance(
         )
         fig.text(
             0.5,
-            legend_y - 0.045 if show_roas_panel else legend_y - 0.048,
-            "Bar order per channel (left → right): Revenue · COGS · Ad Spend · Net Profit · Orders  |  Net ROAS lines = channel colors",
+            legend_y - 0.048,
+            "Bars per channel (left → right): Revenue · COGS · Ad Spend · Net Profit  |  Orders line (right axis)",
             ha="center",
             va="top",
             fontsize=8.5,
@@ -698,11 +967,7 @@ def plot_channel_performance(
             style="italic",
         )
 
-        if show_roas_panel and ax_roas is not None:
-            _plot_net_roas_by_day(ax_roas, roas_raw)
-            fig.subplots_adjust(top=0.88, bottom=0.10, hspace=0.38)
-        else:
-            plt.tight_layout(rect=[0.04, 0.06, 0.96, 0.82])
+        plt.tight_layout(rect=[0.04, 0.06, 0.96, 0.82])
         if save_path:
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
@@ -734,8 +999,6 @@ def plot_channel_performance_daily(
         save_path=save_path,
         brand_id=brand_id,
         period_label=label,
-        include_roas_trend=True,
-        roas_trend_days=7,
     )
 
 

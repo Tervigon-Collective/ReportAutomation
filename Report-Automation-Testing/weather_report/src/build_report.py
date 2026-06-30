@@ -209,12 +209,40 @@ def build(report_date: str, products: dict, rules: dict) -> pd.DataFrame:
 
 
 # ----------------------------- plotting --------------------------------------
+def _draw_score_heatmap(ax, mat, col_labels, ylabels, *, title=None, title_fontsize=11):
+    """Gap-free score heatmap (imshow + aspect=auto leaves white row seams)."""
+    import numpy as np
+
+    ny, nx = mat.shape
+    mesh = ax.pcolormesh(
+        np.arange(nx + 1), np.arange(ny + 1), mat,
+        cmap="RdYlGn", vmin=0, vmax=100, shading="flat", edgecolors="none",
+        antialiased=False,
+    )
+    ax.set_xlim(0, nx)
+    ax.set_ylim(ny, 0)
+    ax.set_xticks(np.arange(nx) + 0.5, labels=col_labels)
+    ax.set_yticks(np.arange(ny) + 0.5, labels=ylabels)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    if title:
+        pad = 12 if title_fontsize > 11 else 8
+        ax.set_title(title, fontsize=title_fontsize, pad=pad)
+    for i in range(ny):
+        for j in range(nx):
+            v = mat[i, j]
+            ax.text(j + 0.5, i + 0.5, f"{v:.0f}", ha="center", va="center", fontsize=7,
+                    color="black" if 25 <= v <= 80 else "white")
+    return mesh
+
+
 def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path,
                   report_date: str, report_time: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     cols = ["weather_score", "sales_score", "market_size_score",
             "trend_score", "opportunity_score"]
@@ -224,19 +252,15 @@ def _plot_heatmap(report: pd.DataFrame, top: int, out_path: Path,
     ylabels = [f"{r['city']}  ·  {r['weather_status']}" for _, r in d.iterrows()]
 
     fig, ax = plt.subplots(figsize=(9, max(5, 0.42 * len(d) + 1.5)))
-    im = ax.imshow(mat, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
-    ax.set_xticks(range(len(col_labels)), labels=col_labels)
-    ax.set_yticks(range(len(d)), labels=ylabels, fontsize=8)
-    ax.set_title(
-        f"Weather Campaign Opportunity - top {len(d)} cities ({_title_stamp(report_date, report_time)})",
-        fontsize=12, pad=12,
+    mesh = _draw_score_heatmap(
+        ax, mat, col_labels, ylabels,
+        title=(
+            f"Weather Campaign Opportunity - top {len(d)} cities "
+            f"({_title_stamp(report_date, report_time)})"
+        ),
+        title_fontsize=12,
     )
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            v = mat[i, j]
-            ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=7,
-                    color="black" if 25 <= v <= 80 else "white")
-    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
+    cbar = fig.colorbar(mesh, ax=ax, fraction=0.025, pad=0.02)
     cbar.set_label("Score (0-100)")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
@@ -303,18 +327,10 @@ def _plot_combined_canvas(
     gs = fig.add_gridspec(2, 1, height_ratios=[max(1.2, 0.04 * len(heat) + 0.8), 1.1], hspace=0.35)
 
     ax_hm = fig.add_subplot(gs[0])
-    im = ax_hm.imshow(mat, cmap="RdYlGn", aspect="auto", vmin=0, vmax=100)
-    ax_hm.set_xticks(range(len(col_labels)), labels=col_labels)
-    ax_hm.set_yticks(range(len(heat)), labels=ylabels, fontsize=8)
-    ax_hm.set_title(
-        f"Top {len(heat)} cities — sub-scores ({_title_stamp(report_date, report_time)})",
-        fontsize=11, pad=8,
+    mesh = _draw_score_heatmap(
+        ax_hm, mat, col_labels, ylabels,
+        title=f"Top {len(heat)} cities — sub-scores ({_title_stamp(report_date, report_time)})",
     )
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            v = mat[i, j]
-            ax_hm.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=7,
-                       color="black" if 25 <= v <= 80 else "white")
 
     ax_geo = fig.add_subplot(gs[1])
     sc = ax_geo.scatter(geo["longitude"], geo["latitude"], c=geo["weather_score"],
@@ -328,7 +344,7 @@ def _plot_combined_canvas(
     ax_geo.set_title("Weather map — colour = weather_score, size = orders (30d)", fontsize=11)
     ax_geo.grid(True, alpha=0.2)
 
-    fig.colorbar(im, ax=ax_hm, fraction=0.02, pad=0.02, label="Score (0-100)")
+    fig.colorbar(mesh, ax=ax_hm, fraction=0.02, pad=0.02, label="Score (0-100)")
     fig.colorbar(sc, ax=ax_geo, fraction=0.02, pad=0.02, label="weather_score")
     fig.suptitle(
         f"Weather Campaign Opportunity — {_title_stamp(report_date, report_time)}",

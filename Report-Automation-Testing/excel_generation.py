@@ -775,10 +775,25 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
     except Exception:
         pass
 
-    # Get organized metrics from backend hourly APIs for the requested timeframe
-    # Falls back to "today" if timeframe not provided
-    api_metrics = get_organized_metrics_for_pdf(timeframe_start, timeframe_end)
-    
+    # Get organized metrics for the requested timeframe.
+    # Primary source: General Statistics dashboard (dashboard_stats — API-first with a
+    # ClickHouse gold fallback). Falls back to the legacy hourly endpoints
+    # (get_organized_metrics_for_pdf) on any failure or when disabled.
+    api_metrics = None
+    if os.getenv("USE_DASHBOARD_STATS", "true").lower() in ("1", "true", "yes"):
+        try:
+            from dashboard_stats import get_dashboard_pdf_metrics
+            api_metrics = get_dashboard_pdf_metrics(timeframe_start, timeframe_end)
+            logger.info("PDF top-section metrics sourced from dashboard_stats (General Statistics)")
+        except Exception as _de:
+            logger.warning(
+                "dashboard_stats failed (%s); falling back to hourly get_organized_metrics_for_pdf",
+                _de,
+            )
+            api_metrics = None
+    if api_metrics is None:
+        api_metrics = get_organized_metrics_for_pdf(timeframe_start, timeframe_end)
+
     # Extract metrics for easier access
     meta_metrics = api_metrics['meta']
     google_metrics = api_metrics['google']
@@ -854,7 +869,26 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
 
         # Generate narrative insights
         from report_insights import generate_daily_insights
+        from channel_performance import reconcile_roas_with_pdf_metrics, roas_reconciliation_insights
+
+        reconcile_start = start_str or (
+            today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)[:10]
+        )
+        reconcile_end = end_str or reconcile_start
+        roas_reconciliation = reconcile_roas_with_pdf_metrics(
+            api_metrics, reconcile_start, reconcile_end
+        )
+        if roas_reconciliation:
+            if roas_reconciliation.get("all_match"):
+                logger.info("ROAS reconciliation: PDF dashboard matches channel attribution query")
+            else:
+                logger.warning(
+                    "ROAS reconciliation mismatch: %s",
+                    roas_reconciliation_insights(roas_reconciliation),
+                )
+
         insights = generate_daily_insights(api_metrics, campaign_df, funnel_metrics, google_funnel)
+        insights = roas_reconciliation_insights(roas_reconciliation) + insights
 
         # Render PDF via weasyprint + Jinja2
         from report_renderer import build_daily_pdf_context, render_pdf_html, html_to_pdf
@@ -866,6 +900,7 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             insights=insights,
             report_date=date_range,
             report_time=report_time,
+            roas_reconciliation=roas_reconciliation,
         )
         if report_type == 'wtd':
             pdf_ctx['report_title'] = 'Week-to-Date Marketing Performance Report'
@@ -878,11 +913,25 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
         html_to_pdf(html, report_name)
 
         # Cache context for send_email; reuse pdf_ctx's normalized funnel
+        from report_renderer import build_returns_row
+        _email_total = api_metrics.get("total", {})
+        _email_amazon = api_metrics.get("amazon", {})
+        _email_channels = [
+            api_metrics.get("meta", {}),
+            api_metrics.get("google", {}),
+            api_metrics.get("organic", {}),
+        ]
+        # Amazon is a separate marketplace; show it as a channel row only when the
+        # source provides it, so the channel rows + returns row reconcile to Total.
+        if _email_amazon:
+            _email_channels.append(_email_amazon)
         _daily_email_context = {
             "meta": api_metrics.get("meta", {}),
             "google": api_metrics.get("google", {}),
             "organic": api_metrics.get("organic", {}),
-            "total": api_metrics.get("total", {}),
+            "amazon": _email_amazon,
+            "total": _email_total,
+            "returns_row": build_returns_row(_email_total, _email_channels),
             "funnel": pdf_ctx.get("funnel"),
             "google_funnel": google_funnel,
             "campaigns": pdf_ctx.get("campaigns", []),

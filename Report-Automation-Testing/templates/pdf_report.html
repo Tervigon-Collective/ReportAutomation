@@ -95,6 +95,14 @@
     border-bottom: none;
   }
   .total-row td:first-child { color: #e2e8f0; }
+  .adjustment-row td {
+    background: #fef9f3 !important;
+    color: #92400e;
+    font-style: italic;
+    border-top: 1px solid #fde7cf;
+    border-bottom: 1px solid #fde7cf;
+  }
+  .adjustment-row td:first-child { color: #92400e; }
   .positive { color: #16a34a; font-weight: 600; }
   .negative { color: #dc2626; font-weight: 600; }
   .warn { color: #d97706; font-weight: 600; }
@@ -191,7 +199,7 @@
   <td class="kpi-cell">
     <div class="kpi-label">Ad Spend</div>
     <div class="kpi-value">{{ total.ad_spend | fmt_inr }}</div>
-    <div class="kpi-sub">Meta + Google</div>
+    <div class="kpi-sub">Meta + Google + Amazon</div>
   </td>
   <td class="kpi-cell">
     <div class="kpi-label">Net Profit</div>
@@ -245,6 +253,21 @@
       <td>{{ ch.cpp | fmt_inr }}</td>
     </tr>
     {% endfor %}
+    {% if returns_row and returns_row.show %}
+    <tr class="adjustment-row">
+      <td>Returned / Cancelled</td>
+      <td>{{ returns_row.sales | fmt_inr }}</td>
+      <td>{{ returns_row.ad_spend | fmt_inr }}</td>
+      <td>{{ returns_row.cogs | fmt_inr }}</td>
+      <td>{{ (returns_row.sales - returns_row.cogs) | fmt_inr }}</td>
+      <td class="{{ 'positive' if returns_row.net_profit >= 0 else 'negative' }}">{{ returns_row.net_profit | fmt_inr }}</td>
+      <td>—</td>
+      <td>—</td>
+      <td>—</td>
+      <td>{{ returns_row.order_count }}</td>
+      <td>—</td>
+    </tr>
+    {% endif %}
     <tr class="total-row">
       <td>Total</td>
       <td>{{ total.sales | fmt_inr }}</td>
@@ -260,6 +283,53 @@
     </tr>
   </tbody>
 </table>
+
+{% if roas_reconciliation %}
+<h3>ROAS Reconciliation (PDF vs Attribution Query)</h3>
+<p style="font-size:10px;color:#666;margin:0 0 8px;">
+  Gross ROAS recalculated from <code>fct_order_attribution</code> revenue and <code>fct_daily_pnl</code> ad spend,
+  compared to the dashboard PDF channel table above.
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Channel</th>
+      <th>PDF Revenue</th>
+      <th>Calc Revenue</th>
+      <th>Rev Δ%</th>
+      <th>PDF Gross ROAS</th>
+      <th>Calc Gross ROAS</th>
+      <th>ROAS Δ</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in roas_reconciliation.channels %}
+    <tr>
+      <td>{{ row.label }}</td>
+      <td>{{ row.pdf_sales | fmt_inr }}</td>
+      <td>{{ row.calc_revenue | fmt_inr }}</td>
+      <td>{% if row.sales_delta_pct is not none %}{{ row.sales_delta_pct | fmt_metric }}%{% else %}—{% endif %}</td>
+      <td>{{ row.pdf_gross_roas | fmt_roas }}</td>
+      <td>{% if row.calc_gross_roas is not none %}{{ row.calc_gross_roas | fmt_roas }}{% else %}—{% endif %}</td>
+      <td>{% if row.roas_delta is not none %}{{ row.roas_delta | fmt_metric }}{% else %}—{% endif %}</td>
+      <td>{% if row.revenue_match and row.roas_match %}OK{% else %}Review{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% set t = roas_reconciliation.total %}
+    <tr class="total-row">
+      <td>Attributed Total</td>
+      <td>{{ t.pdf_sales | fmt_inr }}</td>
+      <td>{{ t.calc_revenue | fmt_inr }}</td>
+      <td>{% if t.sales_delta_pct is not none %}{{ t.sales_delta_pct | fmt_metric }}%{% else %}—{% endif %}</td>
+      <td>{{ t.pdf_gross_roas | fmt_roas }}</td>
+      <td>{% if t.calc_gross_roas is not none %}{{ t.calc_gross_roas | fmt_roas }}{% else %}—{% endif %}</td>
+      <td>{% if t.roas_delta is not none %}{{ t.roas_delta | fmt_metric }}{% else %}—{% endif %}</td>
+      <td>{% if t.revenue_match and t.roas_match %}OK{% else %}Review{% endif %}</td>
+    </tr>
+  </tbody>
+</table>
+{% endif %}
 
 <!-- META FUNNEL -->
 {% if funnel %}

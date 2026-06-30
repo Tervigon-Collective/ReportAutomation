@@ -1029,37 +1029,58 @@ def plot_daily_shopify_profit(save_path=None):
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         
-        logger.info(f"Fetching net profit data from DB for last 30 days")
-
-        db_result = fetch_net_profit_from_db(n_days=30)
-        db_df = db_result.get("dailyBreakdown", pd.DataFrame())
-        totals = db_result["totals"]
+        # Net profit series — ClickHouse `fct_order_items` rollup + ad-spend tables
+        # (Meta/Google/Amazon daily), NOT `fct_daily_pnl`. Falls back to the Postgres
+        # builder (with a real-time API override for today) if ClickHouse is unavailable.
+        db_df = pd.DataFrame()
+        totals = {}
+        if os.getenv("USE_DASHBOARD_STATS", "true").lower() in ("1", "true", "yes"):
+            try:
+                from dashboard_stats import fetch_daily_net_profit_series
+                brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+                db_df = fetch_daily_net_profit_series(brand_id, start_str, end_str)
+                if not db_df.empty:
+                    totals = {
+                        "revenue": float(db_df["revenue"].sum()),
+                        "cogs": float(db_df["cogs"].sum()),
+                        "adSpend": float(db_df["total_ad_spend"].sum()),
+                        "netProfit": float(db_df["net_profit"].sum()),
+                    }
+                    logger.info("Net profit series from ClickHouse fct_order_items rollup (%d days)", len(db_df))
+            except Exception as e:
+                logger.warning("ClickHouse net profit series failed (%s); falling back to Postgres", e)
+                db_df = pd.DataFrame()
 
         if db_df.empty:
-            logger.error("No net profit data returned from DB")
+            logger.info("Fetching net profit data from Postgres for last 30 days")
+            db_result = fetch_net_profit_from_db(n_days=30)
+            db_df = db_result.get("dailyBreakdown", pd.DataFrame())
+            totals = db_result.get("totals", {})
+            if not db_df.empty:
+                # For today, Postgres ad spend syncs with a lag; override today's
+                # net_profit with the real-time API value (ex-GST).
+                ist = pytz.timezone('Asia/Kolkata')
+                today_ist = datetime.now(pytz.utc).astimezone(ist).date()
+                today_str = today_ist.strftime('%Y-%m-%d')
+                db_df['sale_date'] = pd.to_datetime(db_df['sale_date']).dt.date
+                today_mask = db_df['sale_date'] == today_ist
+                if today_mask.any():
+                    try:
+                        api_today = fetch_net_profit_single_day(start_date=today_str, end_date=today_str)
+                        api_net_profit = float(
+                            (api_today.get('data') or {}).get('totals', {}).get('netProfit', 0) or 0
+                        )
+                        db_df.loc[today_mask, 'net_profit'] = api_net_profit
+                        logger.info(f"[Today override] DB net_profit replaced with API (ex-GST) value: {api_net_profit:.2f}")
+                    except Exception as e:
+                        logger.warning(f"[Today override] Failed to fetch API net profit for today, keeping DB value: {e}")
+
+        if db_df.empty:
+            logger.error("No net profit data returned")
             return None
 
-        # For today, DB data is partial (ad spend syncs with a lag).
-        # Override today's net_profit with the real-time API value.
-        ist = pytz.timezone('Asia/Kolkata')
-        today_ist = datetime.now(pytz.utc).astimezone(ist).date()
-        today_str = today_ist.strftime('%Y-%m-%d')
-        db_df['sale_date'] = pd.to_datetime(db_df['sale_date']).dt.date
-        today_mask = db_df['sale_date'] == today_ist
-        if today_mask.any():
-            try:
-                # fetch_net_profit_single_day applies GST adjustment (ex-GST revenue), matching the daily report
-                api_today = fetch_net_profit_single_day(start_date=today_str, end_date=today_str)
-                api_net_profit = float(
-                    (api_today.get('data') or {}).get('totals', {}).get('netProfit', 0) or 0
-                )
-                db_df.loc[today_mask, 'net_profit'] = api_net_profit
-                logger.info(f"[Today override] DB net_profit replaced with API (ex-GST) value: {api_net_profit:.2f}")
-            except Exception as e:
-                logger.warning(f"[Today override] Failed to fetch API net profit for today, keeping DB value: {e}")
-
-        logger.info(f"Fetched {len(db_df)} days of net profit data from DB")
-        logger.info(f"DB totals: Revenue=₹{totals['revenue']:,.2f}, COGS=₹{totals['cogs']:,.2f}, Ad Spend=₹{totals['adSpend']:,.2f}, Net Profit=₹{totals['netProfit']:,.2f}")
+        logger.info(f"Fetched {len(db_df)} days of net profit data")
+        logger.info(f"Totals: Revenue=Rs{totals.get('revenue',0):,.2f}, COGS=Rs{totals.get('cogs',0):,.2f}, Ad Spend=Rs{totals.get('adSpend',0):,.2f}, Net Profit=Rs{totals.get('netProfit',0):,.2f}")
 
         dates = []
         revenues = []
@@ -1112,7 +1133,9 @@ def plot_daily_shopify_profit(save_path=None):
                 if y0 < 0 and y1 >= 0 or y0 >= 0 and y1 < 0:
                     # Find the zero crossing point
                     if y1 != y0:
-                        x_cross = x0 + (x1 - x0) * (0 - y0) / (y1 - y0)
+                        # Multiply the date delta by the bounded [0,1] ratio (not the raw
+                        # profit delta) to avoid Timedelta int64 overflow on large values.
+                        x_cross = x0 + (x1 - x0) * ((0 - y0) / (y1 - y0))
                         ax.plot([x0, x_cross], [y0, 0], color='red' if y0 < 0 else '#2ecc71', linewidth=1.35, solid_capstyle='round', zorder=1)
                         ax.plot([x_cross, x1], [0, y1], color='red' if y1 < 0 else '#2ecc71', linewidth=1.35, solid_capstyle='round', zorder=1)
         

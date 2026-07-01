@@ -27,6 +27,7 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 from api_data_fetcher import (  # noqa: E402
     BASE_URL,
+    _api_root,
     fetch_amazon_attribution,
     fetch_channel_attribution,
     fetch_google_attribution,
@@ -44,6 +45,7 @@ from api_data_fetcher import (  # noqa: E402
     get_api_brand_id,
     get_api_company_id,
     get_firebase_token,
+    make_authenticated_request,
 )
 
 
@@ -95,14 +97,50 @@ def _call_fetch(fn: Callable, start: str, end: str, extra: dict) -> Optional[dic
     return fn(start, end)
 
 
+def _probe_endpoint(name: str, start: str, end: str, extra: dict) -> tuple[Optional[dict], Optional[int], Optional[str]]:
+    """Raw HTTP probe returning (data, status_code, error_message)."""
+    params = {
+        "brand_id": get_api_brand_id(),
+        "company_id": get_api_company_id(),
+        "start_date": start,
+        "end_date": end,
+        **{k: v for k, v in extra.items() if k not in ("time_aggregation", "channel")},
+    }
+    if "time_aggregation" in extra:
+        params["time_aggregation"] = extra["time_aggregation"]
+    if "channel" in extra:
+        params["channel"] = extra["channel"]
+    if name == "pnl/summary":
+        from api_data_fetcher import pnl_end_exclusive
+        params = {
+            "brand_id": get_api_brand_id(),
+            "company_id": get_api_company_id(),
+            "startDate": start,
+            "endDate": pnl_end_exclusive(end),
+        }
+    url = f"{_api_root()}/v1/{name.lstrip('/')}"
+    try:
+        resp = make_authenticated_request("GET", url, params=params, timeout=120)
+        if resp.status_code != 200:
+            return None, resp.status_code, resp.text[:200]
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return None, resp.status_code, str(payload.get("error"))
+        data = payload.get("data", payload) if isinstance(payload, dict) else payload
+        return data if isinstance(data, dict) else {"data": data}, resp.status_code, None
+    except Exception as exc:
+        return None, None, str(exc)
+
+
 def run_tests(start: str, end: str) -> list[dict]:
     results = []
     token = get_firebase_token()
     if not token:
-        print("WARNING: No Firebase token — requests may return 401")
+        print("WARNING: No bearer token — set JWT_ACCESS_TOKEN or BACKEND_EMAIL/BACKEND_PASSWORD")
 
     print(f"Base URL: {BASE_URL}")
     print(f"brand_id={get_api_brand_id()} company_id={get_api_company_id()}")
+    print(f"Auth token: {'yes' if token else 'NO'} (len={len(token) if token else 0})")
     print(f"Date range: {start} to {end}\n")
 
     for name, fn, extra, required in _specs(start, end):
@@ -110,9 +148,12 @@ def run_tests(start: str, end: str) -> list[dict]:
         err = None
         data = None
         missing = []
+        http_status = None
         try:
-            data = _call_fetch(fn, start, end, extra)
-            if data is None:
+            data, http_status, probe_err = _probe_endpoint(name, start, end, extra)
+            if probe_err:
+                err = probe_err
+            elif data is None:
                 err = "null response"
             else:
                 missing = _has_keys(data, required)
@@ -124,6 +165,7 @@ def run_tests(start: str, end: str) -> list[dict]:
         row = {
             "endpoint": name,
             "status": status,
+            "http_status": http_status,
             "latency_ms": round(elapsed_ms, 1),
             "error": err,
             "missing_fields": missing,
@@ -131,8 +173,9 @@ def run_tests(start: str, end: str) -> list[dict]:
         }
         results.append(row)
         extra_msg = f" missing={missing}" if missing else ""
+        http_msg = f" HTTP {http_status}" if http_status else ""
         err_msg = f" error={err}" if err else ""
-        print(f"[{status}] {name:40s} {elapsed_ms:7.1f}ms{err_msg}{extra_msg}")
+        print(f"[{status}] {name:40s} {elapsed_ms:7.1f}ms{http_msg}{err_msg}{extra_msg}")
 
     passed = sum(1 for r in results if r["status"] == "PASS")
     print(f"\n{passed}/{len(results)} endpoints passed")

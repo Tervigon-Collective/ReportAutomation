@@ -13,24 +13,30 @@ from revenue_gst import apply_net_revenue, apply_net_revenue_column, adjust_net_
 
 logger = logging.getLogger(__name__)  # Use module logger for diagnostic messages
 
-BASE_URL = os.getenv('BACKEND_API_BASE_URL', "https://node.seleric.com/api").strip()
+BASE_URL = os.getenv('BACKEND_API_BASE_URL', "https://backend.seleric.com/api").strip()
 
 # External SKU/Spend/Sales reporting service base
 SKU_SPEND_SALES_BASE = os.getenv('SKU_SPEND_SALES_BASE', "https://skuspendsales-aghtewckaqbdfqep.centralindia-01.azurewebsites.net/api").strip()
 
-"""Authentication helpers for BASE_URL requests (Firebase ID token).
+"""Authentication for Node-Backend (JWT) and legacy Firebase hosts.
 
-Authentication Methods (in priority order):
-1. Direct token: Set FIREBASE_ID_TOKEN environment variable with a Firebase user ID token
-2. Auto-generation: Automatically generates tokens using email/password credentials
-   - Uses FIREBASE_WEB_API_KEY, FIREBASE_EMAIL, FIREBASE_PASSWORD (must be set in environment)
-   - Tokens are cached and auto-refreshed on expiration
+Node-Backend (`backend.seleric.com`) expects JWT from `/api/v1/auth/login`, not Firebase ID tokens.
 
-All requests to BASE_URL will automatically include the Authorization header when a token is available.
-Tokens are automatically refreshed on 401 errors.
+Authentication priority for Node-Backend:
+1. JWT_ACCESS_TOKEN or BACKEND_ACCESS_TOKEN environment variable
+2. POST /api/v1/auth/login with BACKEND_EMAIL + BACKEND_PASSWORD (or FIREBASE_EMAIL/PASSWORD fallback)
+3. POST /api/v1/auth/select-context with DASHBOARD_COMPANY_ID + CLICKHOUSE_BRAND_ID
+
+Legacy Firebase (old hosts):
+1. FIREBASE_ID_TOKEN
+2. Firebase email/password via Identity Toolkit
 """
 API_BEARER_TOKEN = os.getenv('FIREBASE_ID_TOKEN', '').strip()
+JWT_ACCESS_TOKEN = os.getenv('JWT_ACCESS_TOKEN', os.getenv('BACKEND_ACCESS_TOKEN', '')).strip()
+BACKEND_EMAIL = os.getenv('BACKEND_EMAIL', os.getenv('FIREBASE_EMAIL', '')).strip()
+BACKEND_PASSWORD = os.getenv('BACKEND_PASSWORD', os.getenv('FIREBASE_PASSWORD', '')).strip()
 FIREBASE_TOKEN_CACHE = {'token': None, 'expires_at': None}
+JWT_TOKEN_CACHE = {'token': None, 'expires_at': None, 'session': None, 'login_failed': False}
 
 # Firebase credentials for automatic token generation from environment
 FIREBASE_WEB_API_KEY = os.getenv('FIREBASE_WEB_API_KEY', '').strip()
@@ -104,16 +110,100 @@ def generate_firebase_id_token_from_credentials() -> Optional[str]:
     except Exception as e:
         return None
 
+def _uses_node_backend_jwt() -> bool:
+    host = BASE_URL.lower()
+    return 'backend.seleric' in host or 'localhost' in host or '127.0.0.1' in host
+
+
+def _api_root() -> str:
+    return BASE_URL.rstrip('/')
+
+
+def generate_backend_jwt_from_login() -> Optional[str]:
+    """Obtain Node-Backend JWT via /auth/login (+ optional select-context)."""
+    if not BACKEND_EMAIL or not BACKEND_PASSWORD:
+        return None
+
+    if (
+        JWT_TOKEN_CACHE.get('token')
+        and JWT_TOKEN_CACHE.get('expires_at')
+        and datetime.now() < JWT_TOKEN_CACHE['expires_at']
+    ):
+        return JWT_TOKEN_CACHE['token']
+
+    session = requests.Session()
+    try:
+        prime = session.get(f"{_api_root()}/v1/version", timeout=15)
+        csrf = session.cookies.get('csrf_token')
+        headers = {'x-csrf-token': csrf} if csrf else {}
+        login_resp = session.post(
+            f"{_api_root()}/v1/auth/login",
+            json={'email': BACKEND_EMAIL, 'password': BACKEND_PASSWORD, 'remember_me': True},
+            headers=headers,
+            timeout=20,
+        )
+        if login_resp.status_code != 200:
+            logger.warning(
+                "[API] Backend login failed (HTTP %s): %s",
+                login_resp.status_code,
+                login_resp.text[:300],
+            )
+            return None
+        payload = login_resp.json()
+        data = payload.get('data') or payload
+        token = data.get('access_token')
+        if not token:
+            logger.warning("[API] Backend login response missing access_token")
+            return None
+
+        company_id = int(os.getenv("DASHBOARD_COMPANY_ID", os.getenv("API_COMPANY_ID", "19")))
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", os.getenv("API_BRAND_ID", "20")))
+        ctx_headers = {**headers, 'Authorization': f'Bearer {token}'}
+        ctx_resp = session.post(
+            f"{_api_root()}/v1/auth/select-context",
+            json={'company_id': company_id, 'brand_id': brand_id},
+            headers=ctx_headers,
+            timeout=20,
+        )
+        if ctx_resp.status_code == 200:
+            ctx_data = (ctx_resp.json() or {}).get('data') or ctx_resp.json() or {}
+            token = ctx_data.get('access_token') or ctx_data.get('token') or token
+            logger.info("[API] Backend JWT with company=%s brand=%s", company_id, brand_id)
+        else:
+            logger.warning(
+                "[API] select-context failed (HTTP %s); using login token",
+                ctx_resp.status_code,
+            )
+
+        JWT_TOKEN_CACHE['token'] = token
+        JWT_TOKEN_CACHE['expires_at'] = datetime.now() + timedelta(minutes=50)
+        JWT_TOKEN_CACHE['session'] = session
+        logger.info("[API] Obtained Node-Backend JWT (len=%d)", len(token))
+        return token
+    except Exception as e:
+        logger.warning("[API] Backend JWT login error: %s", e)
+        return None
+
+
+def get_backend_jwt_token() -> Optional[str]:
+    """Return JWT for Node-Backend API calls."""
+    if JWT_ACCESS_TOKEN:
+        return JWT_ACCESS_TOKEN
+    return generate_backend_jwt_from_login()
+
+
 def get_firebase_token() -> Optional[str]:
-    """Get a Firebase token, generating it if needed.
-    
-    Priority order:
-    1. Direct token from FIREBASE_ID_TOKEN environment variable
-    2. Auto-generated token using email/password credentials from environment
-    
-    Returns:
-        Token string or None
-    """
+    """Get bearer token (Node-Backend JWT or legacy Firebase ID token)."""
+    if _uses_node_backend_jwt():
+        token = get_backend_jwt_token()
+        if token:
+            return token
+        logger.warning(
+            "[API] No Node-Backend JWT. Set JWT_ACCESS_TOKEN or valid BACKEND_EMAIL/BACKEND_PASSWORD."
+        )
+        return None
+
+    # Legacy Firebase path
     # Priority 1: Direct token from environment
     if API_BEARER_TOKEN:
         logger.info("[API] Using FIREBASE_ID_TOKEN from environment (len=%d)", len(API_BEARER_TOKEN))
@@ -147,10 +237,13 @@ def initialize_firebase_auth(service_account_dict: Optional[Dict] = None):
 
 
 def clear_token_cache():
-    """Clear the cached token (useful when token is invalid/expired)."""
-    global FIREBASE_TOKEN_CACHE
+    """Clear cached auth tokens (useful when token is invalid/expired)."""
+    global FIREBASE_TOKEN_CACHE, JWT_TOKEN_CACHE
     FIREBASE_TOKEN_CACHE['token'] = None
     FIREBASE_TOKEN_CACHE['expires_at'] = None
+    JWT_TOKEN_CACHE['token'] = None
+    JWT_TOKEN_CACHE['expires_at'] = None
+    JWT_TOKEN_CACHE['session'] = None
     print("[API] Token cache cleared")
 
 def make_authenticated_request(method: str, url: str, retry_on_401: bool = True, max_retries: int = 1, **kwargs) -> requests.Response:

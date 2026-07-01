@@ -117,7 +117,8 @@ def get_amazon_calendar_timeframes():
 
     - WTD: start of current week (Monday) -> today (end of day); callers apply
       `days_lag=1` (or subtract 1 day) so the effective window ends yesterday.
-    - MTD: 1st of current month -> yesterday (end of day)
+    - MTD: 1st of current month -> yesterday (end of day). On the 1st of the
+      month (no complete days in the new month yet), use the previous full month.
 
     Amazon gold tables lag ~1 day, so MTD must not include today.
 
@@ -134,7 +135,15 @@ def get_amazon_calendar_timeframes():
         (today_end - timedelta(days=now.weekday()))
         .replace(hour=0, minute=0, second=0, microsecond=0)
     )
-    mtd_start = today_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if now.day == 1:
+        # Gold data ends yesterday; on the 1st that is the prior month's last day.
+        mtd_start = yesterday_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        mtd_end = yesterday_end
+        mtd_label = 'Month-to-Date (prior month close)'
+    else:
+        mtd_start = today_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        mtd_end = yesterday_end
+        mtd_label = 'Month-to-Date (calendar, 1st-yesterday)'
     return {
         'wtd': {
             'start_date': wtd_start,
@@ -143,8 +152,8 @@ def get_amazon_calendar_timeframes():
         },
         'mtd': {
             'start_date': mtd_start,
-            'end_date': yesterday_end,
-            'label': 'Month-to-Date (calendar, 1st-yesterday)',
+            'end_date': mtd_end,
+            'label': mtd_label,
         },
     }
 

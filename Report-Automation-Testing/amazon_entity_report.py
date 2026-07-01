@@ -80,9 +80,9 @@ def fetch_amazon_ads_gold(
     return df
 
 
-def _brand_filter_clause(brand_id: Optional[int]) -> str:
-    """Returns ' AND brand_id = %(brand_id)s' when brand_id is set, else ''."""
-    return " AND brand_id = %(brand_id)s" if brand_id is not None else ""
+def _brand_filter_clause(brand_id: Optional[int], prefix: str = "") -> str:
+    """Returns ' AND {prefix}brand_id = %(brand_id)s' when brand_id is set, else ''."""
+    return f" AND {prefix}brand_id = %(brand_id)s" if brand_id is not None else ""
 
 
 def _maybe_add_brand_param(params: dict, brand_id: Optional[int]) -> dict:
@@ -149,26 +149,31 @@ def fetch_amazon_sp_items_gold(
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
 
+    # Filter by order purchase_date (not item purchase_date) so line items stay
+    # aligned with orders/P&L even when item rows carry a different timestamp.
     query = f"""
         SELECT
-            company_id,
-            brand_id,
-            shop_domain,
-            amazon_order_id,
-            order_item_id,
-            seller_sku,
-            asin,
-            title,
-            purchase_date,
-            order_status,
-            COALESCE(quantity_ordered, 0) AS quantity_ordered,
-            COALESCE(quantity_shipped, 0) AS quantity_shipped,
-            COALESCE(item_price_amount, 0)
-                * if(lower(order_status) IN ('canceled', 'cancelled'), 0, 1) AS item_price_amount,
-            item_price_currency
-        FROM gold.fct_amazon_order_items
-        WHERE purchase_date BETWEEN %(start_date)s AND %(end_date)s
-            {_brand_filter_clause(brand_id)}
+            i.company_id,
+            i.brand_id,
+            i.shop_domain,
+            i.amazon_order_id,
+            i.order_item_id,
+            i.seller_sku,
+            i.asin,
+            i.title,
+            o.purchase_date AS purchase_date,
+            i.order_status,
+            COALESCE(i.quantity_ordered, 0) AS quantity_ordered,
+            COALESCE(i.quantity_shipped, 0) AS quantity_shipped,
+            COALESCE(i.item_price_amount, 0)
+                * if(lower(i.order_status) IN ('canceled', 'cancelled'), 0, 1) AS item_price_amount,
+            i.item_price_currency
+        FROM gold.fct_amazon_order_items i
+        INNER JOIN gold.fct_amazon_sp_orders o
+            ON i.amazon_order_id = o.amazon_order_id
+        WHERE o.purchase_date BETWEEN %(start_date)s AND %(end_date)s
+            AND i.amazon_order_id != ''
+            {_brand_filter_clause(brand_id, prefix="o.")}
         ORDER BY purchase_date, amazon_order_id, order_item_id
     """
     client = get_clickhouse_client()
@@ -599,6 +604,95 @@ def _allocate_pnl_to_line_items(
     return items.drop(columns=["_order_line_revenue", "_order_line_count"])
 
 
+_SP_DISPLAY_COLS = [
+    "purchase_date", "amazon_order_id", "order_item_id",
+    "order_status", "pnl_status", "payout_basis",
+    "fulfillment_channel", "sku", "asin", "title",
+    "quantity_ordered", "quantity_shipped",
+    "gross", "refunds", "commission", "closing", "shipping",
+    "tax_withheld", "net_payout", "product_cost", "gross_profit",
+    "gross_margin_pct",
+]
+
+
+def _apply_sp_gross_profit_rules(df: pd.DataFrame) -> pd.DataFrame:
+    """Recompute gross_profit as net_payout - product_cost/cogs for display."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    cogs_col = "product_cost" if "product_cost" in out.columns else (
+        "cogs" if "cogs" in out.columns else None
+    )
+    if "net_payout" in out.columns and cogs_col:
+        np_col = pd.to_numeric(out["net_payout"], errors="coerce").fillna(0.0)
+        co_col = pd.to_numeric(out[cogs_col], errors="coerce").fillna(0.0)
+        out["gross_profit"] = (np_col - co_col).round(4)
+        if "gross" in out.columns:
+            gross = pd.to_numeric(out["gross"], errors="coerce")
+            out["gross_margin_pct"] = (
+                (out["gross_profit"] / gross.replace(0, np.nan) * 100)
+                .round(2)
+                .fillna(0.0)
+            )
+    return out
+
+
+def _format_sp_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = _apply_sp_gross_profit_rules(df)
+    out = out.rename(columns={
+        "seller_sku": "sku",
+        "item_price_amount": "item_price",
+        "cogs": "product_cost",
+    })
+    return out[[c for c in _SP_DISPLAY_COLS if c in out.columns]]
+
+
+def _build_orders_without_line_items(
+    sp_items_df: pd.DataFrame,
+    sp_orders_df: pd.DataFrame,
+    sp_pnl_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """One row per order that has orders/P&L data but no line items in gold."""
+    if sp_orders_df is None or sp_orders_df.empty:
+        return pd.DataFrame()
+
+    item_order_ids: set[str] = set()
+    if sp_items_df is not None and not sp_items_df.empty and "amazon_order_id" in sp_items_df.columns:
+        item_order_ids = {
+            str(order_id).strip()
+            for order_id in sp_items_df["amazon_order_id"].dropna().unique()
+            if str(order_id).strip()
+        }
+
+    orders = sp_orders_df.drop_duplicates(subset=["amazon_order_id"]).copy()
+    orders = orders[orders["amazon_order_id"].astype(str).str.strip() != ""]
+    missing = orders[~orders["amazon_order_id"].astype(str).isin(item_order_ids)]
+    if missing.empty:
+        return pd.DataFrame()
+
+    order_cols = [
+        c for c in ["amazon_order_id", "purchase_date", "order_status", "fulfillment_channel"]
+        if c in missing.columns
+    ]
+    rows = missing[order_cols].copy()
+
+    if sp_pnl_df is not None and not sp_pnl_df.empty:
+        pnl_cols = [
+            c for c in (
+                "amazon_order_id", "pnl_status", "payout_basis",
+                "gross", "refunds", "commission", "closing", "shipping",
+                "tax_withheld", "net_payout", "cogs", "gross_profit", "gross_margin_pct",
+            )
+            if c in sp_pnl_df.columns
+        ]
+        pnl = sp_pnl_df[pnl_cols].drop_duplicates(subset=["amazon_order_id"])
+        rows = rows.merge(pnl, on="amazon_order_id", how="left")
+
+    return _format_sp_display_df(rows)
+
+
 def _build_sp_line_items_display(
     sp_items_df: pd.DataFrame,
     sp_orders_df: pd.DataFrame,
@@ -630,49 +724,28 @@ def _build_sp_line_items_display(
                 items = items.merge(order_meta, on="amazon_order_id", how="left")
 
         items = _allocate_pnl_to_line_items(items, sp_pnl_df)
+        items = _format_sp_display_df(items)
 
-        # Business rule: gross_profit on the Amazon SP sheet is defined as
-        # (net_payout - cogs), overriding the SQL-provided effective_gross_profit.
-        # `cogs` here is the product cost; it is renamed to `product_cost`
-        # below for clarity in the output.
-        if "net_payout" in items.columns and "cogs" in items.columns:
-            np_col = pd.to_numeric(items["net_payout"], errors="coerce").fillna(0.0)
-            co_col = pd.to_numeric(items["cogs"], errors="coerce").fillna(0.0)
-            items["gross_profit"] = (np_col - co_col).round(4)
-            if "gross" in items.columns:
-                gross = pd.to_numeric(items["gross"], errors="coerce")
-                items["gross_margin_pct"] = (
-                    (items["gross_profit"] / gross.replace(0, np.nan) * 100)
-                    .round(2)
-                    .fillna(0.0)
-                )
-
-        items = items.rename(columns={
-            "seller_sku": "sku",
-            "item_price_amount": "item_price",
-            "cogs": "product_cost",
-        })
-
-        display_cols = [
-            "purchase_date", "amazon_order_id", "order_item_id",
-            "order_status", "pnl_status", "payout_basis",
-            "fulfillment_channel", "sku", "asin", "title",
-            "quantity_ordered", "quantity_shipped",
-            "gross", "refunds", "commission", "closing", "shipping",
-            "tax_withheld", "net_payout", "product_cost", "gross_profit",
-            "gross_margin_pct",
-        ]
-        return items[[c for c in display_cols if c in items.columns]]
+        missing_orders = _build_orders_without_line_items(
+            sp_items_df, sp_orders_df, sp_pnl_df
+        )
+        if not missing_orders.empty:
+            print(
+                f"[Amazon SP] Adding {len(missing_orders)} order-level rows "
+                f"with no line items in gold.fct_amazon_order_items"
+            )
+            items = pd.concat([items, missing_orders], ignore_index=True)
+            sort_cols = [c for c in ["purchase_date", "amazon_order_id"] if c in items.columns]
+            if sort_cols:
+                items = items.sort_values(sort_cols).reset_index(drop=True)
+        return items
 
     if sp_orders_df is None or sp_orders_df.empty:
         return pd.DataFrame()
 
-    fallback_cols = [
-        "purchase_date", "amazon_order_id", "order_status",
-        "fulfillment_channel",
-        "items_shipped", "items_unshipped",
-    ]
-    return sp_orders_df[[c for c in fallback_cols if c in sp_orders_df.columns]]
+    return _format_sp_display_df(
+        _build_orders_without_line_items(pd.DataFrame(), sp_orders_df, sp_pnl_df)
+    )
 
 
 def _apply_sp_sheet_formatting(writer, sheet_name: str, sp_df: pd.DataFrame) -> None:

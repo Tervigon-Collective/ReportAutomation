@@ -297,10 +297,15 @@ def fetch_general_statistics(
 ) -> dict:
     """Return the General Statistics payload, API-first with a ClickHouse fallback."""
     start, end = _to_date_str(start_date), _to_date_str(end_date)
-    if prefer_api:
+    api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+    if prefer_api or api_only:
         data = _fetch_from_api(brand_id, company_id, start, end)
         if data is not None:
             return _api_to_stats(data)
+        if api_only:
+            return {"totals": {}, "channels": {}, "source": "api_empty"}
+    if api_only:
+        return {"totals": {}, "channels": {}, "source": "api_only"}
     return _clickhouse_stats(brand_id, start, end)
 
 

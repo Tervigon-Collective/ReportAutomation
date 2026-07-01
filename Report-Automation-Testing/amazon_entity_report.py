@@ -19,6 +19,66 @@ try:
 except ImportError:
     clickhouse_connect = None
 
+_USE_API_ONLY = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+_USE_API_FALLBACK = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+
+def _prefer_api() -> bool:
+    return _USE_API_ONLY or _USE_API_FALLBACK
+
+
+def _fetch_amazon_api_bundle(start_str: str, end_str: str, brand_id: Optional[int]):
+    """Load ads, orders, items, pnl from v1 Amazon APIs."""
+    try:
+        from api_data_fetcher import (
+            fetch_amazon_attribution,
+            fetch_historical_amazon_sp_sales,
+            fetch_historical_amazon_dashboard,
+        )
+        from api_response_transformers import (
+            amazon_ads_daily_from_attribution,
+            amazon_ads_from_historical,
+            amazon_orders_from_attribution,
+            amazon_pnl_from_attribution,
+            amazon_line_items_from_attribution,
+        )
+    except ImportError:
+        return None
+
+    attr = fetch_amazon_attribution(start_str, end_str)
+    ads_df = amazon_ads_daily_from_attribution(attr) if attr else pd.DataFrame()
+    if ads_df.empty and attr is None:
+        from api_data_fetcher import fetch_historical_amazon_ads
+        hist = fetch_historical_amazon_ads(start_str, end_str)
+        if hist:
+            ads_df = amazon_ads_from_historical(hist)
+
+    orders_df = amazon_orders_from_attribution(attr) if attr else pd.DataFrame()
+    pnl_df = amazon_pnl_from_attribution(attr) if attr else pd.DataFrame()
+    items_df = amazon_line_items_from_attribution(attr) if attr else pd.DataFrame()
+
+    if orders_df.empty:
+        sp = fetch_historical_amazon_sp_sales(start_str, end_str)
+        if sp and isinstance(sp.get("amazon"), dict):
+            amz = sp["amazon"]
+            orders_df = pd.DataFrame([{
+                "amazon_order_id": o.get("amazon_order_id"),
+                "purchase_date": o.get("purchase_date"),
+                "order_status": o.get("order_status"),
+                "order_total": o.get("order_total") or o.get("gross_sales"),
+                "items_shipped": o.get("items_shipped", 0),
+            } for o in (amz.get("orders") or [])])
+
+    dashboard = fetch_historical_amazon_dashboard(start_str, end_str)
+    return {
+        "ads_df": ads_df,
+        "orders_df": orders_df,
+        "items_df": items_df,
+        "pnl_df": pnl_df,
+        "attr": attr,
+        "dashboard": dashboard,
+    }
+
 
 def get_clickhouse_client():
     if clickhouse_connect is None:
@@ -47,9 +107,26 @@ def fetch_amazon_ads_gold(
     start_date: str | date | datetime,
     end_date: str | date | datetime,
 ) -> pd.DataFrame:
-    """Fetch Amazon Ads campaign daily metrics from ClickHouse gold."""
+    """Fetch Amazon Ads campaign daily metrics (API-first, ClickHouse fallback)."""
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
+
+    if _prefer_api():
+        try:
+            bundle = _fetch_amazon_api_bundle(start_str, end_str, None)
+            if bundle and bundle.get("ads_df") is not None and not bundle["ads_df"].empty:
+                df = bundle["ads_df"].copy()
+                if "report_date" not in df.columns:
+                    df["report_date"] = None
+                print(f"[API Ads] {len(df)} rows for {start_str} to {end_str}")
+                return df
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            print(f"[API Ads] failed ({e}); falling back to ClickHouse")
+
+    if _USE_API_ONLY:
+        return pd.DataFrame()
 
     query = """
         SELECT
@@ -96,13 +173,23 @@ def fetch_amazon_sp_orders_gold(
     end_date: str | date | datetime,
     brand_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Fetch Amazon SP orders from ClickHouse gold.
-
-    brand_id (optional) filters to a specific brand. Left unset to preserve the
-    historical, brand-agnostic behavior of the WTD/MTD report.
-    """
+    """Fetch Amazon SP orders (API-first, ClickHouse fallback)."""
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
+
+    if _prefer_api():
+        try:
+            bundle = _fetch_amazon_api_bundle(start_str, end_str, brand_id)
+            if bundle and bundle.get("orders_df") is not None and not bundle["orders_df"].empty:
+                print(f"[API SP Orders] {len(bundle['orders_df'])} rows for {start_str} to {end_str}")
+                return bundle["orders_df"]
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            print(f"[API SP Orders] failed ({e}); falling back to ClickHouse")
+
+    if _USE_API_ONLY:
+        return pd.DataFrame()
 
     # Canceled orders are forced to 0 revenue regardless of the stored order_total,
     # so downstream sums / displays don't inflate revenue with canceled amounts.
@@ -145,9 +232,23 @@ def fetch_amazon_sp_items_gold(
     end_date: str | date | datetime,
     brand_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Fetch Amazon SP order line items from ClickHouse gold."""
+    """Fetch Amazon SP order line items (API-first, ClickHouse fallback)."""
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
+
+    if _prefer_api():
+        try:
+            bundle = _fetch_amazon_api_bundle(start_str, end_str, brand_id)
+            if bundle and bundle.get("items_df") is not None and not bundle["items_df"].empty:
+                print(f"[API SP Items] {len(bundle['items_df'])} rows for {start_str} to {end_str}")
+                return bundle["items_df"]
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            print(f"[API SP Items] failed ({e}); falling back to ClickHouse")
+
+    if _USE_API_ONLY:
+        return pd.DataFrame()
 
     query = f"""
         SELECT
@@ -190,17 +291,38 @@ def fetch_amazon_sp_order_pnl_gold(
     end_date: str | date | datetime,
     brand_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Fetch the order-level P&L view (gold.fct_amazon_sp_order_pnl).
-
-    Returns one row per amazon_order_id with the financial breakdown used for
-    P&L reporting: gross, refunds, commission, closing, shipping, tax_withheld,
-    net_payout, cogs, gross_profit, plus order header metadata.
-
-    Column aliases match the canonical reporting names so downstream code can
-    refer to them by short, business-friendly names.
-    """
+    """Fetch order-level P&L (API-first, ClickHouse fallback)."""
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
+
+    if _prefer_api():
+        try:
+            bundle = _fetch_amazon_api_bundle(start_str, end_str, brand_id)
+            if bundle and bundle.get("pnl_df") is not None and not bundle["pnl_df"].empty:
+                print(f"[API SP PnL] {len(bundle['pnl_df'])} rows for {start_str} to {end_str}")
+                return bundle["pnl_df"]
+            dash = bundle.get("dashboard") if bundle else None
+            if dash and dash.get("summary"):
+                s = dash["summary"]
+                if float(s.get("total_net_payout", 0) or 0) > 0:
+                    print(f"[API SP PnL] using historical/amazon/dashboard summary for {start_str} to {end_str}")
+                    return pd.DataFrame([{
+                        "gross": float(s.get("total_revenue", 0) or 0),
+                        "cogs": float(s.get("total_product_cost", 0) or 0),
+                        "gross_profit": float(s.get("profit", 0) or 0) + float(s.get("total_spend", 0) or 0),
+                        "net_payout": float(s.get("total_net_payout", 0) or 0),
+                        "commission": 0.0,
+                        "closing": 0.0,
+                        "shipping": 0.0,
+                        "tax_withheld": 0.0,
+                    }])
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            print(f"[API SP PnL] failed ({e}); falling back to ClickHouse")
+
+    if _USE_API_ONLY:
+        return pd.DataFrame()
 
     query = f"""
         SELECT
@@ -346,6 +468,66 @@ def get_amazon_clickhouse_summary(
     end_str = _to_date_str(end_date)
     start_display = datetime.strptime(start_str, "%Y-%m-%d").strftime("%d-%m-%Y")
     end_display = datetime.strptime(end_str, "%Y-%m-%d").strftime("%d-%m-%Y")
+
+    if _prefer_api():
+        try:
+            from metric_calculators import compute_amazon_net_profit
+            bundle = _fetch_amazon_api_bundle(start_str, end_str, brand_id)
+            dash = bundle.get("dashboard") if bundle else None
+            attr = bundle.get("attr") if bundle else None
+            summary_src = (attr or {}).get("summary") or (dash or {}).get("summary") or {}
+            if summary_src:
+                ads_spend = float(summary_src.get("total_spend", summary_src.get("total_spend", 0)) or 0)
+                if not ads_spend and dash:
+                    ads_spend = float((dash.get("summary") or {}).get("total_spend", 0) or 0)
+                revenue = float(
+                    summary_src.get("total_order_total")
+                    or summary_src.get("total_revenue")
+                    or summary_src.get("net_sales")
+                    or 0
+                )
+                product_cost = float(summary_src.get("total_product_cost", 0) or 0)
+                net_payout = float(summary_src.get("total_net_payout", 0) or 0)
+                amazon_fees = float(summary_src.get("total_amazon_fees", 0) or 0)
+                orders = int(summary_src.get("total_orders", summary_src.get("orders", 0)) or 0)
+                pnl_cogs, net_profit = compute_amazon_net_profit(
+                    net_payout, product_cost, ads_spend, amazon_fees=amazon_fees
+                )
+                pnl_available = net_payout > 0 or product_cost > 0
+                return {
+                    "revenue": revenue,
+                    "spend": ads_spend,
+                    "orders": orders,
+                    "ads_sales": float(summary_src.get("attributed_sales", 0) or 0),
+                    "sp_revenue": revenue,
+                    "cogs": pnl_cogs,
+                    "product_cost": product_cost,
+                    "fees_total": amazon_fees,
+                    "units": orders,
+                    "net_profit": net_profit if pnl_available else 0.0,
+                    "net_roas": ((revenue - pnl_cogs) / ads_spend) if pnl_available and ads_spend > 0 else 0.0,
+                    "gross_profit_after_fees": net_payout - product_cost if pnl_available else 0.0,
+                    "net_payout": net_payout,
+                    "pnl_available": pnl_available,
+                    "start_date": start_display,
+                    "end_date": end_display,
+                    "date_range": f"{start_display} to {end_display}",
+                    "available": True,
+                }
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            print(f"[API Amazon summary] failed ({e}); falling back to ClickHouse")
+
+    if _USE_API_ONLY:
+        return {
+            "revenue": 0.0, "spend": 0.0, "orders": 0, "cogs": 0.0,
+            "product_cost": 0.0, "fees_total": 0.0, "units": 0,
+            "net_profit": 0.0, "net_roas": 0.0, "gross_profit_after_fees": 0.0,
+            "net_payout": 0.0, "pnl_available": False,
+            "start_date": start_display, "end_date": end_display,
+            "date_range": f"{start_display} to {end_display}", "available": False,
+        }
 
     try:
         ads_df = fetch_amazon_ads_gold(start_str, end_str)

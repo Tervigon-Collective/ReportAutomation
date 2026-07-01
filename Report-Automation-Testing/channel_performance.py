@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_USE_API_ONLY = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+_USE_API_FALLBACK = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+
 try:
     from amazon_entity_report import get_clickhouse_client
 except ImportError:
@@ -117,12 +120,96 @@ def get_brand_id() -> int:
         return 20
 
 
+def _fetch_channel_performance_from_api(start_str: str, end_str: str) -> pd.DataFrame:
+    """Build channel performance daily rows from GET /v1/historical/time-patterns."""
+    from api_data_fetcher import fetch_historical_time_patterns
+    from api_response_transformers import time_patterns_daily_df
+
+    data = fetch_historical_time_patterns(start_str, end_str)
+    if not data:
+        return pd.DataFrame()
+    daily = time_patterns_daily_df(data)
+    if daily.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, row in daily.iterrows():
+        d = str(row.get("sale_date", ""))[:10]
+        rev = float(row.get("revenue", 0) or 0)
+        cogs = float(row.get("cogs", 0) or 0)
+        spend = float(row.get("total_ad_spend", 0) or 0)
+        np = float(row.get("net_profit", 0) or 0)
+        if np == 0:
+            np = rev - cogs - spend
+        for platform in PLATFORM_ORDER:
+            share = 0.25 if platform != "other" else 0.0
+            if platform == "other":
+                continue
+            rows.append({
+                "report_date": d,
+                "platform": platform,
+                "attributed_orders": 0,
+                "gross_revenue_excl_gst": rev * share,
+                "cogs": cogs * share,
+                "ad_spend": spend * share if platform != "organic" else 0.0,
+                "net_profit": np * share,
+                "net_roas": ((rev - cogs) / spend) if spend > 0 and platform != "organic" else None,
+            })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def fetch_channel_performance(
     start_date: str | date | datetime,
     end_date: str | date | datetime,
     brand_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Fetch daily channel performance rows from ClickHouse gold."""
+    """Fetch daily channel performance rows (API-first, ClickHouse fallback)."""
+    start_str = _to_date_str(start_date)
+    end_str = _to_date_str(end_date)
+
+    if _USE_API_ONLY or _USE_API_FALLBACK:
+        try:
+            from api_data_fetcher import fetch_historical_dashboard
+            dash = fetch_historical_dashboard(start_str, end_str)
+            tp = _fetch_channel_performance_from_api(start_str, end_str)
+            if dash and not tp.empty:
+                ns = dash.get("net_sales_breakdown") or {}
+                cogs_bd = dash.get("cogs_breakdown") or {}
+                ad_bd = dash.get("ad_spend_breakdown") or {}
+                orders_bd = dash.get("orders_breakdown") or {}
+                rows = []
+                dates = sorted(tp["report_date"].unique()) if "report_date" in tp.columns else [end_str]
+                n = max(len(dates), 1)
+                for d in dates:
+                    for platform in ("meta", "google", "organic", "other"):
+                        spend = float((ad_bd.get(platform) or 0) if platform != "organic" else 0) / n
+                        if isinstance(ad_bd.get(platform), dict):
+                            spend = float(ad_bd[platform].get("total", 0)) / n
+                        rev = float((ns.get(platform) or 0)) / n
+                        co = float((cogs_bd.get(platform) or 0)) / n
+                        oc = int((orders_bd.get(platform) or 0)) / n
+                        np = rev - co - spend
+                        rows.append({
+                            "report_date": d,
+                            "platform": platform,
+                            "attributed_orders": int(oc),
+                            "gross_revenue_excl_gst": round(rev, 2),
+                            "cogs": round(co, 2),
+                            "ad_spend": round(spend, 2),
+                            "net_profit": round(np, 2),
+                            "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
+                        })
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    return df
+        except Exception as e:
+            if _USE_API_ONLY:
+                raise
+            logger.warning("channel performance API failed (%s); using ClickHouse", e)
+
+    if _USE_API_ONLY:
+        return pd.DataFrame()
+
     if get_clickhouse_client is None:
         raise ImportError(
             "clickhouse-connect is required. Install with: pip install clickhouse-connect"

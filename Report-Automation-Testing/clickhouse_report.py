@@ -27,6 +27,18 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+_USE_API_ONLY = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+_USE_API_FALLBACK = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+
+def _prefer_api() -> bool:
+    return _USE_API_ONLY or _USE_API_FALLBACK
+
+
+def _api_date_range(start_date, end_date):
+    s, e = _resolve_range(start_date, end_date)
+    return s, e
+
 try:
     from amazon_entity_report import get_clickhouse_client
 except ImportError:  # pragma: no cover
@@ -102,9 +114,23 @@ def _empty_meta_funnel() -> dict:
 
 
 def get_meta_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optional[int] = None) -> dict:
-    """Meta funnel (Impressions -> Clicks -> LPV -> ATC -> Checkout -> Orders) from ClickHouse gold."""
-    bid = _get_brand_id(brand_id)
+    """Meta funnel from API (GET /v1/meta-funnel) or ClickHouse gold."""
     s, e = _resolve_range(start_date, end_date)
+    if _prefer_api():
+        try:
+            from api_data_fetcher import fetch_meta_funnel
+            from metric_calculators import meta_funnel_from_api
+            data = fetch_meta_funnel(s, e)
+            if data and data.get("summary"):
+                return meta_funnel_from_api(data["summary"])
+        except Exception as ex:
+            if _USE_API_ONLY:
+                raise
+            logger.warning("meta funnel API failed (%s); using ClickHouse", ex)
+    if _USE_API_ONLY:
+        return _empty_meta_funnel()
+
+    bid = _get_brand_id(brand_id)
     client = _client()
     params = {"b": bid, "s": s, "e": e}
 
@@ -183,13 +209,37 @@ def get_meta_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optiona
 # Google funnel
 # ──────────────────────────────────────────────────────────────────────────────
 def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optional[int] = None) -> dict:
-    """Google performance (Clicks, CTR, Orders) from ClickHouse gold.
-
-    interaction_rate is not available in gold.fct_google_ads_daily (it lived only in the
-    stale serve layer), so it is returned as 0.0.
-    """
-    bid = _get_brand_id(brand_id)
+    """Google performance from API (google-attribution) or ClickHouse gold."""
     s, e = _resolve_range(start_date, end_date)
+    if _prefer_api():
+        try:
+            from api_data_fetcher import fetch_google_attribution
+            data = fetch_google_attribution(s, e)
+            if data:
+                summary = data.get("summary") or {}
+                m = data.get("campaigns") or []
+                clicks = float(summary.get("total_clicks", 0) or 0)
+                impressions = float(summary.get("total_impressions", 0) or 0)
+                if not impressions and m:
+                    for c in m:
+                        cm = c.get("metrics") or {}
+                        clicks += float(cm.get("clicks", 0) or 0)
+                        impressions += float(cm.get("impressions", 0) or 0)
+                orders = int(summary.get("total_orders", summary.get("attributed_orders_count", 0)) or 0)
+                return {
+                    "clicks": int(round(clicks)),
+                    "ctr": round(_rate(clicks, impressions), 2),
+                    "interaction_rate": round(_rate(clicks, impressions), 2),
+                    "orders": orders,
+                }
+        except Exception as ex:
+            if _USE_API_ONLY:
+                raise
+            logger.warning("google funnel API failed (%s); using ClickHouse", ex)
+    if _USE_API_ONLY:
+        return {"clicks": 0, "ctr": 0.0, "interaction_rate": 0.0, "orders": 0}
+
+    bid = _get_brand_id(brand_id)
     client = _client()
     params = {"b": bid, "s": s, "e": e}
 
@@ -228,12 +278,28 @@ def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optio
 # Meta campaign performance
 # ──────────────────────────────────────────────────────────────────────────────
 def get_campaign_data_ch(start_date=None, end_date=None, brand_id: Optional[int] = None) -> pd.DataFrame:
-    """Meta campaign-level performance from ClickHouse gold (one row per campaign).
-
-    Columns match dailyrollup.get_campaign_data() so report_renderer can consume it unchanged.
-    """
-    bid = _get_brand_id(brand_id)
+    """Meta campaign-level performance from API or ClickHouse gold."""
     s, e = _resolve_range(start_date, end_date)
+    if _prefer_api():
+        try:
+            from api_data_fetcher import fetch_meta_attribution
+            from api_response_transformers import meta_campaign_pdf_df
+            data = fetch_meta_attribution(
+                s, e,
+                time_aggregation="hourly" if s == e else "daily",
+            )
+            if data:
+                df = meta_campaign_pdf_df(data)
+                if not df.empty:
+                    return df
+        except Exception as ex:
+            if _USE_API_ONLY:
+                raise
+            logger.warning("campaign data API failed (%s); using ClickHouse", ex)
+    if _USE_API_ONLY:
+        return pd.DataFrame()
+
+    bid = _get_brand_id(brand_id)
     client = _client()
     params = {"b": bid, "s": s, "e": e, "gst": GST_DIVISOR}
 

@@ -207,43 +207,37 @@ def fetch_historical_hourly_insights_from_api(months, access_token, account_id, 
 # --- Function to Fetch ROAS Data from API ---
 def fetch_roas_data_from_api(start_date, end_date):
     """
-    Fetch ROAS data from the API for the specified date range.
-    Returns the API response data or None if failed.
+    Fetch daily ROAS-related metrics from GET /v1/historical/time-patterns.
     """
-    import requests
-    from datetime import datetime, timedelta
-    
-    # Calculate date range for last 30 days if not provided
+    from api_data_fetcher import fetch_net_profit_series_from_api
+
     if not start_date or not end_date:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=29)
         start_date = start_date.strftime('%Y-%m-%d')
         end_date = end_date.strftime('%Y-%m-%d')
-    
-    api_url = f"https://node.seleric.cloud//api/roas_by_date"
-    params = {
-        'start_date': start_date,
-        'end_date': end_date
-    }
-    
+
     try:
-        print(f"Fetching ROAS data from API for date range: {start_date} to {end_date}")
-        response = requests.get(api_url, params=params, headers=get_api_headers(), timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('success'):
-            print(f"Successfully fetched ROAS data for {len(data.get('roas_by_date', []))} days")
-            return data
-        else:
-            print(f"API returned success=False: {data}")
+        print(f"Fetching time-patterns from API for date range: {start_date} to {end_date}")
+        df = fetch_net_profit_series_from_api(start_date, end_date)
+        if df.empty:
             return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching ROAS data from API: {e}")
-        return None
+        roas_by_date = []
+        for _, row in df.iterrows():
+            spend = float(row.get("total_ad_spend", 0) or 0)
+            rev = float(row.get("revenue", 0) or 0)
+            np = float(row.get("net_profit", 0) or 0)
+            roas_by_date.append({
+                "date": str(row.get("sale_date", ""))[:10],
+                "net_roas": (np / spend) if spend > 0 else 0.0,
+                "gross_roas": (rev / spend) if spend > 0 else 0.0,
+                "ad_spend": spend,
+                "revenue": rev,
+            })
+        print(f"Successfully fetched ROAS data for {len(roas_by_date)} days")
+        return {"success": True, "roas_by_date": roas_by_date}
     except Exception as e:
-        print(f"Unexpected error fetching ROAS data: {e}")
+        print(f"Error fetching ROAS data from API: {e}")
         return None
 
 # --- Function to Plot Daily Spend, Purchase Value, and ROAS ---
@@ -1029,12 +1023,28 @@ def plot_daily_shopify_profit(save_path=None):
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         
-        # Net profit series — ClickHouse `fct_order_items` rollup + ad-spend tables
-        # (Meta/Google/Amazon daily), NOT `fct_daily_pnl`. Falls back to the Postgres
-        # builder (with a real-time API override for today) if ClickHouse is unavailable.
+        # Net profit series — API time-patterns (dashboard-aligned), then ClickHouse, then Postgres
         db_df = pd.DataFrame()
         totals = {}
-        if os.getenv("USE_DASHBOARD_STATS", "true").lower() in ("1", "true", "yes"):
+        use_api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+        try:
+            from api_data_fetcher import fetch_net_profit_series_from_api
+            db_df = fetch_net_profit_series_from_api(start_str, end_str)
+            if not db_df.empty:
+                totals = {
+                    "revenue": float(db_df["revenue"].sum()),
+                    "cogs": float(db_df["cogs"].sum()),
+                    "adSpend": float(db_df["total_ad_spend"].sum()),
+                    "netProfit": float(db_df["net_profit"].sum()),
+                }
+                logger.info("Net profit series from API time-patterns (%d days)", len(db_df))
+        except Exception as e:
+            if use_api_only:
+                logger.error("API net profit series failed in API-only mode: %s", e)
+            else:
+                logger.warning("API net profit series failed (%s); trying ClickHouse", e)
+
+        if db_df.empty and not use_api_only and os.getenv("USE_DASHBOARD_STATS", "true").lower() in ("1", "true", "yes"):
             try:
                 from dashboard_stats import fetch_daily_net_profit_series
                 brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
@@ -1051,8 +1061,7 @@ def plot_daily_shopify_profit(save_path=None):
                 logger.warning("ClickHouse net profit series failed (%s); falling back to Postgres", e)
                 db_df = pd.DataFrame()
 
-        if db_df.empty:
-            logger.info("Fetching net profit data from Postgres for last 30 days")
+        if db_df.empty and not use_api_only:
             db_result = fetch_net_profit_from_db(n_days=30)
             db_df = db_result.get("dailyBreakdown", pd.DataFrame())
             totals = db_result.get("totals", {})

@@ -721,8 +721,39 @@ def fetch_shopify_sales_orders_detail(start_date: str, end_date: str) -> pd.Data
         )
 
 
+def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily net profit series from GET /v1/historical/time-patterns."""
+    from api_response_transformers import time_patterns_daily_df
+    data = fetch_historical_time_patterns(_to_date_only(start_date), _to_date_only(end_date))
+    if not data:
+        return pd.DataFrame()
+    return time_patterns_daily_df(data)
+
+
+def fetch_shopify_sales_by_region_api(start_date: str, end_date: str) -> pd.DataFrame:
+    """Regional sales from GET /v1/historical/sales-by-region."""
+    from api_response_transformers import sales_by_region_to_state_df
+    data = fetch_historical_sales_by_region(_to_date_only(start_date), _to_date_only(end_date))
+    if not data:
+        return pd.DataFrame()
+    return sales_by_region_to_state_df(data)
+
+
 def fetch_shopify_sales_by_state(start_date: str, end_date: str) -> pd.DataFrame:
-    """Aggregated sales and order count by state (ship_province) for plotting."""
+    """Aggregated sales and order count by state for plotting (API-first)."""
+    if not USE_API_ONLY:
+        try:
+            df = fetch_shopify_sales_by_region_api(start_date, end_date)
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            if USE_API_ONLY:
+                raise
+            logger.warning("sales-by-region API failed (%s); falling back to Postgres", e)
+    elif USE_API_ONLY:
+        df = fetch_shopify_sales_by_region_api(start_date, end_date)
+        return df if df is not None else pd.DataFrame()
+
     try:
         engine = get_db_engine()
         query = text("""
@@ -750,16 +781,25 @@ def fetch_shopify_sales_by_state(start_date: str, end_date: str) -> pd.DataFrame
 
 def fetch_marketing_hourly(start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Fetch channel-wise hourly marketing insights from attribution tables for the given date range.
+    Fetch channel-wise hourly/daily marketing insights for the given date range.
 
-    Args:
-        start_date: Inclusive start date in 'YYYY-MM-DD'.
-        end_date: Inclusive end date in 'YYYY-MM-DD'.
-
-    Returns:
-        pandas.DataFrame containing channel-wise data from dw_meta_ads_attribution,
-        dw_google_ads_attribution, and dw_organic_attribution tables.
+    Primary source: Node-Backend v1 attribution APIs (meta, google, organic).
+    Fallback: PostgreSQL dw_*_attribution union when USE_API_ONLY is false.
     """
+    try:
+        df = fetch_marketing_from_api(start_date, end_date)
+        if df is not None and not df.empty:
+            logger.info("[marketing] API attribution: %d rows for %s to %s", len(df), start_date, end_date)
+            return df
+    except Exception as e:
+        if USE_API_ONLY:
+            raise
+        logger.warning("[marketing] API fetch failed (%s); falling back to Postgres", e)
+
+    if USE_API_ONLY:
+        logger.error("[marketing] API-only mode: no attribution data for %s to %s", start_date, end_date)
+        return pd.DataFrame()
+
     try:
         engine = get_db_engine()
         sql = (
@@ -902,32 +942,250 @@ def fetch_marketing_hourly(start_date: str, end_date: str) -> pd.DataFrame:
         print(f"Database error in fetch_marketing_hourly: {str(e)}")
         return pd.DataFrame()
 
+
+
+# =============================================================================
+# Node-Backend v1 API client
+# =============================================================================
+
+USE_API_ONLY = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+USE_API_FALLBACK = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+
+def _prefer_api() -> bool:
+    return USE_API_ONLY or USE_API_FALLBACK
+
+
+def get_api_brand_id() -> int:
+    return int(os.getenv("CLICKHOUSE_BRAND_ID", os.getenv("API_BRAND_ID", "20")))
+
+
+def get_api_company_id() -> int:
+    return int(os.getenv("DASHBOARD_COMPANY_ID", os.getenv("API_COMPANY_ID", "19")))
+
+
+def _default_tenant_params() -> dict:
+    return {"brand_id": get_api_brand_id(), "company_id": get_api_company_id()}
+
+
+def _to_date_only(value: str) -> str:
+    return str(value)[:10]
+
+
+def pnl_end_exclusive(inclusive_end: str) -> str:
+    """PnL routes use exclusive endDate; add one day for inclusive report ranges."""
+    d = datetime.strptime(_to_date_only(inclusive_end), "%Y-%m-%d").date()
+    return (d + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def fetch_v1(path: str, params: Optional[dict] = None, timeout: int = 120) -> Optional[dict]:
+    """
+    GET {BASE_URL}/v1/{path} and return the inner `data` object, or None on failure.
+    Path should not include a leading slash or the /v1 prefix.
+    """
+    url = f"{BASE_URL.rstrip('/')}/v1/{path.lstrip('/')}"
+    merged = {**_default_tenant_params(), **(params or {})}
+    try:
+        resp = make_authenticated_request("GET", url, params=merged, timeout=timeout)
+        if resp.status_code != 200:
+            logger.warning("[v1] %s -> HTTP %s: %s", url, resp.status_code, resp.text[:300])
+            return None
+        payload = resp.json()
+        if isinstance(payload, dict) and payload.get("success") is False:
+            logger.warning("[v1] %s -> success=false: %s", url, payload.get("error"))
+            return None
+        if isinstance(payload, dict) and "data" in payload:
+            return payload.get("data")
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        logger.warning("[v1] %s failed: %s", url, e)
+        return None
+
+
+def fetch_historical_dashboard(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/dashboard", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_time_patterns(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/time-patterns", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_sales_by_region(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/sales-by-region", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_meta_ads(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/meta/ads", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_google_ads(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/google/ads", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_amazon_dashboard(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/amazon/dashboard", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_amazon_ads(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/amazon/ads", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_historical_amazon_sp_sales(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("historical/amazon-sp-sales", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_meta_attribution(
+    start_date: str,
+    end_date: str,
+    time_aggregation: Optional[str] = None,
+) -> Optional[dict]:
+    params = {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    }
+    if time_aggregation:
+        params["time_aggregation"] = time_aggregation
+    return fetch_v1("meta-attribution", params)
+
+
+def fetch_google_attribution(
+    start_date: str,
+    end_date: str,
+    time_aggregation: Optional[str] = None,
+) -> Optional[dict]:
+    params = {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    }
+    if time_aggregation:
+        params["time_aggregation"] = time_aggregation
+    return fetch_v1("google-attribution", params)
+
+
+def fetch_channel_attribution(
+    start_date: str,
+    end_date: str,
+    channel: str = "organic",
+    time_aggregation: Optional[str] = None,
+) -> Optional[dict]:
+    params = {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+        "channel": channel,
+    }
+    if time_aggregation:
+        params["time_aggregation"] = time_aggregation
+    return fetch_v1("channel-attribution", params)
+
+
+def fetch_amazon_attribution(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("amazon-attribution", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_meta_funnel(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("meta-funnel", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_pnl_summary(start_date: str, end_date: str) -> Optional[dict]:
+    return fetch_v1("pnl/summary", {
+        "startDate": _to_date_only(start_date),
+        "endDate": pnl_end_exclusive(end_date),
+    })
+
+
+def fetch_marketing_from_api(start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch attribution data from v1 APIs and flatten to marketing-hourly DataFrame."""
+    from api_response_transformers import flatten_all_attribution_to_hourly_df
+
+    start_s, end_s = _to_date_only(start_date), _to_date_only(end_date)
+    return flatten_all_attribution_to_hourly_df(
+        start_s,
+        end_s,
+        fetch_meta=lambda s, e, **kw: fetch_meta_attribution(s, e, kw.get("time_aggregation")),
+        fetch_google=lambda s, e, **kw: fetch_google_attribution(s, e, kw.get("time_aggregation")),
+        fetch_organic=lambda s, e, **kw: fetch_channel_attribution(s, e, kw.get("channel", "organic")),
+    )
+
+
 def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
     """
-    Build organized metrics for PDF summary using new hourly backend endpoints:
-    - ad_spend_by_hour
-    - sales_unitCost_by_hour
-
-    If timeframe_start/end are provided, they should be datetime-like objects. We'll
-    convert them to IST and format as 'YYYY-MM-DD HH'. Otherwise, defaults to today's IST day range.
+    Build organized metrics for PDF summary from GET /v1/historical/dashboard
+    (dashboard-aligned formulas via metric_calculators).
     """
-    # Compute timeframe strings in 'YYYY-MM-DD HH'
+    from metric_calculators import channel_metrics_from_historical_dashboard
+
     try:
         if timeframe_start is not None and timeframe_end is not None:
-            ist = pytz.timezone('Asia/Kolkata')
-            start_ist = timeframe_start.astimezone(ist) if getattr(timeframe_start, 'tzinfo', None) else ist.localize(timeframe_start)
-            end_ist = timeframe_end.astimezone(ist) if getattr(timeframe_end, 'tzinfo', None) else ist.localize(timeframe_end)
-            start_dt_str = start_ist.strftime('%Y-%m-%d %H')
-            end_dt_str = end_ist.strftime('%Y-%m-%d %H')
+            ist = pytz.timezone("Asia/Kolkata")
+            start_ist = (
+                timeframe_start.astimezone(ist)
+                if getattr(timeframe_start, "tzinfo", None)
+                else ist.localize(timeframe_start)
+            )
+            end_ist = (
+                timeframe_end.astimezone(ist)
+                if getattr(timeframe_end, "tzinfo", None)
+                else ist.localize(timeframe_end)
+            )
+            start_str = start_ist.strftime("%Y-%m-%d")
+            end_str = end_ist.strftime("%Y-%m-%d")
         else:
-            start_dt_str, end_dt_str = get_today_ist_hour_bounds()
+            start_str, end_str = get_today_ist_hour_bounds()
+            start_str = start_str[:10]
+            end_str = end_str[:10]
     except Exception:
-        start_dt_str, end_dt_str = get_today_ist_hour_bounds()
+        start_str, end_str = get_today_ist_hour_bounds()
+        start_str = start_str[:10]
+        end_str = end_str[:10]
 
-    # Fetch from backend
+    data = fetch_historical_dashboard(start_str, end_str)
+    if data:
+        result = channel_metrics_from_historical_dashboard(data)
+        return {k: result[k] for k in ("meta", "google", "organic", "total") if k in result}
+
+    if USE_API_ONLY:
+        logger.error("[PDF metrics] API-only mode: historical/dashboard returned no data")
+        empty = {
+            "sales": 0, "ad_spend": 0, "cogs": 0, "net_profit": 0,
+            "gross_roas": 0, "net_roas": 0, "be_roas": 0,
+            "quantity": 0, "cpp": 0, "order_count": 0,
+        }
+        return {"meta": empty, "google": dict(empty), "organic": dict(empty), "total": dict(empty)}
+
+    # Legacy fallback (deprecated — endpoints may not exist on Node-Backend)
+    start_dt_str, end_dt_str = get_today_ist_hour_bounds()
     ad_spend_json = fetch_ad_spend_by_hour(start_dt_str, end_dt_str) or {}
     sales_json = fetch_sales_unitcost_by_hour(start_dt_str, end_dt_str) or {}
-
     totals_spend = (ad_spend_json or {}).get('totals', {}) or {}
     sum_sales = (sales_json or {}).get('sum', {}) or {}
 
@@ -1092,28 +1350,72 @@ def fetch_product_profitability(start_datetime: str | None = None, end_datetime:
         return {}
 
 
+def _normalize_amazon_ads_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize API Amazon ads DataFrame to legacy PG column names where possible."""
+    out = df.copy()
+    if "report_date" in out.columns and "date" not in out.columns:
+        out["date"] = out["report_date"]
+    if "spend" in out.columns:
+        out["ctr"] = out.apply(
+            lambda r: (float(r.get("clicks", 0) or 0) / float(r["impressions"]) * 100)
+            if float(r.get("impressions", 0) or 0) > 0 else 0.0,
+            axis=1,
+        )
+        out["cpc"] = out.apply(
+            lambda r: float(r.get("spend", 0) or 0) / float(r["clicks"])
+            if float(r.get("clicks", 0) or 0) > 0 else 0.0,
+            axis=1,
+        )
+        out["roas"] = out.apply(
+            lambda r: float(r.get("sales", 0) or 0) / float(r["spend"])
+            if float(r.get("spend", 0) or 0) > 0 else 0.0,
+            axis=1,
+        )
+        out["acos"] = out.apply(
+            lambda r: float(r.get("spend", 0) or 0) / float(r["sales"]) * 100
+            if float(r.get("sales", 0) or 0) > 0 else 0.0,
+            axis=1,
+        )
+    return out
+
 
 def fetch_amazon_data(start_date: str | None = None, end_date: str | None = None):
     """
-    Fetch Amazon product metrics data from the database for a given date range.
-    
-    Args:
-        start_date: Start date in 'YYYY-MM-DD' format. If None, uses timeframe config.
-        end_date: End date in 'YYYY-MM-DD' format. If None, uses timeframe config.
-    
-    Returns:
-        pandas.DataFrame containing Amazon product metrics including campaign, adgroup,
-        ASIN, SKU, impressions, clicks, spend, orders, sales, CTR, CPC, ACOS, and ROAS.
+    Fetch Amazon Ads campaign metrics for a given date range.
+
+    Primary: GET /v1/historical/amazon/ads or /v1/amazon-attribution.
+    Fallback: PostgreSQL amazon_product_metrics_daily when API unavailable.
     """
+    tf = get_timeframe_config(start_date=start_date, end_date=end_date)
+    start_str = tf['start_date'].strftime('%Y-%m-%d')
+    end_str = tf['end_date'].strftime('%Y-%m-%d')
+
+    if _prefer_api():
+        try:
+            from api_response_transformers import amazon_ads_daily_from_attribution, amazon_ads_from_historical
+            attr = fetch_amazon_attribution(start_str, end_str)
+            if attr:
+                df = amazon_ads_daily_from_attribution(attr)
+                if not df.empty:
+                    print(f"[Amazon API] {len(df)} rows from amazon-attribution for {start_str} to {end_str}")
+                    return _normalize_amazon_ads_df(df)
+            hist = fetch_historical_amazon_ads(start_str, end_str)
+            if hist:
+                df = amazon_ads_from_historical(hist)
+                if not df.empty:
+                    print(f"[Amazon API] {len(df)} rows from historical/amazon/ads for {start_str} to {end_str}")
+                    return _normalize_amazon_ads_df(df)
+        except Exception as e:
+            if USE_API_ONLY:
+                raise
+            print(f"[Amazon API] fetch failed ({e}); falling back to Postgres")
+
+    if USE_API_ONLY:
+        print(f"[Amazon] API-only mode: no data for {start_str} to {end_str}")
+        return pd.DataFrame()
+
     try:
-        # Get timeframe configuration
-        tf = get_timeframe_config(start_date=start_date, end_date=end_date)
-        start_str = tf['start_date'].strftime('%Y-%m-%d')
-        end_str = tf['end_date'].strftime('%Y-%m-%d')
-        
-        # Use centralized database engine
         engine = get_db_engine()
-        
         query = """
             SELECT 
                 id,

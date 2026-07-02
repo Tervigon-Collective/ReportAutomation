@@ -55,7 +55,6 @@ def main():
         errors.append("missing USE_API_ONLY flag")
 
     for path in (
-        "amazon_entity_report.py",
         "clickhouse_report.py",
         "channel_performance.py",
         "api_data_fetcher.py",
@@ -64,6 +63,11 @@ def main():
         text = open(full, encoding="utf-8").read()
         if "USE_API_ONLY" not in text:
             errors.append(f"{path} does not reference USE_API_ONLY")
+
+    amazon_entity = os.path.join(PROJECT_ROOT, "amazon_entity_report.py")
+    amazon_text = open(amazon_entity, encoding="utf-8").read()
+    if "AMAZON_ENTITY_CLICKHOUSE_PRIMARY" not in amazon_text:
+        errors.append("amazon_entity_report.py missing AMAZON_ENTITY_CLICKHOUSE_PRIMARY")
 
     if errors:
         print("VALIDATION FAILED:")

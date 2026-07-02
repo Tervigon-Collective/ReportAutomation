@@ -11,7 +11,7 @@ Unified per-metric data requirement list for mix-and-match source selection (Pos
 | Total Revenue | API | `shopify_orders.total_price_amount` | `fct_order_attribution.shopify_revenue` | `/api/sales` or `/api/sales_unitCost_by_hour` | PG=ALL orders; CH=attributed only; API=ALL orders |
 | Total Ad Spend | API | `dw_meta_ads_attribution.spend` + `dw_google_ads_attribution.spend` | `fct_daily_pnl.meta_spend + google_spend` | `/api/ad_spend` or `/api/ad_spend_by_hour` | PG under-counts Meta spend ~40% |
 | Net Profit | API (derived) | `fetch_net_profit_from_db()` | `fct_daily_pnl.net_profit` | `/api/net_profit` or `/api/net_profit_single_day` | See COGS discrepancy below |
-| Blended ROAS | API (derived) | Derived from PG | Derived from CH | `/api/roas` | **NEW `/api/roas_by_date`** on `node.seleric.cloud` |
+| Blended ROAS | API (derived) | Derived from PG | Derived from CH | `/api/v1/historical/dashboard` | Use dashboard net/gross ROAS fields |
 | Order Count | API | `shopify_orders` count | `fct_order_attribution` count | `/api/order_count` | PG=ALL; CH=attributed only |
 
 ---
@@ -96,7 +96,7 @@ Unified per-metric data requirement list for mix-and-match source selection (Pos
 | Hourly Sales Last 7 Days | PG | `shopify_orders` | **N/A** | `/api/sales_unitCost_by_hour` | Could switch to API |
 | Sales by State Pie | PG | `shopify_orders.ship_province` | **N/A** | **N/A** | No CH or API equivalent |
 | Channel Performance Bar | CH | `dw_*_attribution` (possible) | `fct_daily_pnl` (current) | `/api/sales` + `/api/cogs` + `/api/ad_spend` | Could switch to API |
-| ROAS by Date | API | — | — | `/api/roas_by_date` (node.seleric.cloud) | **NEW endpoint** |
+| ROAS by Date | API | — | — | `/api/v1/historical/time-patterns` | Hourly/daily ROAS series from Node-Backend |
 
 ---
 

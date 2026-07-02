@@ -65,7 +65,10 @@ def _get_env() -> jinja2.Environment:
         else:
             # Full (untrimmed) number, Indian grouping
             s = f"Rs.{_indian_group(v)}"
-        return f"-{s}" if neg else s
+        if neg:
+            suffix = s[3:] if s.startswith("Rs.") else s
+            return f"Rs. −{suffix}"
+        return s
 
     def fmt_roas(val) -> str:
         try:
@@ -229,19 +232,169 @@ def _normalize_funnel(f: dict | None) -> dict | None:
     """
     Normalise the funnel dict returned by get_meta_funnel_metrics() so template
     variable names match regardless of which key the source function uses.
-
-    Mapping applied:
-      initiate_checkout  ← checkout  (old key name)
-      bounce_rate        ← drop_off_clicks_to_landing  (closest equivalent)
     """
     if not f:
         return f
     out = dict(f)
     if "initiate_checkout" not in out:
         out["initiate_checkout"] = out.get("checkout", 0)
+    if "checkout" not in out:
+        out["checkout"] = out.get("initiate_checkout", 0)
     if "bounce_rate" not in out:
         out["bounce_rate"] = out.get("drop_off_clicks_to_landing", 0)
+
+    impressions = float(out.get("impressions") or 0)
+    clicks = float(out.get("clicks") or 0)
+    landing = float(out.get("landing_page_views") or 0)
+    atc = float(out.get("add_to_cart") or 0)
+    checkout = float(out.get("checkout") or out.get("initiate_checkout") or 0)
+    orders = float(out.get("orders") or 0)
+
+    def _rate(n, d):
+        return round((n / d) * 100.0, 2) if d > 0 else None
+
+    if out.get("checkout_rate") is None:
+        out["checkout_rate"] = _rate(checkout, atc)
+    if out.get("drop_off_cart_to_checkout") is None and atc > 0:
+        out["drop_off_cart_to_checkout"] = _rate(atc - checkout, atc)
+    if out.get("drop_off_checkout_to_orders") is None and checkout > 0:
+        out["drop_off_checkout_to_orders"] = _rate(checkout - orders, checkout)
+    if out.get("landing_page_rate") is None:
+        out["landing_page_rate"] = _rate(landing, clicks)
+    if out.get("add_to_cart_rate") is None:
+        out["add_to_cart_rate"] = _rate(atc, landing)
+    if out.get("ctr") is None:
+        out["ctr"] = _rate(clicks, impressions)
+    if out.get("conversion_rate") is None:
+        out["conversion_rate"] = _rate(orders, clicks)
+    if out.get("drop_off_impressions_to_clicks") is None and impressions > 0:
+        out["drop_off_impressions_to_clicks"] = _rate(impressions - clicks, impressions)
+    if out.get("drop_off_clicks_to_landing") is None and clicks > 0:
+        out["drop_off_clicks_to_landing"] = _rate(clicks - landing, clicks)
+    if out.get("drop_off_landing_to_cart") is None and landing > 0:
+        out["drop_off_landing_to_cart"] = _rate(landing - atc, landing)
+    if out.get("drop_off_cart_to_orders") is None and atc > 0:
+        out["drop_off_cart_to_orders"] = _rate(atc - orders, atc)
     return out
+
+
+def _normalize_google_funnel(f: dict | None) -> dict | None:
+    """Normalise Google funnel metrics for the PDF card."""
+    if not f:
+        return f
+    out = dict(f)
+    impressions = float(out.get("impressions") or 0)
+    clicks = float(out.get("clicks") or 0)
+    orders = float(out.get("orders") or 0)
+
+    def _rate(n, d):
+        return round((n / d) * 100.0, 2) if d > 0 else None
+
+    if out.get("ctr") is None:
+        out["ctr"] = _rate(clicks, impressions)
+    if out.get("interaction_rate") is None:
+        out["interaction_rate"] = out.get("ctr")
+    if out.get("conversion_rate") is None:
+        out["conversion_rate"] = _rate(orders, clicks)
+    if out.get("drop_off_impressions_to_clicks") is None and impressions > 0:
+        out["drop_off_impressions_to_clicks"] = _rate(impressions - clicks, impressions)
+    if out.get("drop_off_clicks_to_orders") is None and clicks > 0:
+        out["drop_off_clicks_to_orders"] = _rate(clicks - orders, clicks)
+    return out
+
+
+def _funnel_row(
+    stage: str,
+    count=None,
+    *,
+    rate=None,
+    rate_prefix: str | None = None,
+    drop_off=None,
+) -> dict:
+    """Build one funnel table row for Jinja (None/0 count still shown when explicitly 0)."""
+    has_count = count is not None
+    has_rate = rate is not None
+    has_drop_off = drop_off is not None
+    return {
+        "stage": stage,
+        "count": count,
+        "has_count": has_count,
+        "rate": rate,
+        "rate_prefix": rate_prefix,
+        "has_rate": has_rate,
+        "drop_off": drop_off,
+        "has_drop_off": has_drop_off,
+    }
+
+
+def build_meta_funnel_rows(funnel: dict | None) -> list[dict]:
+    f = _normalize_funnel(funnel) or {}
+    return [
+        _funnel_row("Impressions", f.get("impressions")),
+        _funnel_row(
+            "Clicks",
+            f.get("clicks"),
+            rate=f.get("ctr"),
+            rate_prefix="CTR",
+            drop_off=f.get("drop_off_impressions_to_clicks"),
+        ),
+        _funnel_row(
+            "LP Views",
+            f.get("landing_page_views"),
+            rate=f.get("landing_page_rate"),
+            drop_off=f.get("drop_off_clicks_to_landing"),
+        ),
+        _funnel_row(
+            "Add to Cart",
+            f.get("add_to_cart"),
+            rate=f.get("add_to_cart_rate"),
+            drop_off=f.get("drop_off_landing_to_cart"),
+        ),
+        _funnel_row(
+            "Checkout",
+            f.get("initiate_checkout"),
+            rate=f.get("checkout_rate"),
+            drop_off=f.get("drop_off_cart_to_checkout"),
+        ),
+        _funnel_row(
+            "Orders",
+            f.get("orders"),
+            rate=f.get("conversion_rate"),
+            rate_prefix="CVR",
+            drop_off=f.get("drop_off_cart_to_orders"),
+        ),
+    ]
+
+
+def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
+    """Google Ads: delivery funnel only (no on-site LP/ATC/checkout stages)."""
+    g = _normalize_google_funnel(funnel) or {}
+    return [
+        _funnel_row("Impressions", g.get("impressions")),
+        _funnel_row(
+            "Clicks",
+            g.get("clicks"),
+            rate=g.get("ctr"),
+            rate_prefix="CTR",
+            drop_off=g.get("drop_off_impressions_to_clicks"),
+        ),
+        _funnel_row(
+            "Orders",
+            g.get("orders"),
+            rate=g.get("conversion_rate"),
+            rate_prefix="CVR",
+            drop_off=g.get("drop_off_clicks_to_orders"),
+        ),
+    ]
+
+
+def _visible_funnel_rows(rows: list[dict]) -> list[dict]:
+    """Hide funnel cards when every stage count is empty/zero."""
+    if not rows:
+        return []
+    if any(r.get("has_count") and float(r.get("count") or 0) > 0 for r in rows):
+        return rows
+    return []
 
 
 def _bounce_bg(bounce: float) -> str:
@@ -348,7 +501,7 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
     return segments, grand
 
 
-def build_returns_row(total: dict, channels: list[dict]) -> dict:
+def build_returns_row(total: dict, channels: list[dict], returns_cancels_count: int = 0) -> dict:
     """
     Reconciling "Returned / Cancelled" row: the gap between the all-up dashboard ``total``
     (event-date returns/cancels, marketplace adjustments) and the sum of the attributed
@@ -376,8 +529,13 @@ def build_returns_row(total: dict, channels: list[dict]) -> dict:
         "net_profit": round(_num(total, "net_profit") - ch_net_profit, 2),
         "order_count": int(total.get("order_count") or 0) - ch_orders,
     }
-    # Only show the row when the gap is material (avoid a noise row of ~Rs.0).
-    row["show"] = any(abs(row[k]) >= 1 for k in ("sales", "cogs", "net_profit"))
+    # Only show the row when the source explicitly reports returns/cancels and the
+    # reconciliation gap is material. This avoids inventing a synthetic row from
+    # ordinary attribution-vs-total drift when returns/cancels are actually zero.
+    row["show"] = (
+        int(returns_cancels_count or 0) > 0
+        and any(abs(row[k]) >= 1 for k in ("sales", "cogs", "net_profit"))
+    )
     return row
 
 
@@ -386,7 +544,6 @@ def build_daily_pdf_context(
     campaign_df,
     funnel_metrics: dict | None,
     google_funnel: dict | None,
-    insights: list[str],
     report_date: str,
     report_time: str,
     roas_reconciliation: dict | None = None,
@@ -446,7 +603,11 @@ def build_daily_pdf_context(
         campaigns = campaign_rows
 
     # Reconciling "Returned / Cancelled" row so the channel rows + this row sum to Total.
-    returns_row = build_returns_row(total, [c for _, c in channels])
+    returns_row = build_returns_row(
+        total,
+        [c for _, c in channels],
+        returns_cancels_count=int(total.get("returns_cancels") or 0),
+    )
 
     return {
         "report_title": "Daily Marketing Performance Report",
@@ -456,10 +617,11 @@ def build_daily_pdf_context(
         "channels": channels,
         "returns_row": returns_row,
         "funnel": _normalize_funnel(funnel_metrics),
-        "google_funnel": google_funnel,
+        "google_funnel": _normalize_google_funnel(google_funnel),
+        "meta_funnel_rows": _visible_funnel_rows(build_meta_funnel_rows(funnel_metrics)),
+        "google_funnel_rows": _visible_funnel_rows(build_google_funnel_rows(google_funnel)),
         "campaigns": campaigns,
         "campaign_segments": campaign_segments,
         "campaign_total": campaign_total,
-        "insights": insights,
         "roas_reconciliation": roas_reconciliation,
     }

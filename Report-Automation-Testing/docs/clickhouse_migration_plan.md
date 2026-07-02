@@ -19,7 +19,7 @@
 
 ## Context
 
-Reporting (PDF / email / plots, Python on `node.seleric.cloud`) currently reads from a
+Reporting (PDF / email / plots, Python report automation) currently reads from a
 mix of **PostgreSQL `dw_*_attribution` tables** and the **Node-Backend HTTP API**, which is
 the origin of every discrepancy catalogued in `docs/data_sources_cannonical.md` (incomplete
 Meta spend, unweighted CTR, missing `brand_id`, 3 conflicting COGS definitions, endpoints

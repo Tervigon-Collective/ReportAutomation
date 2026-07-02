@@ -39,11 +39,12 @@
             ('Ad Spend', total.ad_spend | fmt_inr, None),
             ('Net Profit', total.net_profit | fmt_inr, total.profit_delta),
             ('Blended ROAS', total.gross_roas | fmt_roas, None),
+            ('Net ROAS', total.net_roas | fmt_roas, None),
           ] %}
           {% for label, value, delta in kpis %}
-          <td width="25%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">
+          <td width="20%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">
             <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">{{ label }}</div>
-            <div style="font-size:18px;font-weight:700;color:#e2e8f0;margin-top:4px;">{{ value }}</div>
+            <div style="font-size:18px;font-weight:700;color:{% if label == 'Net Profit' and total.net_profit < 0 %}#f87171{% else %}#e2e8f0{% endif %};margin-top:4px;white-space:nowrap;">{{ value }}</div>
             {% if delta %}
             <div style="font-size:10px;color:{{ '#4ade80' if delta.startswith('+') else '#f87171' }};margin-top:2px;">{{ delta }} vs yesterday</div>
             {% endif %}
@@ -54,88 +55,21 @@
     </td>
   </tr>
 
-  <!-- CHANNEL BREAKDOWN -->
-  <tr>
-    <td style="background:#ffffff;padding:24px 32px 0 32px;">
-      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:14px;">Channel Performance</div>
-      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
-        <tr style="background:#f8fafc;">
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:8px 10px;border-bottom:2px solid #e2e8f0;"></th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Revenue</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Ad Spend</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">COGS</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Net Profit</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Gross ROAS</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Net ROAS</th>
-          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:8px 10px;border-bottom:2px solid #e2e8f0;">Orders</th>
-        </tr>
-        {% set ch_rows = [('Meta', meta), ('Google', google), ('Organic', organic)] %}
-        {% if amazon %}{% set ch_rows = ch_rows + [('Amazon', amazon)] %}{% endif %}
-        {% for ch_name, ch in ch_rows %}
-        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
-          <td style="font-size:12px;font-weight:600;color:#1a1a2e;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch_name }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.sales | fmt_inr }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.ad_spend | fmt_inr }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.cogs | fmt_inr }}</td>
-          <td style="font-size:12px;font-weight:600;color:{{ '#16a34a' if ch.net_profit >= 0 else '#dc2626' }};text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.net_profit | fmt_inr }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.gross_roas | fmt_roas }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.net_roas | fmt_roas }}</td>
-          <td style="font-size:12px;color:#334155;text-align:right;padding:9px 10px;border-bottom:1px solid #f1f5f9;">{{ ch.order_count }}</td>
-        </tr>
-        {% endfor %}
-        {% if returns_row and returns_row.show %}
-        <tr style="background:#fef9f3;">
-          <td style="font-size:12px;font-style:italic;color:#92400e;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">Returned / Cancelled</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">{{ returns_row.sales | fmt_inr }}</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">{{ returns_row.ad_spend | fmt_inr }}</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">{{ returns_row.cogs | fmt_inr }}</td>
-          <td style="font-size:12px;font-style:italic;font-weight:600;color:{{ '#16a34a' if returns_row.net_profit >= 0 else '#dc2626' }};text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">{{ returns_row.net_profit | fmt_inr }}</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">—</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">—</td>
-          <td style="font-size:12px;font-style:italic;color:#92400e;text-align:right;padding:9px 10px;border-top:1px solid #fde7cf;border-bottom:1px solid #fde7cf;">{{ returns_row.order_count }}</td>
-        </tr>
-        {% endif %}
-        <tr style="background:#1a1a2e;">
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;padding:10px 10px;">Total</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.sales | fmt_inr }}</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.ad_spend | fmt_inr }}</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.cogs | fmt_inr }}</td>
-          <td style="font-size:12px;font-weight:700;color:{{ '#4ade80' if total.net_profit >= 0 else '#f87171' }};text-align:right;padding:10px 10px;">{{ total.net_profit | fmt_inr }}</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.gross_roas | fmt_roas }}</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.net_roas | fmt_roas }}</td>
-          <td style="font-size:12px;font-weight:700;color:#e2e8f0;text-align:right;padding:10px 10px;">{{ total.order_count }}</td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-
-  <!-- INSIGHTS -->
-  {% if insights %}
+  <!-- CHARTS -->
+  {% if chart_cids %}
+  {% set ns = namespace(weather_shown=false) %}
   <tr>
     <td style="background:#ffffff;padding:20px 32px 0 32px;">
-      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Key Insights</div>
-      <table width="100%" cellpadding="0" cellspacing="0">
-        {% for insight in insights %}
-        <tr>
-          <td style="padding:6px 0;border-bottom:1px solid #f1f5f9;">
-            <table cellpadding="0" cellspacing="0">
-              <tr>
-                <td style="vertical-align:top;padding-right:10px;padding-top:1px;">
-                  <div style="width:6px;height:6px;border-radius:50%;background:#6366f1;margin-top:5px;"></div>
-                </td>
-                <td style="font-size:12px;color:#334155;line-height:1.6;">{{ insight }}</td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        {% endfor %}
-      </table>
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Performance Charts</div>
     </td>
   </tr>
-  {% endif %}
-
-  <!-- WEATHER CAMPAIGN OPPORTUNITY -->
-  {% if weather_chart_cid %}
+  {% for cid in chart_cids %}
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ cid }}" alt="Chart" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;">
+    </td>
+  </tr>
+  {% if weather_chart_cid and cid.startswith('channel_performance_daily_') %}
   <tr>
     <td style="background:#ffffff;padding:20px 32px 0 32px;">
       <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
@@ -151,53 +85,57 @@
       <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
     </td>
   </tr>
-  {% if weather_insights %}
   <tr>
-    <td style="background:#ffffff;padding:12px 32px 0 32px;">
-      <div style="font-size:11px;color:#64748b;line-height:1.5;margin-bottom:10px;">
-        Opportunity = rain (50%) + sales (25%) + market size (15%) + trend (10%)
-      </div>
-      <div style="font-size:12px;font-weight:700;color:#1a1a2e;margin-bottom:10px;">Insights</div>
-      <table width="100%" cellpadding="0" cellspacing="0">
-        {% for insight in weather_insights %}
-        <tr>
-          <td style="padding:5px 0;border-bottom:1px solid #f1f5f9;">
-            <table cellpadding="0" cellspacing="0">
-              <tr>
-                <td style="vertical-align:top;padding-right:10px;padding-top:1px;">
-                  <div style="width:6px;height:6px;border-radius:50%;background:#0ea5e9;margin-top:5px;"></div>
-                </td>
-                <td style="font-size:12px;color:#334155;line-height:1.6;">{{ insight }}</td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        {% endfor %}
-      </table>
+    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
     </td>
   </tr>
+  {% set ns.weather_shown = true %}
   {% endif %}
+  {% endfor %}
+  {% if weather_chart_cid and not ns.weather_shown %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
+        {{ weather_report_date | default(report_date) }}
+        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
+        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
+    </td>
+  </tr>
   <tr>
     <td style="background:#ffffff;padding:8px 32px 0 32px;">
       <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
     </td>
   </tr>
   {% endif %}
-
-  <!-- CHARTS -->
-  {% if chart_cids %}
+  {% elif weather_chart_cid %}
   <tr>
     <td style="background:#ffffff;padding:20px 32px 0 32px;">
-      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Performance Charts</div>
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
+        {{ weather_report_date | default(report_date) }}
+        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
+        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
+      </div>
     </td>
   </tr>
-  {% for cid in chart_cids %}
   <tr>
     <td style="background:#ffffff;padding:8px 32px;">
-      <img src="cid:{{ cid }}" alt="Chart" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
     </td>
   </tr>
-  {% endfor %}
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
+    </td>
+  </tr>
   {% endif %}
 
   <!-- FOOTER -->

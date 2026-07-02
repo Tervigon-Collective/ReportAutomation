@@ -113,6 +113,24 @@ def _empty_meta_funnel() -> dict:
     }
 
 
+def _meta_attributed_orders_total_api(start_date: str, end_date: str) -> int:
+    """
+    Fetch the exact Meta order total used by the channel performance section so
+    the funnel's final Orders stage matches the PDF channel table.
+    """
+    try:
+        from api_data_fetcher import fetch_historical_dashboard
+        from metric_calculators import channel_metrics_from_historical_dashboard
+
+        data = fetch_historical_dashboard(start_date, end_date)
+        if not data:
+            return 0
+        metrics = channel_metrics_from_historical_dashboard(data)
+        return int((metrics.get("meta") or {}).get("order_count", 0) or 0)
+    except Exception:
+        return 0
+
+
 def get_meta_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optional[int] = None) -> dict:
     """Meta funnel from API (GET /v1/meta-funnel) or ClickHouse gold."""
     s, e = _resolve_range(start_date, end_date)
@@ -122,7 +140,21 @@ def get_meta_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optiona
             from metric_calculators import meta_funnel_from_api
             data = fetch_meta_funnel(s, e)
             if data and data.get("summary"):
-                return meta_funnel_from_api(data["summary"])
+                funnel = meta_funnel_from_api(data["summary"])
+                attributed_orders = _meta_attributed_orders_total_api(s, e)
+                if attributed_orders > 0:
+                    funnel["orders"] = int(attributed_orders)
+                    funnel["conversion_rate"] = round(_rate(funnel["orders"], funnel["clicks"]), 2)
+                    funnel["profit_per_order"] = round(
+                        (funnel["net_profit"] / funnel["orders"]) if funnel["orders"] else 0.0, 2
+                    )
+                    funnel["drop_off_checkout_to_orders"] = round(
+                        _rate(funnel["checkout"] - funnel["orders"], funnel["checkout"]), 2
+                    )
+                    funnel["drop_off_cart_to_orders"] = round(
+                        _rate(funnel["add_to_cart"] - funnel["orders"], funnel["add_to_cart"]), 2
+                    )
+                return funnel
         except Exception as ex:
             if _USE_API_ONLY:
                 raise
@@ -227,6 +259,7 @@ def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optio
                         impressions += float(cm.get("impressions", 0) or 0)
                 orders = int(summary.get("total_orders", summary.get("attributed_orders_count", 0)) or 0)
                 return {
+                    "impressions": int(round(impressions)),
                     "clicks": int(round(clicks)),
                     "ctr": round(_rate(clicks, impressions), 2),
                     "interaction_rate": round(_rate(clicks, impressions), 2),
@@ -237,7 +270,7 @@ def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optio
                 raise
             logger.warning("google funnel API failed (%s); using ClickHouse", ex)
     if _USE_API_ONLY:
-        return {"clicks": 0, "ctr": 0.0, "interaction_rate": 0.0, "orders": 0}
+        return {"impressions": 0, "clicks": 0, "ctr": 0.0, "interaction_rate": 0.0, "orders": 0}
 
     bid = _get_brand_id(brand_id)
     client = _client()
@@ -267,6 +300,7 @@ def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optio
     )
 
     return {
+        'impressions': int(round(impressions)),
         'clicks': int(round(clicks)),
         'ctr': round(_rate(clicks, impressions), 2),
         'interaction_rate': 0.0,

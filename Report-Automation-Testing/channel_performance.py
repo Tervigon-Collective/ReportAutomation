@@ -120,6 +120,97 @@ def get_brand_id() -> int:
         return 20
 
 
+def _fetch_channel_performance_from_attribution(start_str: str, end_str: str) -> pd.DataFrame:
+    """Per-day channel rows from marketing attribution (matches entity-report sheets)."""
+    from api_data_fetcher import fetch_marketing_hourly
+    from dailyrollup import transform_attribution_data
+
+    df = fetch_marketing_hourly(start_str, end_str)
+    if df.empty:
+        return pd.DataFrame()
+
+    t = transform_attribution_data(df)
+    if "date_start" not in t.columns:
+        t["date_start"] = end_str
+
+    source_map = {"Meta Ads": "meta", "Google Ads": "google", "Organic": "organic"}
+    rows: list[dict] = []
+    group_cols = [c for c in ("date_start", "source") if c in t.columns]
+    if not group_cols:
+        return pd.DataFrame()
+
+    for keys, sub in t.groupby(group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        key_map = dict(zip(group_cols, keys))
+        src = key_map.get("source")
+        platform = source_map.get(src)
+        if not platform:
+            continue
+        d = str(key_map.get("date_start", end_str))[:10]
+        rev = float(pd.to_numeric(sub.get("shopify_revenue"), errors="coerce").fillna(0).sum()) if "shopify_revenue" in sub.columns else 0.0
+        co = float(pd.to_numeric(sub.get("shopify_cogs"), errors="coerce").fillna(0).sum()) if "shopify_cogs" in sub.columns else 0.0
+        spend = (
+            float(pd.to_numeric(sub.get("spend"), errors="coerce").fillna(0).sum())
+            if platform != "organic" and "spend" in sub.columns
+            else 0.0
+        )
+        orders = int(pd.to_numeric(sub.get("shopify_orders"), errors="coerce").fillna(0).sum()) if "shopify_orders" in sub.columns else 0
+        net_profit = rev - co - spend
+        rows.append({
+            "report_date": d,
+            "platform": platform,
+            "attributed_orders": orders,
+            "gross_revenue_excl_gst": round(rev, 2),
+            "cogs": round(co, 2),
+            "ad_spend": round(spend, 2),
+            "net_profit": round(net_profit, 2),
+            "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
+        })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _fetch_channel_performance_from_dashboard_by_day(start_str: str, end_str: str) -> pd.DataFrame:
+    """Per-day channel rows from historical/dashboard (one API call per day)."""
+    from api_data_fetcher import fetch_historical_dashboard
+
+    dates = pd.date_range(start_str, end_str, freq="D").strftime("%Y-%m-%d").tolist()
+    if not dates:
+        dates = [end_str]
+
+    rows: list[dict] = []
+    for d in dates:
+        dash = fetch_historical_dashboard(d, d)
+        if not dash:
+            continue
+        ns = dash.get("net_sales_breakdown") or {}
+        cogs_bd = dash.get("cogs_breakdown") or {}
+        ad_bd = dash.get("ad_spend_breakdown") or {}
+        orders_bd = dash.get("orders_breakdown") or {}
+        for platform in ("meta", "google", "organic", "other"):
+            raw_spend = ad_bd.get(platform) if platform != "organic" else 0
+            if isinstance(raw_spend, dict):
+                spend = float(raw_spend.get("total", 0) or 0)
+            else:
+                spend = float(raw_spend or 0) if platform != "organic" else 0.0
+            rev = float(ns.get(platform) or 0) if not isinstance(ns.get(platform), dict) else 0.0
+            co = float(cogs_bd.get(platform) or 0) if not isinstance(cogs_bd.get(platform), dict) else 0.0
+            raw_orders = orders_bd.get(platform) or 0
+            oc = int(raw_orders.get("orders", 0) if isinstance(raw_orders, dict) else raw_orders or 0)
+            net_profit = rev - co - spend
+            rows.append({
+                "report_date": d,
+                "platform": platform,
+                "attributed_orders": oc,
+                "gross_revenue_excl_gst": round(rev, 2),
+                "cogs": round(co, 2),
+                "ad_spend": round(spend, 2),
+                "net_profit": round(net_profit, 2),
+                "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
+            })
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
 def _fetch_channel_performance_from_api(start_str: str, end_str: str) -> pd.DataFrame:
     """Build channel performance daily rows from GET /v1/historical/time-patterns."""
     from api_data_fetcher import fetch_historical_time_patterns
@@ -169,39 +260,14 @@ def fetch_channel_performance(
 
     if _USE_API_ONLY or _USE_API_FALLBACK:
         try:
-            from api_data_fetcher import fetch_historical_dashboard
-            dash = fetch_historical_dashboard(start_str, end_str)
-            tp = _fetch_channel_performance_from_api(start_str, end_str)
-            if dash and not tp.empty:
-                ns = dash.get("net_sales_breakdown") or {}
-                cogs_bd = dash.get("cogs_breakdown") or {}
-                ad_bd = dash.get("ad_spend_breakdown") or {}
-                orders_bd = dash.get("orders_breakdown") or {}
-                rows = []
-                dates = sorted(tp["report_date"].unique()) if "report_date" in tp.columns else [end_str]
-                n = max(len(dates), 1)
-                for d in dates:
-                    for platform in ("meta", "google", "organic", "other"):
-                        spend = float((ad_bd.get(platform) or 0) if platform != "organic" else 0) / n
-                        if isinstance(ad_bd.get(platform), dict):
-                            spend = float(ad_bd[platform].get("total", 0)) / n
-                        rev = float((ns.get(platform) or 0)) / n
-                        co = float((cogs_bd.get(platform) or 0)) / n
-                        oc = int((orders_bd.get(platform) or 0)) / n
-                        np = rev - co - spend
-                        rows.append({
-                            "report_date": d,
-                            "platform": platform,
-                            "attributed_orders": int(oc),
-                            "gross_revenue_excl_gst": round(rev, 2),
-                            "cogs": round(co, 2),
-                            "ad_spend": round(spend, 2),
-                            "net_profit": round(np, 2),
-                            "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
-                        })
-                df = pd.DataFrame(rows)
-                if not df.empty:
-                    return df
+            use_attribution = os.getenv("CHANNEL_FROM_ATTRIBUTION", "true").lower() in ("1", "true", "yes")
+            df = pd.DataFrame()
+            if use_attribution:
+                df = _fetch_channel_performance_from_attribution(start_str, end_str)
+            if df.empty:
+                df = _fetch_channel_performance_from_dashboard_by_day(start_str, end_str)
+            if not df.empty:
+                return df
         except Exception as e:
             if _USE_API_ONLY:
                 raise
@@ -563,45 +629,6 @@ def reconcile_roas_with_pdf_metrics(
     }
 
 
-def roas_reconciliation_insights(reconciliation: Optional[dict]) -> list[str]:
-    """Narrative bullets when PDF dashboard ROAS diverges from attribution query."""
-    if not reconciliation or reconciliation.get("all_match"):
-        return []
-
-    bullets: list[str] = []
-    for row in reconciliation.get("channels", []):
-        if row.get("revenue_match") and row.get("roas_match"):
-            continue
-        parts: list[str] = []
-        if not row.get("revenue_match") and row.get("sales_delta_pct") is not None:
-            parts.append(
-                f"revenue {row['pdf_sales']:,.0f} (PDF) vs {row['calc_revenue']:,.0f} "
-                f"(attribution), Δ{row['sales_delta_pct']:+.1f}%"
-            )
-        if not row.get("roas_match") and row.get("calc_gross_roas") is not None:
-            parts.append(
-                f"gross ROAS {row['pdf_gross_roas']:.2f}x (PDF) vs "
-                f"{row['calc_gross_roas']:.2f}x (attribution), "
-                f"Δ{row.get('roas_delta', 0):+.2f}"
-            )
-        if parts:
-            bullets.append(f"{row['label']}: " + "; ".join(parts) + ".")
-
-    total = reconciliation.get("total", {})
-    if total and not (total.get("revenue_match") and total.get("roas_match")):
-        parts = []
-        if not total.get("revenue_match") and total.get("sales_delta_pct") is not None:
-            parts.append(f"blended revenue Δ{total['sales_delta_pct']:+.1f}%")
-        if not total.get("roas_match") and total.get("calc_gross_roas") is not None:
-            parts.append(
-                f"blended gross ROAS {total['pdf_gross_roas']:.2f}x (PDF) vs "
-                f"{total['calc_gross_roas']:.2f}x (attribution)"
-            )
-        if parts:
-            bullets.append("Total: " + "; ".join(parts) + ".")
-    return bullets
-
-
 def _format_inr(value: float) -> str:
     sym = _currency_symbol()
     if abs(value) >= 100_000:
@@ -709,7 +736,7 @@ def _prepare_daily_net_roas(raw: pd.DataFrame) -> pd.DataFrame:
     return daily.sort_values(["report_date", "_sort"]).drop(columns=["_sort"])
 
 
-def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
+def _plot_net_roas_by_day(ax, raw: pd.DataFrame, *, roas_trend_days: int = 7, legend_below: bool = True) -> None:
     """Line chart: net ROAS per channel for each day in the window."""
     daily = _prepare_daily_net_roas(raw)
     if daily.empty:
@@ -742,7 +769,7 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
             x,
             y,
             marker=marker,
-            markersize=6,
+            markersize=5,
             linewidth=2.2,
             color=color,
             markerfacecolor=color,
@@ -758,19 +785,39 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
                 f"{val:.2f}x",
                 (xi, val),
                 textcoords="offset points",
-                xytext=(0, 7),
+                xytext=(0, 6),
                 ha="center",
-                fontsize=7.5,
+                fontsize=6.5,
                 fontweight="600",
                 color=color,
             )
 
-    ax.set_title("Net ROAS by Channel (Daily)", fontsize=11, fontweight="bold", color="#1a1a1a", pad=10)
+    ax.set_title(
+        f"Net ROAS by Channel — Last {roas_trend_days} Days",
+        fontsize=11,
+        fontweight="bold",
+        color="#1a1a1a",
+        pad=10,
+    )
     ax.set_xticks(x)
-    ax.set_xticklabels(date_labels, fontsize=9, rotation=0)
+    ax.set_xticklabels(
+        date_labels,
+        fontsize=7 if len(dates) > 20 else 8,
+        rotation=90,
+        ha="center",
+    )
     ax.set_ylabel("Net ROAS", fontsize=10, color="#333333", labelpad=8)
     ax.set_facecolor("#FAFBFC")
-    ax.grid(axis="y", alpha=0.32, linestyle="-", color="#CCCCCC", zorder=0)
+    ax.grid(
+        True,
+        which="both",
+        axis="both",
+        alpha=0.28,
+        linestyle="-",
+        linewidth=0.65,
+        color="#E2E8F0",
+        zorder=0,
+    )
     ax.set_axisbelow(True)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
@@ -780,11 +827,8 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
     valid = daily.loc[daily["ad_spend"] > 0, "net_roas"].dropna()
     if not valid.empty:
         ymax = float(valid.max())
-        ax.set_ylim(0, max(ymax * 1.25, 0.5))
-    ax.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.20),
-        ncol=min(len(PLATFORM_ORDER), 4),
+        ax.set_ylim(0, max(ymax * 1.35, 0.5))
+    legend_kwargs = dict(
         frameon=True,
         fontsize=8,
         title="Channels",
@@ -792,6 +836,15 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame) -> None:
         edgecolor="#DDDDDD",
         facecolor="white",
     )
+    if legend_below:
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.20),
+            ncol=min(len(PLATFORM_ORDER), 4),
+            **legend_kwargs,
+        )
+    else:
+        ax.legend(loc="upper right", ncol=1, **legend_kwargs)
 
 
 def plot_channel_performance(
@@ -881,8 +934,29 @@ def plot_channel_performance(
         bar_w = 0.18
         offsets = np.array([-1.5, -0.5, 0.5, 1.5], dtype=float) * bar_w
 
-        fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
-        ax2 = ax1.twinx()
+        trend_raw = pd.DataFrame()
+        show_roas_trend = False
+        if include_roas_trend:
+            try:
+                end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
+                trend_start = end_dt - timedelta(days=roas_trend_days - 1)
+                trend_raw = fetch_channel_performance(trend_start, end_str, brand_id=brand_id)
+                if not trend_raw.empty:
+                    daily_roas = _prepare_daily_net_roas(trend_raw)
+                    show_roas_trend = len(daily_roas["report_date"].unique()) >= 2
+            except Exception as trend_err:
+                logger.warning("Could not load ROAS trend data: %s", trend_err)
+
+        if show_roas_trend:
+            fig = plt.figure(figsize=(14, 10.5), facecolor="white")
+            gs = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.42)
+            ax1 = fig.add_subplot(gs[0])
+            ax2 = ax1.twinx()
+            ax_roas = fig.add_subplot(gs[1])
+        else:
+            fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
+            ax2 = ax1.twinx()
+            ax_roas = None
 
         rev_colors = [METRIC_COLORS["revenue"]] * n
         cogs_colors = [METRIC_COLORS["cogs"]] * n
@@ -1002,17 +1076,20 @@ def plot_channel_performance(
 
         ax1.set_xlim(-0.75, n - 0.25)
 
-        subtitle = (
+        subtitle_line1 = (
             f"Total revenue: {_format_inr(total_rev)}   ·   "
             f"Total COGS: {_format_inr(total_cogs)}   ·   "
-            f"Total ad spend: {_format_inr(total_spend)}   ·   "
+            f"Total ad spend: {_format_inr(total_spend)}"
+        )
+        subtitle_line2 = (
             f"Net profit: {_format_inr(total_net_profit)}   ·   "
             f"Orders: {total_orders:,}   ·   "
             f"Blended gross ROAS: {total_gross_roas:.2f}x"
         )
 
         fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=0.97)
-        fig.text(0.5, 0.905, subtitle, ha="center", va="top", fontsize=10, color="#555555")
+        fig.text(0.5, 0.905, subtitle_line1, ha="center", va="top", fontsize=9.5, color="#555555")
+        fig.text(0.5, 0.878, subtitle_line2, ha="center", va="top", fontsize=9.5, color="#555555")
 
         from matplotlib.patches import Patch
         from matplotlib.lines import Line2D
@@ -1032,7 +1109,7 @@ def plot_channel_performance(
                 label=METRIC_LABELS["orders"],
             ),
         ]
-        legend_y = 0.875
+        legend_y = 0.848
         fig.legend(
             handles=metric_handles,
             loc="upper center",
@@ -1054,7 +1131,18 @@ def plot_channel_performance(
             style="italic",
         )
 
-        plt.tight_layout(rect=[0.04, 0.06, 0.96, 0.82])
+        if ax_roas is not None:
+            _plot_net_roas_by_day(
+                ax_roas,
+                trend_raw,
+                roas_trend_days=roas_trend_days,
+                legend_below=False,
+            )
+            layout_rect = [0.04, 0.03, 0.96, 0.80]
+        else:
+            layout_rect = [0.04, 0.06, 0.96, 0.82]
+
+        plt.tight_layout(rect=layout_rect)
         if save_path:
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
@@ -1086,6 +1174,8 @@ def plot_channel_performance_daily(
         save_path=save_path,
         brand_id=brand_id,
         period_label=label,
+        include_roas_trend=True,
+        roas_trend_days=30,
     )
 
 

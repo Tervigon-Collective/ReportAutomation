@@ -23,7 +23,6 @@ PROJECT_ROOT = MODULE_ROOT.parent
 sys.path.insert(0, str(SRC))
 
 import run_report  # noqa: E402
-from weather_insights import generate_weather_insights  # noqa: E402
 
 logger = logging.getLogger("weather_email_assets")
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -102,7 +101,6 @@ def build_weather_email_bundle(
         {
             "combined_plot": str,
             "csv_path": str,
-            "insights": list[str],
             "report_date": str,
         }
     or None when the report cannot be produced.
@@ -132,7 +130,6 @@ def build_weather_email_bundle(
         return None
 
     report_df = pd.read_csv(attach_csv)
-    insights = generate_weather_insights(report_df)
 
     report_time = ""
     weather_fetched_at = ""
@@ -145,7 +142,6 @@ def build_weather_email_bundle(
     return {
         "combined_plot": str(combined),
         "csv_path": str(attach_csv),
-        "insights": insights,
         "report_date": report_date,
         "report_time": report_time,
         "weather_fetched_at": weather_fetched_at,

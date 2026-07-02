@@ -21,7 +21,7 @@ from global_config import get_global_config, get_facebook_ads_config, get_temp_d
 # Import external functions
 from plots import generate_plots_for_email
 from sku_matching import match_product_to_sku
-from timeframe_config import get_timeframe_config, get_current_timestamp
+from timeframe_config import get_timeframe_config, get_current_timestamp, get_daily_report_timeframe, set_global_dates
 
 from sqlalchemy.sql import text
 from googleads import get_google_ads_total_spend, get_th_account_metrics
@@ -592,6 +592,16 @@ def process_data(raw_data, today, timestamp_str):
         # Set purchases and sales to 0 to avoid mixing API sales data with UTM sales data
         df['purchases'] = 0.0
         df['sales'] = 0.0
+        if 'campaign_name' not in df.columns and 'ad_name' in df.columns:
+            df['campaign_name'] = df['ad_name']
+        for col, default in (
+            ('net_margin', 0.0),
+            ('per_bottle_cost', 0.0),
+            ('breakeven_roas', 0.0),
+            ('cogs', 0.0),
+        ):
+            if col not in df.columns:
+                df[col] = default
         
         # Ad-level report is intentionally skipped because it is not sent in email attachments.
         ad_level_report_path = None
@@ -794,6 +804,28 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
     if api_metrics is None:
         api_metrics = get_organized_metrics_for_pdf(timeframe_start, timeframe_end)
 
+    # Reconcile the channel-performance rows (meta/google/organic) to the SAME
+    # attribution snapshot the entity report is built from, so the email/PDF
+    # Channel Performance rows match meta_ads_rollup / google_campaigns /
+    # organic_campaigns exactly. The run-scoped marketing cache guarantees both
+    # read one snapshot even mid-day. The all-up P&L 'total' and 'amazon' rows are
+    # left unchanged (headline includes Amazon + event-date returns/cancels).
+    if os.getenv("CHANNEL_FROM_ATTRIBUTION", "true").lower() in ("1", "true", "yes") and isinstance(api_metrics, dict):
+        try:
+            from timeframe_config import get_timeframe_config
+            from api_data_fetcher import fetch_marketing_hourly
+            from dailyrollup import build_channel_summary_from_marketing_df
+            _tf = get_timeframe_config(timeframe_start, timeframe_end)
+            _cs = _tf['start_date'].strftime('%Y-%m-%d')
+            _ce = _tf['end_date'].strftime('%Y-%m-%d')
+            _attr_ch = build_channel_summary_from_marketing_df(fetch_marketing_hourly(_cs, _ce))
+            for _ch in ("meta", "google", "organic"):
+                if _ch in _attr_ch:
+                    api_metrics[_ch] = _attr_ch[_ch]
+            logger.info("Channel Performance rows reconciled to attribution snapshot (entity-report basis)")
+        except Exception as _cae:
+            logger.warning("Channel-from-attribution reconcile skipped: %s", _cae)
+
     # Extract metrics for easier access
     meta_metrics = api_metrics['meta']
     google_metrics = api_metrics['google']
@@ -867,9 +899,7 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             logger.warning(f"Campaign data fetch failed: {_ce}")
             campaign_df = None
 
-        # Generate narrative insights
-        from report_insights import generate_daily_insights
-        from channel_performance import reconcile_roas_with_pdf_metrics, roas_reconciliation_insights
+        from channel_performance import reconcile_roas_with_pdf_metrics
 
         reconcile_start = start_str or (
             today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)[:10]
@@ -878,17 +908,8 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
         roas_reconciliation = reconcile_roas_with_pdf_metrics(
             api_metrics, reconcile_start, reconcile_end
         )
-        if roas_reconciliation:
-            if roas_reconciliation.get("all_match"):
-                logger.info("ROAS reconciliation: PDF dashboard matches channel attribution query")
-            else:
-                logger.warning(
-                    "ROAS reconciliation mismatch: %s",
-                    roas_reconciliation_insights(roas_reconciliation),
-                )
-
-        insights = generate_daily_insights(api_metrics, campaign_df, funnel_metrics, google_funnel)
-        insights = roas_reconciliation_insights(roas_reconciliation) + insights
+        if roas_reconciliation and not roas_reconciliation.get("all_match"):
+            logger.warning("ROAS reconciliation mismatch for %s..%s", reconcile_start, reconcile_end)
 
         # Render PDF via weasyprint + Jinja2
         from report_renderer import build_daily_pdf_context, render_pdf_html, html_to_pdf
@@ -897,7 +918,6 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             campaign_df=campaign_df,
             funnel_metrics=funnel_metrics,
             google_funnel=google_funnel,
-            insights=insights,
             report_date=date_range,
             report_time=report_time,
             roas_reconciliation=roas_reconciliation,
@@ -931,11 +951,14 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             "organic": api_metrics.get("organic", {}),
             "amazon": _email_amazon,
             "total": _email_total,
-            "returns_row": build_returns_row(_email_total, _email_channels),
+            "returns_row": build_returns_row(
+                _email_total,
+                _email_channels,
+                returns_cancels_count=int(_email_total.get("returns_cancels") or 0),
+            ),
             "funnel": pdf_ctx.get("funnel"),
             "google_funnel": google_funnel,
             "campaigns": pdf_ctx.get("campaigns", []),
-            "insights": insights,
         }
 
         logger.info(f"PDF report saved to: {report_name}")
@@ -1112,9 +1135,9 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
         c for c in [
             daily_plot_cid,
             shopify_profit_plot_cid,
-            hourly_sales_plot_cid,
-            sales_by_state_pie_cid,
             channel_performance_cid,
+            sales_by_state_pie_cid,
+            hourly_sales_plot_cid,
         ] if c
     ]
 
@@ -1185,8 +1208,43 @@ def calculate_campaign_metrics(df):
     Returns:
         tuple: (campaign_summary, high_roas_campaigns, active_campaigns, pmf_campaigns, non_pmf_campaigns)
     """
+    if df is None or df.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty
+
+    work = df.copy()
+    if 'campaign_name' not in work.columns:
+        if 'ad_name' in work.columns:
+            work['campaign_name'] = work['ad_name']
+        else:
+            work['campaign_name'] = 'Unknown'
+
+    defaults = {
+        'spend': 0.0,
+        'sales': 0.0,
+        'impressions': 0,
+        'clicks': 0,
+        'purchases': 0.0,
+        'net_margin': 0.0,
+        'per_bottle_cost': 0.0,
+        'breakeven_roas': 0.0,
+        'cogs': 0.0,
+    }
+    for col, default in defaults.items():
+        if col not in work.columns:
+            work[col] = default
+        else:
+            work[col] = pd.to_numeric(work[col], errors='coerce').fillna(default)
+
+    if (work['breakeven_roas'] == 0).all() and work['spend'].sum() > 0:
+        work['breakeven_roas'] = np.where(
+            work['spend'] > 0,
+            (work['per_bottle_cost'] * work['purchases'] + work['spend']) / work['spend'],
+            0,
+        ).round(2)
+
     # Calculate campaign summary
-    campaign_summary = df.groupby('campaign_name').agg({
+    campaign_summary = work.groupby('campaign_name').agg({
         'spend': 'sum',
         'sales': 'sum',
         'impressions': 'sum',
@@ -1196,8 +1254,8 @@ def calculate_campaign_metrics(df):
     }).reset_index()
     
     # Calculate margin and ROAS metrics
-    df['total_margin'] = df['net_margin'] * df['purchases']
-    campaign_summary['total_margin'] = df.groupby('campaign_name')['total_margin'].sum().values
+    work['total_margin'] = work['net_margin'] * work['purchases']
+    campaign_summary['total_margin'] = work.groupby('campaign_name')['total_margin'].sum().values
     
     # Calculate key performance metrics
     metrics = {
@@ -1889,19 +1947,29 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
 
 def main():
     try:
-        # Use our standardized timeframe configuration
-        timeframe = get_timeframe_config(days_range=1)
-        today, timestamp_str = timeframe['today'], timeframe['timestamp_str']
+        # Single report day (default: yesterday). Locks globals so plots/rollup cannot
+        # inherit a wider MTD window left by another script in the same process.
+        timeframe = get_daily_report_timeframe()
+        set_global_dates(timeframe['start_date'], timeframe['end_date'])
+        report_day = timeframe['today']
+        today, timestamp_str = report_day, timeframe['timestamp_str']
         from datetime import datetime
         if isinstance(today, str):
             today = datetime.strptime(today, "%Y-%m-%d")
-        logger.info(f"Starting export and report generation at {timestamp_str}")
+        logger.info(
+            "Starting daily export and report generation for %s (%s)",
+            report_day,
+            timestamp_str,
+        )
         os.makedirs(REPORT_DIR, exist_ok=True)
 
         # Generate dailyrollup Excel for the timeframe and use its campaign data in PDF
         try:
-            # Use global timeframe from timeframe_config instead of explicit single date
-            xlsx_path = run_dailyrollup(out_dir=REPORT_DIR)
+            xlsx_path = run_dailyrollup(
+                start_date=report_day,
+                end_date=report_day,
+                out_dir=REPORT_DIR,
+            )
             logger.info(f"Dailyrollup Excel generated: {xlsx_path}")
         except Exception as e:
             logger.warning(f"Dailyrollup Excel generation failed: {e}")
@@ -1931,16 +1999,11 @@ def main():
         else:
             logger.warning("No plots were generated for email")
 
-        # --- Add Hourly Sales Plot for Last 7 Days ---
-        from datetime import datetime
-        today_str = today.strftime('%Y-%m-%d') if isinstance(today, datetime) else str(today)
-        hourly_sales_plot_path = os.path.join(REPORT_DIR, f"hourly_sales_last_7_days_{today_str}.png")
-        if os.path.exists(hourly_sales_plot_path):
-            plot_files = plot_files or []
-            plot_files.append(hourly_sales_plot_path)
-            logger.info(f"Added hourly sales plot to attachments: {hourly_sales_plot_path}")
-        else:
-            logger.warning(f"Hourly sales plot not found: {hourly_sales_plot_path}")
+        # Hourly sales plot is already included by generate_plots_for_email (timestamped subdir)
+        if plot_files:
+            hourly_paths = [p for p in plot_files if p and 'hourly_sales_last_7_days' in p]
+            if hourly_paths:
+                logger.info(f"Hourly sales plot in attachments: {hourly_paths[0]}")
 
         # Prepare attachments list in the requested order:
         # 1. Marketing Report (PDF)
@@ -2001,7 +2064,6 @@ def main():
                 attachments.append(weather_bundle["csv_path"])
                 attachments.append(weather_bundle["combined_plot"])
                 if _daily_email_context is not None:
-                    _daily_email_context["weather_insights"] = weather_bundle["insights"]
                     _daily_email_context["weather_report_date"] = weather_bundle.get("report_date", today_str)
                     _daily_email_context["weather_report_time"] = weather_bundle.get("report_time", "")
                     _daily_email_context["weather_fetched_at"] = weather_bundle.get("weather_fetched_at", "")

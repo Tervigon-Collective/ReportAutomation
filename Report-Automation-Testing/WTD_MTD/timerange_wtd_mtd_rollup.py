@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from timeframe_config import get_timeframe_config
-from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data, fetch_product_profitability
+from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data, fetch_product_profitability, fetch_canonical_pnl_totals
 from global_config import get_global_config, get_temp_dir, get_report_dir
 
 # Import functions from dailyrollup.py
@@ -1200,6 +1200,13 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
             
             # Store timeframe info in summary
             summary_data[timeframe_key]['timeframe'] = f"{start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}"
+            summary_data[timeframe_key]['start_date'] = start_date.strftime('%Y-%m-%d')
+            summary_data[timeframe_key]['end_date'] = end_date.strftime('%Y-%m-%d')
+            # Canonical company P&L totals from /v1/historical/time-patterns — same source as
+            # the daily report + net-profit graph, so WTD/MTD headline net profit agrees with daily.
+            summary_data[timeframe_key]['canonical_totals'] = fetch_canonical_pnl_totals(
+                start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+            )
             
             # Format date range for sheet name (DD-MM format, / is invalid in Excel sheet names)
             date_range_str = f"{start_date.strftime('%d-%m')} to {end_date.strftime('%d-%m')}"
@@ -2010,12 +2017,16 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
             continue
         
         # Calculate overall totals across all channels
-        total_revenue = sum(ch.get('revenue', 0) for ch in channels.values())
-        total_cogs = sum(ch.get('cogs', 0) for ch in channels.values())
-        total_spend = sum(ch.get('spend', 0) for ch in channels.values())
         total_orders = sum(ch.get('orders', 0) for ch in channels.values())
         total_quantity = sum(ch.get('quantity', 0) for ch in channels.values())
-        total_net_profit = sum(ch.get('net_profit', 0) for ch in channels.values())
+        # Company-level revenue/COGS/spend/net profit come from the canonical
+        # /historical/time-patterns totals (same as the daily report) when available,
+        # so the totals row agrees with daily. Falls back to channel sums otherwise.
+        canonical = timeframe_data.get('canonical_totals') or {}
+        total_revenue = canonical.get('revenue', sum(ch.get('revenue', 0) for ch in channels.values()))
+        total_cogs = canonical.get('cogs', sum(ch.get('cogs', 0) for ch in channels.values()))
+        total_spend = canonical.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values()))
+        total_net_profit = canonical.get('net_profit', sum(ch.get('net_profit', 0) for ch in channels.values()))
         total_net_roas = (total_revenue - total_cogs) / total_spend if total_spend > 0 else 0.0
         
         # Calculate overall efficiency metrics
@@ -2645,7 +2656,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             import sys as _sys
             _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             from report_renderer import render_email_wtd_mtd
-            from report_insights import generate_wtd_insights
 
             _ch_display = {'meta_ads': 'Meta Ads', 'google_ads': 'Google Ads', 'organic': 'Organic'}
             wtd_ch_data = summary_data.get('wtd', {}).get('channels', {})
@@ -2654,41 +2664,116 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             def _ch_row(d):
                 rev = float(d.get('revenue', 0))
                 spend = float(d.get('spend', 0))
+                cogs = float(d.get('cogs', 0))
                 return {
                     'sales': rev,
+                    'cogs': cogs,
                     'ad_spend': spend,
                     'net_profit': float(d.get('net_profit', 0)),
-                    'gross_roas': rev / spend if spend > 0 else 0.0,
+                    'net_roas': float(d.get('net_roas', (rev - cogs) / spend if spend > 0 else 0.0)),
                     'order_count': int(d.get('orders', 0)),
-                    'cpp': float(d.get('cost_per_order', 0)),
+                    'units': int(d.get('quantity') or 0),
                 }
 
-            wtd_channels_ctx = [(_ch_display.get(k, k), _ch_row(v)) for k, v in wtd_ch_data.items()]
-            mtd_channels_ctx = [(_ch_display.get(k, k), _ch_row(v)) for k, v in mtd_ch_data.items()]
+            def _amazon_row(a):
+                """Amazon channel row from the ClickHouse Amazon summary (revenue, cogs,
+                spend, net_profit, net_roas, orders, units)."""
+                if not a:
+                    return None
+                rev = float(a.get('revenue', 0))
+                spend = float(a.get('spend', 0))
+                cogs = float(a.get('cogs', 0))
+                if rev == 0 and spend == 0 and cogs == 0:
+                    return None
+                return {
+                    'sales': rev,
+                    'cogs': cogs,
+                    'ad_spend': spend,
+                    'net_profit': float(a.get('net_profit', 0)),
+                    'net_roas': float(a.get('net_roas', (rev - cogs) / spend if spend > 0 else 0.0)),
+                    'order_count': int(a.get('orders', 0)),
+                    'units': int(a.get('units') or a.get('quantity') or 0),
+                }
 
-            wtd_totals = {
-                'total_revenue': sum(v.get('revenue', 0) for v in wtd_ch_data.values()),
-                'net_profit': sum(v.get('net_profit', 0) for v in wtd_ch_data.values()),
-                'ad_spend': sum(v.get('spend', 0) for v in wtd_ch_data.values()),
-                'order_count': sum(v.get('orders', 0) for v in wtd_ch_data.values()),
-            }
-            mtd_totals = {
-                'total_revenue': sum(v.get('revenue', 0) for v in mtd_ch_data.values()),
-                'net_profit': sum(v.get('net_profit', 0) for v in mtd_ch_data.values()),
-                'ad_spend': sum(v.get('spend', 0) for v in mtd_ch_data.values()),
-                'order_count': sum(v.get('orders', 0) for v in mtd_ch_data.values()),
-            }
-            # Add roas to amazon dicts (template needs it)
-            def _enrich_amazon(d):
-                if not d:
-                    return d
-                rev, spend = float(d.get('revenue', 0)), float(d.get('spend', 0))
-                return dict(d, roas=rev / spend if spend > 0 else 0.0)
+            def _build_channels(ch_data, amazon):
+                rows = [(_ch_display.get(k, k), _ch_row(v)) for k, v in ch_data.items()]
+                amz = _amazon_row(amazon)
+                if amz:
+                    rows.append(('Amazon', amz))
+                return rows
 
-            insights = generate_wtd_insights(
-                {**wtd_totals, 'sales': wtd_totals['total_revenue'], 'ad_spend': wtd_totals['ad_spend']},
-                {**mtd_totals, 'sales': mtd_totals['total_revenue'], 'ad_spend': mtd_totals['ad_spend']},
-            )
+            wtd_channels_ctx = _build_channels(wtd_ch_data, amazon_wtd)
+            mtd_channels_ctx = _build_channels(mtd_ch_data, amazon_mtd)
+
+            def _total_row(channel_rows):
+                rev = sum(r['sales'] for _, r in channel_rows)
+                cogs = sum(r['cogs'] for _, r in channel_rows)
+                spend = sum(r['ad_spend'] for _, r in channel_rows)
+                return {
+                    'sales': rev,
+                    'cogs': cogs,
+                    'ad_spend': spend,
+                    'net_profit': sum(r['net_profit'] for _, r in channel_rows),
+                    'net_roas': (rev - cogs) / spend if spend > 0 else 0.0,
+                    'order_count': sum(r['order_count'] for _, r in channel_rows),
+                    'units': sum(r['units'] for _, r in channel_rows),
+                }
+
+            wtd_total_ctx = _total_row(wtd_channels_ctx)
+            mtd_total_ctx = _total_row(mtd_channels_ctx)
+
+            # Performance efficiency comparison (CPO / CPU / AOV), WTD vs MTD, computed from
+            # the channel totals (incl. Amazon) shown above.
+            def _pct_change(wtd_val, mtd_val, is_cost=True):
+                if not mtd_val:
+                    return 'N/A', ''
+                change = ((wtd_val - mtd_val) / mtd_val) * 100
+                if abs(change) < 0.1:
+                    return '—', ''
+                arrow = '↑' if change > 0 else '↓'
+                if is_cost:
+                    bg = '#e8f5e9' if change < 0 else '#ffebee'
+                else:
+                    bg = '#e8f5e9' if change > 0 else '#ffebee'
+                return f"{arrow} {abs(change):.1f}%", bg
+
+            def _eff(total):
+                rev, spend = total['sales'], total['ad_spend']
+                orders, units = total['order_count'], total['units']
+                return {
+                    'cpo': spend / orders if orders > 0 else 0.0,
+                    'cpu': spend / units if units > 0 else 0.0,
+                    'aov': rev / orders if orders > 0 else 0.0,
+                }
+
+            _we, _me = _eff(wtd_total_ctx), _eff(mtd_total_ctx)
+
+            def _eff_row(label, key, is_cost):
+                change_text, change_bg = _pct_change(_we[key], _me[key], is_cost)
+                return {'label': label, 'wtd': _we[key], 'mtd': _me[key],
+                        'change': change_text, 'change_bg': change_bg}
+
+            efficiency_ctx = [
+                _eff_row('Cost Per Order (CPO)', 'cpo', True),
+                _eff_row('Cost Per Unit (CPU)', 'cpu', True),
+                _eff_row('Average Order Value (AOV)', 'aov', False),
+            ]
+
+            # Headline company totals come from the canonical /historical/time-patterns
+            # figures (same as the daily report) when available, so WTD/MTD agrees with
+            # daily. Per-channel rows below remain channel-contribution detail. Falls back
+            # to channel sums if the canonical API call returned nothing.
+            def _headline_totals(ch_data, canonical):
+                canonical = canonical or {}
+                return {
+                    'total_revenue': canonical.get('revenue', sum(v.get('revenue', 0) for v in ch_data.values())),
+                    'net_profit': canonical.get('net_profit', sum(v.get('net_profit', 0) for v in ch_data.values())),
+                    'ad_spend': canonical.get('ad_spend', sum(v.get('spend', 0) for v in ch_data.values())),
+                    'order_count': sum(v.get('orders', 0) for v in ch_data.values()),
+                }
+
+            wtd_totals = _headline_totals(wtd_ch_data, summary_data.get('wtd', {}).get('canonical_totals'))
+            mtd_totals = _headline_totals(mtd_ch_data, summary_data.get('mtd', {}).get('canonical_totals'))
 
             email_ctx = {
                 'report_date': today_str,
@@ -2699,9 +2784,9 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 'mtd': mtd_totals,
                 'wtd_channels': wtd_channels_ctx,
                 'mtd_channels': mtd_channels_ctx,
-                'amazon_wtd': _enrich_amazon(amazon_wtd) or {},
-                'amazon_mtd': _enrich_amazon(amazon_mtd) or {},
-                'insights': insights,
+                'wtd_total': wtd_total_ctx,
+                'mtd_total': mtd_total_ctx,
+                'efficiency': efficiency_ctx,
                 'wtd_campaigns': [],
             }
             email_body = render_email_wtd_mtd(email_ctx)
@@ -2715,7 +2800,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             <ul style="font-size: 14px;">
                 <li><strong>WTD/MTD Report:</strong> Week-to-Date, Month-to-Date, and Daily entity summary</li>
                 <li><strong>Daily Report:</strong> Detailed report for {yesterday_str}</li>
-                <li><strong>Amazon Report:</strong> Campaign performance for {two_days_ago_str} (2 days earlier)</li>
                 <li><strong>Product Profitability:</strong> Product profitability for {yesterday_str}</li>
             </ul>
             {summary_html}
@@ -2759,19 +2843,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             attachments.append(daily_attachment)
             logger.info(f"Added daily report to email: {daily_file_path}")
         
-        # Add Amazon report attachment if available
-        if amazon_file_path:
-            with open(amazon_file_path, "rb") as f:
-                amazon_content = base64.b64encode(f.read()).decode('utf-8')
-            
-            amazon_attachment = {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": f"Amazon_Campaign_Report_{two_days_ago_str}.xlsx",
-                "contentBytes": amazon_content
-            }
-            attachments.append(amazon_attachment)
-            logger.info(f"Added Amazon report to email: {amazon_file_path}")
-        
         # Add Product Profitability report attachment if available (previous day)
         if product_profitability_file_path and os.path.exists(product_profitability_file_path):
             try:
@@ -2787,38 +2858,10 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Failed to add Product Profitability to email: {e}")
         
-        # Add WTD PDF attachment if available
-        if pdf_paths and pdf_paths.get('wtd') and os.path.exists(pdf_paths['wtd']):
-            try:
-                with open(pdf_paths['wtd'], "rb") as f:
-                    wtd_pdf_content = base64.b64encode(f.read()).decode('utf-8')
-                
-                wtd_pdf_attachment = {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": f"WTD_Meta_Campaigns_Report_{today_str}.pdf",
-                    "contentBytes": wtd_pdf_content
-                }
-                attachments.append(wtd_pdf_attachment)
-                logger.info(f"Added WTD PDF report to email: {pdf_paths['wtd']}")
-            except Exception as e:
-                logger.warning(f"Failed to add WTD PDF to email: {e}")
-        
-        # Add MTD PDF attachment if available
-        if pdf_paths and pdf_paths.get('mtd') and os.path.exists(pdf_paths['mtd']):
-            try:
-                with open(pdf_paths['mtd'], "rb") as f:
-                    mtd_pdf_content = base64.b64encode(f.read()).decode('utf-8')
-                
-                mtd_pdf_attachment = {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": f"MTD_Meta_Campaigns_Report_{today_str}.pdf",
-                    "contentBytes": mtd_pdf_content
-                }
-                attachments.append(mtd_pdf_attachment)
-                logger.info(f"Added MTD PDF report to email: {pdf_paths['mtd']}")
-            except Exception as e:
-                logger.warning(f"Failed to add MTD PDF to email: {e}")
-        
+        # NOTE: Per report spec, only three report files are attached — WTD/MTD Entity,
+        # Daily Entity, and Product Profitability. Amazon Campaign and the WTD/MTD Meta
+        # Campaigns PDFs are intentionally not attached.
+
         # Prepare email message
         message = {
             "message": {

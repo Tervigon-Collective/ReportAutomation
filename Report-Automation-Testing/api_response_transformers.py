@@ -28,6 +28,174 @@ def _parse_json_field(value: Any) -> Any:
     return value
 
 
+def _has_delivery_metrics(metrics: Optional[dict]) -> bool:
+    m = metrics or {}
+    return (
+        float(m.get("spend", 0) or 0) > 0
+        or float(m.get("clicks", 0) or 0) > 0
+        or float(m.get("impressions", 0) or 0) > 0
+    )
+
+
+def _strip_delivery_metrics(metrics: dict) -> dict:
+    """Keep attribution fields; zero spend/clicks/impressions (Google hoisted spend)."""
+    out = dict(metrics or {})
+    for key in ("spend", "impressions", "clicks", "cpc", "cpm", "ctr"):
+        out[key] = 0
+    return out
+
+
+def _strip_attribution_metrics(metrics: dict) -> dict:
+    """Keep delivery fields; zero order attribution (avoid double-count with ad rows)."""
+    out = dict(metrics or {})
+    for key in (
+        "attributed_orders_count",
+        "attributed_orders_revenue",
+        "attributed_orders_cogs",
+        "attributed_orders_quantity",
+        "total_sales",
+        "returns_cancels",
+        "gross_cogs",
+        "net_cogs",
+    ):
+        out[key] = 0
+    return out
+
+
+def _has_attribution_metrics(metrics: Optional[dict]) -> bool:
+    m = metrics or {}
+    return (
+        int(m.get("attributed_orders_count", 0) or 0) > 0
+        or float(m.get("attributed_orders_revenue", 0) or 0) > 0
+    )
+
+
+def _ad_tree_has_attribution(campaign: dict, time_key: str) -> bool:
+    for adset in campaign.get("adsets") or []:
+        for ad in adset.get("ads") or []:
+            if _has_attribution_metrics(ad.get("metrics")):
+                return True
+            if any(_has_attribution_metrics(b) for b in (ad.get(time_key) or [])):
+                return True
+    return False
+
+
+def _flatten_google_attribution_rows(data: dict) -> list[dict]:
+    """
+    Google hourly spend is campaign-level (hoisted to campaign.hourly_data).
+    - Brand Search: delivery on campaign.hourly_data, orders on ad nodes.
+    - PMax: delivery + orders co-located on campaign.hourly_data (no ad tree).
+    - sag_organic: attribution-only buckets on campaign.hourly_data (no ad tree).
+    """
+    if not data:
+        return []
+    time_agg = data.get("time_aggregation") or "daily"
+    time_key = "hourly_data" if time_agg == "hourly" else "daily_data"
+    period = data.get("period") or {}
+    period_start = period.get("start") or period.get("end")
+    rows: list[dict] = []
+
+    for campaign in data.get("campaigns") or []:
+        cid = campaign.get("campaign_id")
+        cname = campaign.get("campaign_name") or campaign.get("utm_campaign")
+        utm = {
+            "utm_source": campaign.get("utm_source"),
+            "utm_medium": campaign.get("utm_medium"),
+            "utm_campaign": campaign.get("utm_campaign"),
+            "utm_content": campaign.get("utm_content"),
+            "utm_term": campaign.get("utm_term"),
+        }
+
+        campaign_buckets = campaign.get(time_key) or []
+        has_ad_tree = bool(campaign.get("adsets"))
+        campaign_has_hoisted_delivery = bool(campaign_buckets) and any(
+            _has_delivery_metrics(b) for b in campaign_buckets
+        )
+        ad_has_delivery = any(
+            _has_delivery_metrics(ad.get("metrics"))
+            or any(_has_delivery_metrics(b) for b in (ad.get(time_key) or []))
+            for adset in campaign.get("adsets") or []
+            for ad in adset.get("ads") or []
+        )
+
+        for bucket in campaign_buckets:
+            has_delivery = _has_delivery_metrics(bucket)
+            has_attr = _has_attribution_metrics(bucket)
+            if not has_delivery and not (has_attr and not has_ad_tree):
+                continue
+            hour = bucket.get("hour")
+            if hour is None and time_agg == "hourly":
+                hour = 0
+            rows.append(_attribution_row(
+                "Google Ads", "Google", cname, None, None,
+                cid, None, None, bucket.get("date") or period_start, hour,
+                bucket, utm, {},
+            ))
+
+        if (
+            time_agg == "daily"
+            and not campaign_buckets
+            and not ad_has_delivery
+            and _has_delivery_metrics(campaign.get("metrics"))
+        ):
+            metrics = campaign.get("metrics") or {}
+            if _ad_tree_has_attribution(campaign, time_key):
+                metrics = _strip_attribution_metrics(metrics)
+            rows.append(_attribution_row(
+                "Google Ads", "Google", cname, None, None,
+                cid, None, None, period_start, 0,
+                metrics, utm, {},
+            ))
+
+        strip_ad_delivery = campaign_has_hoisted_delivery or (
+            time_agg == "daily"
+            and not ad_has_delivery
+            and _has_delivery_metrics(campaign.get("metrics"))
+        )
+
+        for adset in campaign.get("adsets") or []:
+            asid = adset.get("adset_id")
+            asname = adset.get("adset_name")
+            for ad in adset.get("ads") or []:
+                aid = ad.get("ad_id")
+                aname = ad.get("ad_name")
+                buckets = ad.get(time_key) or []
+                if not buckets:
+                    m = ad.get("metrics") or {}
+                    if strip_ad_delivery:
+                        m = _strip_delivery_metrics(m)
+                    rows.append(_attribution_row(
+                        "Google Ads", "Google", cname, asname, aname,
+                        cid, asid, aid, period_start, 0, m, utm, ad,
+                    ))
+                    continue
+                for bucket in buckets:
+                    hour = bucket.get("hour")
+                    if hour is None and time_agg == "hourly":
+                        hour = 0
+                    metrics = _strip_delivery_metrics(bucket) if strip_ad_delivery else bucket
+                    rows.append(_attribution_row(
+                        "Google Ads", "Google", cname, asname, aname,
+                        cid, asid, aid, bucket.get("date"), hour, metrics, utm, ad,
+                    ))
+
+        if not has_ad_tree and not _ad_tree_has_attribution(campaign, time_key):
+            camp_metrics = campaign.get("metrics") or {}
+            hourly_attr_orders = sum(
+                int(b.get("attributed_orders_count", 0) or 0)
+                for b in campaign_buckets
+                if _has_attribution_metrics(b)
+            )
+            camp_orders = int(camp_metrics.get("attributed_orders_count", 0) or 0)
+            if camp_orders > hourly_attr_orders and _has_attribution_metrics(camp_metrics):
+                rows.append(_attribution_row(
+                    "Google Ads", "Google", cname, None, None,
+                    cid, None, None, period_start, 0,
+                    _strip_delivery_metrics(camp_metrics), utm, {},
+                ))
+    return rows
+
+
 def _flatten_attribution_rows(
     data: dict,
     source_label: str,
@@ -102,6 +270,8 @@ def _attribution_row(
     product_details = None
     if isinstance(ad_node, dict):
         product_details = ad_node.get("product_details")
+        if not product_details and orders:
+            product_details = orders
 
     return {
         "source": source,
@@ -144,13 +314,15 @@ def flatten_meta_attribution(data: dict) -> pd.DataFrame:
 
 
 def flatten_google_attribution(data: dict) -> pd.DataFrame:
-    rows = _flatten_attribution_rows(data, "Google Ads", "Google")
+    rows = _flatten_google_attribution_rows(data)
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
 def flatten_organic_attribution(data: dict) -> pd.DataFrame:
     rows = []
     for order in data.get("orders") or []:
+        line_items = order.get("line_items") or order.get("items") or order.get("product_details") or []
+        item_qty = sum(int(i.get("quantity") or i.get("quantity_ordered") or 1) for i in line_items if isinstance(i, dict))
         rows.append({
             "source": "Organic",
             "channel": "Organic",
@@ -177,11 +349,24 @@ def flatten_organic_attribution(data: dict) -> pd.DataFrame:
             "action_offsite_pixel_initiate_checkout": 0,
             "action_landing_page_view": 0,
             "attributed_orders_count": 1,
-            "attributed_orders_revenue": float(order.get("net_revenue_excl_tax") or order.get("gross_revenue_excl_tax") or 0),
-            "attributed_orders_cogs": float(order.get("gross_cogs") or order.get("net_cogs") or 0),
-            "attributed_orders_quantity": int(order.get("total_quantity") or 0),
+            "attributed_orders_revenue": float(
+                order.get("net_revenue_excl_tax")
+                or order.get("gross_revenue_excl_tax")
+                or order.get("revenue")
+                or order.get("net_revenue")
+                or order.get("gross_revenue")
+                or 0
+            ),
+            "attributed_orders_cogs": float(
+                order.get("gross_cogs")
+                or order.get("net_cogs")
+                or order.get("cogs")
+                or order.get("total_cogs")
+                or 0
+            ),
+            "attributed_orders_quantity": int(order.get("total_quantity") or item_qty or 1),
             "attributed_orders": [order],
-            "product_details": order.get("line_items") or order.get("product_details"),
+            "product_details": line_items,
             "utm_source": order.get("utm_source"),
             "utm_medium": order.get("utm_medium"),
             "utm_campaign": order.get("utm_campaign"),
@@ -297,16 +482,43 @@ def amazon_pnl_from_attribution(data: dict) -> pd.DataFrame:
         status = str(order.get("order_status") or "").lower()
         if status in ("canceled", "cancelled"):
             continue
+        fees = order.get("fees") if isinstance(order.get("fees"), dict) else {}
+        commission = float(fees.get("fee_commission") or order.get("fee_commission") or order.get("commission") or 0)
+        closing = float(
+            fees.get("fee_fixed_closing")
+            or fees.get("fee_variable_closing")
+            or order.get("fee_fixed_closing")
+            or order.get("closing")
+            or 0
+        )
+        shipping = float(fees.get("fee_shipping_hb") or order.get("fee_shipping_hb") or order.get("shipping") or 0)
+        tax_withheld = float(
+            fees.get("total_tax_withheld")
+            or order.get("total_tax_withheld")
+            or order.get("tax_withheld")
+            or 0
+        )
+        if tax_withheld == 0 and fees:
+            tax_withheld = sum(
+                float(fees.get(k) or 0)
+                for k in ("tcs_igst", "tcs_cgst", "tcs_sgst", "item_tds")
+            )
+        amazon_fees = float(order.get("amazon_fees") or fees.get("total_amazon_fees") or 0)
+        if amazon_fees > 0 and (commission + closing + shipping + tax_withheld) == 0:
+            commission = amazon_fees
         rows.append({
             "amazon_order_id": order.get("amazon_order_id") or order.get("order_id"),
-            "gross": float(order.get("gross_revenue") or order.get("gross") or 0),
-            "cogs": float(order.get("product_cost") or order.get("cogs") or 0),
+            "purchase_date": str(order.get("purchase_date") or order.get("order_date") or "")[:10],
+            "pnl_status": order.get("pnl_status") or order.get("order_status"),
+            "payout_basis": order.get("payout_basis"),
+            "gross": float(order.get("gross_revenue") or order.get("gross") or order.get("gross_sales") or 0),
+            "cogs": float(order.get("product_cost") or order.get("total_cogs") or order.get("cogs") or 0),
             "gross_profit": float(order.get("gross_profit") or 0),
             "net_payout": float(order.get("net_payout") or 0),
-            "commission": float(order.get("fee_commission") or order.get("commission") or 0),
-            "closing": float(order.get("fee_fixed_closing") or order.get("closing") or 0),
-            "shipping": float(order.get("fee_shipping_hb") or order.get("shipping") or 0),
-            "tax_withheld": float(order.get("total_tax_withheld") or order.get("tax_withheld") or 0),
+            "commission": commission,
+            "closing": closing,
+            "shipping": shipping,
+            "tax_withheld": tax_withheld,
             "items": int(order.get("items") or order.get("items_shipped") or 0),
         })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
@@ -320,6 +532,10 @@ def amazon_line_items_from_attribution(data: dict) -> pd.DataFrame:
         purchase = str(order.get("purchase_date") or order.get("order_date") or "")[:10]
         cancel_mult = 0 if str(status or "").lower() in ("canceled", "cancelled") else 1
         for item in order.get("line_items") or order.get("items") or []:
+            qty_ordered = int(item.get("quantity_ordered") or item.get("quantity") or 0)
+            qty_shipped = int(item.get("quantity_shipped") or 0)
+            if qty_shipped == 0 and qty_ordered > 0:
+                qty_shipped = qty_ordered
             rows.append({
                 "amazon_order_id": oid,
                 "purchase_date": purchase,
@@ -328,9 +544,9 @@ def amazon_line_items_from_attribution(data: dict) -> pd.DataFrame:
                 "seller_sku": item.get("seller_sku") or item.get("sku"),
                 "asin": item.get("asin"),
                 "title": item.get("title"),
-                "quantity_ordered": int(item.get("quantity_ordered") or item.get("quantity") or 0),
-                "quantity_shipped": int(item.get("quantity_shipped") or 0),
-                "item_price_amount": float(item.get("item_price") or item.get("item_price_amount") or 0) * cancel_mult,
+                "quantity_ordered": qty_ordered,
+                "quantity_shipped": qty_shipped,
+                "item_price_amount": float(item.get("item_price") or item.get("item_price_amount") or item.get("item_revenue") or item.get("gross_revenue") or 0) * cancel_mult,
             })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -372,7 +588,13 @@ def meta_campaign_pdf_df(data: dict) -> pd.DataFrame:
 
 
 def sales_by_region_to_state_df(data: dict) -> pd.DataFrame:
-    regions = data.get("regions") or data.get("data") or data.get("sales_by_region") or []
+    regions = (
+        data.get("regions")
+        or data.get("data")
+        or data.get("sales_by_region")
+        or data.get("sales_by_province")
+        or []
+    )
     if isinstance(data, list):
         regions = data
     rows = []
@@ -388,9 +610,33 @@ def sales_by_region_to_state_df(data: dict) -> pd.DataFrame:
 
 
 def time_patterns_daily_df(data: dict) -> pd.DataFrame:
-    buckets = data.get("daily") or data.get("buckets") or data.get("daily_data") or []
+    buckets = (
+        data.get("daily_breakdown")
+        or data.get("daily")
+        or data.get("buckets")
+        or data.get("daily_data")
+        or []
+    )
     if not buckets and isinstance(data.get("data"), dict):
         buckets = data["data"].get("daily") or data["data"].get("buckets") or []
+    if not buckets:
+        hourly = data.get("hourly_breakdown") or []
+        if hourly:
+            period = data.get("period") or {}
+            sale_date = str(period.get("end") or period.get("start") or "")[:10]
+            rev = sum(float(h.get("net_sales") or h.get("revenue") or 0) for h in hourly)
+            cogs = sum(float(h.get("net_cogs") or h.get("cogs") or h.get("total_cogs") or 0) for h in hourly)
+            spend = sum(float(h.get("total_ad_spend") or h.get("ad_spend") or 0) for h in hourly)
+            np = sum(float(h.get("net_profit") or 0) for h in hourly)
+            if sale_date:
+                return pd.DataFrame([{
+                    "sale_date": sale_date,
+                    "revenue": rev,
+                    "cogs": cogs,
+                    "total_ad_spend": spend,
+                    "net_profit": np if np else rev - cogs - spend,
+                    "gross_sales": sum(float(h.get("gross_sales") or 0) for h in hourly),
+                }])
     rows = []
     for b in buckets:
         if not isinstance(b, dict):

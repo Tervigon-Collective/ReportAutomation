@@ -98,7 +98,7 @@ Amazon COGS: `product_cost + |marketplace fees|` per `amazonOrderPnl.js`.
 ## Environment flags
 
 ```env
-BACKEND_API_BASE_URL=https://node.seleric.com/api
+BACKEND_API_BASE_URL=https://backend.seleric.com/api
 USE_API_ONLY=false          # true = no DB/ClickHouse fallbacks
 USE_API_FALLBACK=true       # try API before legacy sources
 ```

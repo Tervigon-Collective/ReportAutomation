@@ -21,7 +21,7 @@ There are three places data is produced, and historically they disagreed:
 |---|---|---|
 | **My DB** | ClickHouse `gold.fct_*` (synced from dbt-trino Iceberg) | — it is the source of truth |
 | **Dashboard** | Node-Backend `/api/v1/*` routes | The `gold.fct_*` tables (already does for CH routes) |
-| **Reporting** (PDF / Email, Python on `node.seleric.cloud`) | Was: mix of PG `dw_*_attribution` + CH + ad-platform APIs | **Switch to `gold.fct_*` or the Node-Backend CH endpoints** |
+| **Reporting** (PDF / Email, Python report automation) | Was: mix of PG `dw_*_attribution` + CH + ad-platform APIs | **`https://backend.seleric.com/api/v1/*`** (Node-Backend; same gold data as dashboard) |
 
 **Decision for every metric below: prefer the ClickHouse `gold.fct_*` query.** The PostgreSQL
 `dw_*_attribution` paths are the origin of every discrepancy in the assignment table (incomplete

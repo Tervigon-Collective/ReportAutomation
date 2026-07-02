@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import os  
 import pytz
 import json
+import base64
 from typing import Optional, Dict
 from timeframe_config import get_timeframe_config
 import logging
@@ -23,9 +24,11 @@ SKU_SPEND_SALES_BASE = os.getenv('SKU_SPEND_SALES_BASE', "https://skuspendsales-
 Node-Backend (`backend.seleric.com`) expects JWT from `/api/v1/auth/login`, not Firebase ID tokens.
 
 Authentication priority for Node-Backend:
-1. JWT_ACCESS_TOKEN or BACKEND_ACCESS_TOKEN environment variable
-2. POST /api/v1/auth/login with BACKEND_EMAIL + BACKEND_PASSWORD (or FIREBASE_EMAIL/PASSWORD fallback)
-3. POST /api/v1/auth/select-context with DASHBOARD_COMPANY_ID + CLICKHOUSE_BRAND_ID
+1. Cached JWT (auto-refreshed before expiry)
+2. JWT_ACCESS_TOKEN from env (refreshed via BACKEND_REFRESH_TOKEN when expired)
+3. POST /api/v1/auth/refresh-token with BACKEND_REFRESH_TOKEN
+4. POST /api/v1/auth/login with BACKEND_EMAIL + BACKEND_PASSWORD, remember_me=true
+5. POST /api/v1/auth/select-context with DASHBOARD_COMPANY_ID + CLICKHOUSE_BRAND_ID
 
 Legacy Firebase (old hosts):
 1. FIREBASE_ID_TOKEN
@@ -33,10 +36,19 @@ Legacy Firebase (old hosts):
 """
 API_BEARER_TOKEN = os.getenv('FIREBASE_ID_TOKEN', '').strip()
 JWT_ACCESS_TOKEN = os.getenv('JWT_ACCESS_TOKEN', os.getenv('BACKEND_ACCESS_TOKEN', '')).strip()
+BACKEND_REFRESH_TOKEN = os.getenv('BACKEND_REFRESH_TOKEN', '').strip()
+BACKEND_CSRF_TOKEN = os.getenv('BACKEND_CSRF_TOKEN', '').strip()
+BACKEND_REMEMBER_ME = os.getenv('BACKEND_REMEMBER_ME', 'true').lower() in ('1', 'true', 'yes')
 BACKEND_EMAIL = os.getenv('BACKEND_EMAIL', os.getenv('FIREBASE_EMAIL', '')).strip()
 BACKEND_PASSWORD = os.getenv('BACKEND_PASSWORD', os.getenv('FIREBASE_PASSWORD', '')).strip()
 FIREBASE_TOKEN_CACHE = {'token': None, 'expires_at': None}
-JWT_TOKEN_CACHE = {'token': None, 'expires_at': None, 'session': None, 'login_failed': False}
+JWT_TOKEN_CACHE = {
+    'token': None,
+    'refresh_token': None,
+    'expires_at': None,
+    'session': None,
+    'login_failed': False,
+}
 
 # Firebase credentials for automatic token generation from environment
 FIREBASE_WEB_API_KEY = os.getenv('FIREBASE_WEB_API_KEY', '').strip()
@@ -119,9 +131,102 @@ def _api_root() -> str:
     return BASE_URL.rstrip('/')
 
 
+def _decode_jwt_claims(token: str) -> dict:
+    try:
+        payload = token.split('.')[1]
+        payload += '=' * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload))
+    except Exception:
+        return {}
+
+
+def _jwt_expires_at(token: str) -> Optional[datetime]:
+    exp = _decode_jwt_claims(token).get('exp')
+    if exp is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(exp))
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _jwt_is_expired(token: str, leeway_seconds: int = 120) -> bool:
+    exp = _jwt_expires_at(token)
+    if exp is None:
+        return False
+    return datetime.now() >= (exp - timedelta(seconds=leeway_seconds))
+
+
+def _backend_csrf_headers(session: Optional[requests.Session] = None) -> dict:
+    csrf = BACKEND_CSRF_TOKEN
+    if not csrf and session is not None:
+        csrf = session.cookies.get('csrf_token')
+    return {'x-csrf-token': csrf} if csrf else {}
+
+
+def _prime_backend_session(session: requests.Session) -> str:
+    session.get(f"{_api_root()}/v1/version", timeout=15)
+    return session.cookies.get('csrf_token') or BACKEND_CSRF_TOKEN or ''
+
+
+def _store_backend_tokens(
+    access_token: str,
+    refresh_token: Optional[str] = None,
+    session: Optional[requests.Session] = None,
+) -> str:
+    JWT_TOKEN_CACHE['token'] = access_token
+    JWT_TOKEN_CACHE['expires_at'] = _jwt_expires_at(access_token) or (
+        datetime.now() + timedelta(minutes=50)
+    )
+    if refresh_token:
+        JWT_TOKEN_CACHE['refresh_token'] = refresh_token
+    if session is not None:
+        JWT_TOKEN_CACHE['session'] = session
+    JWT_TOKEN_CACHE['login_failed'] = False
+    return access_token
+
+
+def refresh_backend_jwt() -> Optional[str]:
+    """Refresh access token using BACKEND_REFRESH_TOKEN or cached refresh token."""
+    refresh = JWT_TOKEN_CACHE.get('refresh_token') or BACKEND_REFRESH_TOKEN
+    if not refresh:
+        return None
+
+    session = JWT_TOKEN_CACHE.get('session') or requests.Session()
+    try:
+        _prime_backend_session(session)
+        headers = _backend_csrf_headers(session)
+        resp = session.post(
+            f"{_api_root()}/v1/auth/refresh-token",
+            json={'refresh_token': refresh},
+            headers=headers,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "[API] refresh-token failed (HTTP %s): %s",
+                resp.status_code,
+                resp.text[:300],
+            )
+            return None
+        data = (resp.json() or {}).get('data') or resp.json() or {}
+        token = data.get('access_token')
+        if not token:
+            return None
+        new_refresh = data.get('refresh_token') or refresh
+        logger.info("[API] Refreshed Node-Backend JWT (exp=%s)", _jwt_expires_at(token))
+        return _store_backend_tokens(token, new_refresh, session)
+    except Exception as e:
+        logger.warning("[API] refresh-token error: %s", e)
+        return None
+
+
 def generate_backend_jwt_from_login() -> Optional[str]:
     """Obtain Node-Backend JWT via /auth/login (+ optional select-context)."""
     if not BACKEND_EMAIL or not BACKEND_PASSWORD:
+        return None
+
+    if JWT_TOKEN_CACHE.get('login_failed'):
         return None
 
     if (
@@ -133,16 +238,20 @@ def generate_backend_jwt_from_login() -> Optional[str]:
 
     session = requests.Session()
     try:
-        prime = session.get(f"{_api_root()}/v1/version", timeout=15)
-        csrf = session.cookies.get('csrf_token')
-        headers = {'x-csrf-token': csrf} if csrf else {}
+        _prime_backend_session(session)
+        headers = _backend_csrf_headers(session)
         login_resp = session.post(
             f"{_api_root()}/v1/auth/login",
-            json={'email': BACKEND_EMAIL, 'password': BACKEND_PASSWORD, 'remember_me': True},
+            json={
+                'email': BACKEND_EMAIL,
+                'password': BACKEND_PASSWORD,
+                'remember_me': BACKEND_REMEMBER_ME,
+            },
             headers=headers,
             timeout=20,
         )
         if login_resp.status_code != 200:
+            JWT_TOKEN_CACHE['login_failed'] = True
             logger.warning(
                 "[API] Backend login failed (HTTP %s): %s",
                 login_resp.status_code,
@@ -152,6 +261,7 @@ def generate_backend_jwt_from_login() -> Optional[str]:
         payload = login_resp.json()
         data = payload.get('data') or payload
         token = data.get('access_token')
+        refresh = data.get('refresh_token') or BACKEND_REFRESH_TOKEN
         if not token:
             logger.warning("[API] Backend login response missing access_token")
             return None
@@ -168,6 +278,7 @@ def generate_backend_jwt_from_login() -> Optional[str]:
         if ctx_resp.status_code == 200:
             ctx_data = (ctx_resp.json() or {}).get('data') or ctx_resp.json() or {}
             token = ctx_data.get('access_token') or ctx_data.get('token') or token
+            refresh = ctx_data.get('refresh_token') or refresh
             logger.info("[API] Backend JWT with company=%s brand=%s", company_id, brand_id)
         else:
             logger.warning(
@@ -175,20 +286,35 @@ def generate_backend_jwt_from_login() -> Optional[str]:
                 ctx_resp.status_code,
             )
 
-        JWT_TOKEN_CACHE['token'] = token
-        JWT_TOKEN_CACHE['expires_at'] = datetime.now() + timedelta(minutes=50)
-        JWT_TOKEN_CACHE['session'] = session
-        logger.info("[API] Obtained Node-Backend JWT (len=%d)", len(token))
-        return token
+        logger.info("[API] Obtained Node-Backend JWT via login (exp=%s)", _jwt_expires_at(token))
+        return _store_backend_tokens(token, refresh, session)
     except Exception as e:
         logger.warning("[API] Backend JWT login error: %s", e)
         return None
 
 
-def get_backend_jwt_token() -> Optional[str]:
-    """Return JWT for Node-Backend API calls."""
-    if JWT_ACCESS_TOKEN:
-        return JWT_ACCESS_TOKEN
+def get_backend_jwt_token(force_refresh: bool = False) -> Optional[str]:
+    """Return a valid JWT for Node-Backend API calls (auto-refresh on expiry)."""
+    if not force_refresh:
+        cached = JWT_TOKEN_CACHE.get('token')
+        if cached and not _jwt_is_expired(cached):
+            return cached
+
+        if JWT_ACCESS_TOKEN and not _jwt_is_expired(JWT_ACCESS_TOKEN):
+            return _store_backend_tokens(
+                JWT_ACCESS_TOKEN,
+                JWT_TOKEN_CACHE.get('refresh_token') or BACKEND_REFRESH_TOKEN,
+            )
+
+        if JWT_ACCESS_TOKEN and _jwt_is_expired(JWT_ACCESS_TOKEN):
+            refreshed = refresh_backend_jwt()
+            if refreshed:
+                return refreshed
+
+    refreshed = refresh_backend_jwt()
+    if refreshed:
+        return refreshed
+
     return generate_backend_jwt_from_login()
 
 
@@ -242,8 +368,10 @@ def clear_token_cache():
     FIREBASE_TOKEN_CACHE['token'] = None
     FIREBASE_TOKEN_CACHE['expires_at'] = None
     JWT_TOKEN_CACHE['token'] = None
+    JWT_TOKEN_CACHE['refresh_token'] = None
     JWT_TOKEN_CACHE['expires_at'] = None
     JWT_TOKEN_CACHE['session'] = None
+    JWT_TOKEN_CACHE['login_failed'] = False
     print("[API] Token cache cleared")
 
 def make_authenticated_request(method: str, url: str, retry_on_401: bool = True, max_retries: int = 1, **kwargs) -> requests.Response:
@@ -274,14 +402,22 @@ def make_authenticated_request(method: str, url: str, retry_on_401: bool = True,
             if response.status_code < 400:
                 return response
                 
-            # Handle 401 Unauthorized
+            # Handle 401 Unauthorized — only retry if we had a token to refresh
             if response.status_code == 401 and retry_on_401 and attempt < max_retries:
-                logger.warning(f"[API] 401 Unauthorized on attempt {attempt+1}. Clearing token cache and retrying...")
-                clear_token_cache()
-                attempt += 1
-                import time
-                time.sleep(1) # Small delay before retry
-                continue
+                had_token = bool(headers.get('Authorization'))
+                if had_token:
+                    logger.warning(
+                        "[API] 401 on attempt %d — refreshing JWT and retrying...",
+                        attempt + 1,
+                    )
+                    clear_token_cache()
+                    if _uses_node_backend_jwt():
+                        get_backend_jwt_token(force_refresh=True)
+                    attempt += 1
+                    import time
+                    time.sleep(1)
+                    continue
+                return response
             
             # For other errors, just return the response and let the caller handle it
             return response
@@ -398,11 +534,26 @@ def fetch_sales(start_date: Optional[str] = None, end_date: Optional[str] = None
 def fetch_ad_spend(start_date: Optional[str] = None, end_date: Optional[str] = None):
     """
     Deprecated in favor of hourly endpoint `ad_spend_by_hour`. Kept for backward compatibility.
+    Uses /v1/historical/dashboard on Node-Backend when legacy /ad_spend is unavailable.
     """
     try:
         tf = get_timeframe_config(start_date=start_date, end_date=end_date)
         start_str = tf['start_date'].strftime('%Y-%m-%d')
         end_str = tf['end_date'].strftime('%Y-%m-%d')
+        if _prefer_api():
+            dash = fetch_historical_dashboard(start_str, end_str) or {}
+            breakdown = dash.get('ad_spend_breakdown') or {}
+            meta_spend = float((breakdown.get('meta') or 0) or 0)
+            google_spend = float((breakdown.get('google') or 0) or 0)
+            amazon_block = breakdown.get('amazon') or {}
+            amazon_spend = float(amazon_block.get('spend', amazon_block.get('ad_spend', 0)) or 0) if isinstance(amazon_block, dict) else 0.0
+            total = float(dash.get('total_ad_spend', meta_spend + google_spend + amazon_spend) or 0)
+            return {
+                'googleSpend': google_spend,
+                'facebookSpend': meta_spend,
+                'amazonSpend': amazon_spend,
+                'totalSpend': total,
+            }
         resp = requests.get(
             f"{BASE_URL}/ad_spend",
             params={'startDate': start_str, 'endDate': end_str},
@@ -823,6 +974,29 @@ def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataF
     return time_patterns_daily_df(data)
 
 
+def fetch_canonical_pnl_totals(start_date: str, end_date: str) -> dict:
+    """Canonical company P&L totals for a date window from GET /v1/historical/time-patterns.
+
+    Same source as the daily net-profit graph (net_sales - net_cogs - total_ad_spend),
+    so WTD/MTD headline figures agree with the daily report. Returns {} on failure.
+    """
+    try:
+        df = fetch_net_profit_series_from_api(start_date, end_date)
+        if df is None or df.empty:
+            return {}
+        return {
+            "revenue": float(df["revenue"].sum()),
+            "cogs": float(df["cogs"].sum()),
+            "ad_spend": float(df["total_ad_spend"].sum()),
+            "net_profit": float(df["net_profit"].sum()),
+        }
+    except Exception as e:
+        logger.warning(
+            "fetch_canonical_pnl_totals failed (%s -> %s): %s", start_date, end_date, e
+        )
+        return {}
+
+
 def fetch_shopify_sales_by_region_api(start_date: str, end_date: str) -> pd.DataFrame:
     """Regional sales from GET /v1/historical/sales-by-region."""
     from api_response_transformers import sales_by_region_to_state_df
@@ -872,17 +1046,38 @@ def fetch_shopify_sales_by_state(start_date: str, end_date: str) -> pd.DataFrame
         return pd.DataFrame(columns=["state", "total_sales", "order_count"])
 
 
+# Run-scoped snapshot cache so every report section (entity xlsx, PDF channel
+# table, email KPIs) reads the SAME attribution snapshot for a given date range.
+# Live "today" data is still being attributed, so independent fetches minutes
+# apart would otherwise return different numbers and fail to reconcile.
+_MARKETING_HOURLY_CACHE: dict = {}
+
+
+def clear_marketing_cache() -> None:
+    """Drop the run-scoped marketing snapshot cache (e.g. between report runs)."""
+    _MARKETING_HOURLY_CACHE.clear()
+
+
 def fetch_marketing_hourly(start_date: str, end_date: str) -> pd.DataFrame:
     """
     Fetch channel-wise hourly/daily marketing insights for the given date range.
 
     Primary source: Node-Backend v1 attribution APIs (meta, google, organic).
     Fallback: PostgreSQL dw_*_attribution union when USE_API_ONLY is false.
+
+    Memoized per (start, end) for the process lifetime so all report sections
+    share one consistent snapshot (see _MARKETING_HOURLY_CACHE).
     """
+    cache_key = (str(start_date)[:10], str(end_date)[:10])
+    cached = _MARKETING_HOURLY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.copy()
+
     try:
         df = fetch_marketing_from_api(start_date, end_date)
         if df is not None and not df.empty:
             logger.info("[marketing] API attribution: %d rows for %s to %s", len(df), start_date, end_date)
+            _MARKETING_HOURLY_CACHE[cache_key] = df.copy()
             return df
     except Exception as e:
         if USE_API_ONLY:
@@ -1029,7 +1224,9 @@ def fetch_marketing_hourly(start_date: str, end_date: str) -> pd.DataFrame:
             'start_date': start_date,
             'end_date': end_date,
         })
-            
+
+        if df is not None and not df.empty:
+            _MARKETING_HOURLY_CACHE[cache_key] = df.copy()
         return df
     except Exception as e:
         print(f"Database error in fetch_marketing_hourly: {str(e)}")

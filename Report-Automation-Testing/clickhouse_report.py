@@ -244,6 +244,19 @@ def get_google_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optio
     """Google performance from API (google-attribution) or ClickHouse gold."""
     s, e = _resolve_range(start_date, end_date)
     if _prefer_api():
+        # Preferred: unified on-site funnel (GET /v1/funnel?channel=google) — carries
+        # the real session -> product view -> add-to-cart -> checkout stages that the
+        # legacy google-attribution/ClickHouse paths leave blank on the funnel card.
+        try:
+            from api_data_fetcher import fetch_channel_funnel
+            from metric_calculators import channel_funnel_from_api
+            fdata = fetch_channel_funnel(s, e, channel="google")
+            if fdata and (fdata.get("funnel") or fdata.get("performance")):
+                return channel_funnel_from_api(fdata)
+        except Exception as ex:
+            if _USE_API_ONLY:
+                raise
+            logger.warning("google /v1/funnel failed (%s); trying google-attribution", ex)
         try:
             from api_data_fetcher import fetch_google_attribution
             data = fetch_google_attribution(s, e)

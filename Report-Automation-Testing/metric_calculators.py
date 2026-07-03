@@ -216,3 +216,51 @@ def meta_funnel_from_api(summary: Mapping[str, Any]) -> dict:
         "drop_off_checkout_to_orders": rate(checkout - orders, checkout),
         "drop_off_cart_to_orders": rate(atc - orders, atc),
     }
+
+
+def channel_funnel_from_api(data: Mapping[str, Any]) -> dict:
+    """Map GET /v1/funnel (unified per-channel funnel) to the funnel dict shape.
+
+    Combines ad-delivery metrics from `performance` (impressions, clicks, spend,
+    attributed orders/revenue) with the on-site session funnel from `funnel`
+    (sessions -> product_view -> add_to_cart -> checkout). Landing-page views map
+    to sessions, matching the Meta funnel card semantics (meta_funnel_from_api).
+    """
+    perf = data.get("performance") or {}
+    fn = data.get("funnel") or {}
+
+    impressions = _f(perf.get("impressions"))
+    clicks = _f(perf.get("clicks"))
+    landing = _f(fn.get("sessions"))
+    atc = _f(fn.get("atc_sessions"))
+    checkout = _f(fn.get("checkout_sessions"))
+    orders = _f(perf.get("attributed_orders") or fn.get("session_purchases"))
+    revenue = _f(perf.get("attributed_revenue") or fn.get("session_revenue"))
+    spend = _f(perf.get("spend"))
+    net_profit = revenue - spend  # no COGS on this endpoint; contribution before COGS
+
+    def rate(n, d):
+        return round(safe_div(n, d) * 100.0, 2)
+
+    return {
+        "impressions": int(round(impressions)),
+        "clicks": int(round(clicks)),
+        "landing_page_views": int(round(landing)),
+        "add_to_cart": int(round(atc)),
+        "checkout": int(round(checkout)),
+        "orders": int(round(orders)),
+        "net_profit": round(net_profit, 2),
+        "ctr": _f(perf.get("ctr")) or rate(clicks, impressions),
+        "interaction_rate": _f(perf.get("ctr")) or rate(clicks, impressions),
+        "landing_page_rate": rate(landing, clicks),
+        "add_to_cart_rate": rate(atc, landing),
+        "checkout_rate": rate(checkout, atc),
+        "conversion_rate": rate(orders, clicks),
+        "drop_off_impressions_to_clicks": rate(impressions - clicks, impressions),
+        "drop_off_clicks_to_landing": rate(clicks - landing, clicks),
+        "drop_off_landing_to_cart": rate(landing - atc, landing),
+        "drop_off_cart_to_checkout": rate(atc - checkout, atc),
+        "drop_off_checkout_to_orders": rate(checkout - orders, checkout),
+        "drop_off_cart_to_orders": rate(atc - orders, atc),
+        "drop_off_clicks_to_orders": rate(clicks - orders, clicks),
+    }

@@ -371,8 +371,20 @@ def build_meta_funnel_rows(funnel: dict | None) -> list[dict]:
 
 
 def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
-    """Google Ads delivery funnel; LP/ATC/checkout rows align with Meta card layout."""
+    """Google Ads funnel; LP/ATC/checkout rows align with Meta card layout.
+
+    When the on-site session funnel is available (GET /v1/funnel?channel=google via
+    channel_funnel_from_api), the LP Views / Add to Cart / Checkout stages carry real
+    counts. Otherwise (ad-delivery-only sources) those rows render blank as before.
+    """
     g = _normalize_google_funnel(funnel) or {}
+    has_onsite = g.get("landing_page_views") is not None or g.get("add_to_cart") is not None
+    if has_onsite:
+        lp_rate = g.get("landing_page_rate")
+        lp_prefix = None
+    else:
+        lp_rate = g.get("interaction_rate")
+        lp_prefix = "Int"
     return [
         _funnel_row("Impressions", g.get("impressions")),
         _funnel_row(
@@ -384,17 +396,29 @@ def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
         ),
         _funnel_row(
             "LP Views",
-            rate=g.get("interaction_rate"),
-            rate_prefix="Int",
+            g.get("landing_page_views"),
+            rate=lp_rate,
+            rate_prefix=lp_prefix,
+            drop_off=g.get("drop_off_clicks_to_landing"),
         ),
-        _funnel_row("Add to Cart"),
-        _funnel_row("Checkout"),
+        _funnel_row(
+            "Add to Cart",
+            g.get("add_to_cart"),
+            rate=g.get("add_to_cart_rate"),
+            drop_off=g.get("drop_off_landing_to_cart"),
+        ),
+        _funnel_row(
+            "Checkout",
+            g.get("checkout"),
+            rate=g.get("checkout_rate"),
+            drop_off=g.get("drop_off_cart_to_checkout"),
+        ),
         _funnel_row(
             "Orders",
             g.get("orders"),
             rate=g.get("conversion_rate"),
             rate_prefix="CVR",
-            drop_off=g.get("drop_off_clicks_to_orders"),
+            drop_off=g.get("drop_off_cart_to_orders") or g.get("drop_off_clicks_to_orders"),
         ),
     ]
 

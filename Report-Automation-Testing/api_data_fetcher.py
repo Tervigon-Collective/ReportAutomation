@@ -1406,6 +1406,26 @@ def fetch_meta_funnel(start_date: str, end_date: str) -> Optional[dict]:
     })
 
 
+def fetch_channel_funnel(
+    start_date: str,
+    end_date: str,
+    channel: str = "meta",
+) -> Optional[dict]:
+    """Unified per-channel on-site session funnel from GET /v1/funnel.
+
+    channel: 'meta' | 'google' | 'organic'. Returns the inner data object with
+    keys: period, channel, label, is_paid, funnel, performance, breakdowns,
+    top_products. `funnel` carries the session-based stages (sessions ->
+    product_view -> add_to_cart -> checkout -> converted); `performance`
+    carries ad-delivery metrics (spend, impressions, clicks, attributed_orders).
+    """
+    return fetch_v1("funnel", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+        "channel": channel,
+    })
+
+
 def fetch_pnl_summary(start_date: str, end_date: str) -> Optional[dict]:
     return fetch_v1("pnl/summary", {
         "startDate": _to_date_only(start_date),

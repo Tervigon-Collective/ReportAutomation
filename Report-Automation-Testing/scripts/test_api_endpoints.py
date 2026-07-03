@@ -39,6 +39,7 @@ from api_data_fetcher import (  # noqa: E402
     fetch_historical_meta_ads,
     fetch_historical_sales_by_region,
     fetch_historical_time_patterns,
+    fetch_channel_funnel,
     fetch_meta_attribution,
     fetch_meta_funnel,
     fetch_pnl_summary,
@@ -85,6 +86,8 @@ def _specs(start: str, end: str) -> list[EndpointSpec]:
         ("channel-attribution", fetch_channel_attribution, {"channel": "organic"}, []),
         ("amazon-attribution", fetch_amazon_attribution, {}, ["summary"]),
         ("meta-funnel", fetch_meta_funnel, {}, ["summary"]),
+        ("funnel", fetch_channel_funnel, {"channel": "meta"}, ["funnel", "performance"]),
+        ("funnel", fetch_channel_funnel, {"channel": "google"}, ["funnel", "performance"]),
         ("pnl/summary", fetch_pnl_summary, {}, []),
     ]
 
@@ -92,6 +95,8 @@ def _specs(start: str, end: str) -> list[EndpointSpec]:
 def _call_fetch(fn: Callable, start: str, end: str, extra: dict) -> Optional[dict]:
     if fn is fetch_channel_attribution:
         return fn(start, end, channel=extra.get("channel", "organic"))
+    if fn is fetch_channel_funnel:
+        return fn(start, end, channel=extra.get("channel", "meta"))
     if fn is fetch_meta_attribution or fn is fetch_google_attribution:
         return fn(start, end, time_aggregation=extra.get("time_aggregation"))
     return fn(start, end)

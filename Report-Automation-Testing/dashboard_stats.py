@@ -126,6 +126,9 @@ def _api_to_stats(data: dict) -> dict:
             "returns_cancels": int(rc.get("total_count", 0) or 0),
             "cancelled_orders": int(rc.get("cancelled_count", 0) or 0),
             "returned_orders": int(rc.get("returned_count", 0) or 0),
+            "cancelled_amount": float(rc.get("cancelled_amount", 0) or 0),
+            "returned_amount": float(rc.get("returned_amount", 0) or 0),
+            "returns_cancels_amount": float(rc.get("total_amount", 0) or 0),
             "amazon_net_revenue": float(amazon.get("net_sales", 0) or 0),
             "amazon_net_cogs": float(amazon.get("cogs", 0) or 0),
             "amazon_spend": amazon_spend,
@@ -207,6 +210,9 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         "returns_cancels": int(t["returns_cancels"]),
         "cancelled_orders": int(t["cancelled_orders"]),
         "returned_orders": int(t["returned_orders"]),
+        "cancelled_amount": float(t.get("cancelled_revenue_excl", 0) or 0),
+        "returned_amount": float(t.get("returned_revenue_excl", 0) or 0),
+        "returns_cancels_amount": float(t.get("cancelled_revenue_excl", 0) or 0) + float(t.get("returned_revenue_excl", 0) or 0),
         "amazon_net_revenue": float(t["amazon_net_revenue"]),
         "amazon_net_cogs": float(t["amazon_net_cogs"]),
         "amazon_spend": float(t["amazon_spend"]),
@@ -344,6 +350,7 @@ def build_pdf_api_metrics(stats: dict) -> dict:
     })
     total = {
         "sales": round(t["net_sales"], 2),
+        "gross_sales": round(t.get("gross_sales", 0.0), 2),
         "ad_spend": round(t["total_ad_spend"], 2),
         "cogs": round(t["total_cogs"], 2),
         "net_profit": round(t["net_profit"], 2),
@@ -353,6 +360,12 @@ def build_pdf_api_metrics(stats: dict) -> dict:
         "order_count": int(t["total_orders"]),
         "quantity": int(t["total_orders"]),
         "cpp": round(_sd(t["total_ad_spend"], t["total_orders"]), 2),
+        "returns_cancels": int(t.get("returns_cancels", 0) or 0),
+        "cancelled_orders": int(t.get("cancelled_orders", 0) or 0),
+        "returned_orders": int(t.get("returned_orders", 0) or 0),
+        "cancelled_amount": round(float(t.get("cancelled_amount", 0) or 0), 2),
+        "returned_amount": round(float(t.get("returned_amount", 0) or 0), 2),
+        "returns_cancels_amount": round(float(t.get("returns_cancels_amount", 0) or 0), 2),
     }
     return {"meta": ch["meta"], "google": ch["google"], "organic": ch["organic"],
             "amazon": amazon, "total": total}

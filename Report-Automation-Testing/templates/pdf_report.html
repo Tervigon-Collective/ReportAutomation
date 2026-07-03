@@ -5,7 +5,7 @@
 <style>
   @page {
     size: A4;
-    margin: 18mm 16mm 18mm 16mm;
+    margin: 6mm 5mm 8mm 5mm;
     @bottom-right {
       content: "Page " counter(page) " of " counter(pages);
       font-size: 8pt;
@@ -21,15 +21,20 @@
     margin: 0;
     padding: 0;
   }
-  .page-break { page-break-before: always; }
+  .page-break { page-break-before: always; break-before: page; }
+  .campaign-section {
+    page-break-before: always;
+    break-before: page;
+    page-break-inside: auto;
+  }
 
   /* HEADER */
   .header {
     background: #1a1a2e;
     color: #fff;
-    border-radius: 6px;
-    padding: 16px 20px;
-    margin-bottom: 14px;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
   }
   .header .brand { font-size: 8pt; color: #8892b0; text-transform: uppercase; letter-spacing: 1.5px; }
   .header h1 { font-size: 16pt; font-weight: 700; margin: 4px 0 2px; color: #fff; }
@@ -45,7 +50,7 @@
   }
   .kpi-cell {
     width: 20%;
-    padding: 12px 8px;
+    padding: 10px 6px;
     text-align: center;
     border-right: 1px solid #16213e;
     vertical-align: top;
@@ -55,44 +60,103 @@
   .kpi-value { font-size: 14pt; font-weight: 700; color: #e2e8f0; margin-top: 3px; }
   .kpi-sub { font-size: 7pt; color: #94a3b8; margin-top: 2px; }
 
-  /* SECTION HEADING */
+  /* SECTION HEADING — standalone fallback */
   h2 {
     font-size: 8pt;
     font-weight: 700;
     color: #1a1a2e;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    margin: 16px 0 8px;
-    padding-bottom: 4px;
+    letter-spacing: 0.6px;
+    margin: 10px 0 0;
+    padding: 6px 8px 5px;
+    border: 1px solid #e2e8f0;
     border-bottom: 2px solid #e2e8f0;
+    background: #fafbfc;
+  }
+  h2 + table {
+    margin-top: 0;
+    border-top: none;
+  }
+
+  /* SECTION SHELL — title + table share one bordered box (xhtml2pdf-safe) */
+  .report-section {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 10px 0 6px;
+    border: 1px solid #e2e8f0;
+    page-break-inside: avoid;
+  }
+  .report-section-heading td {
+    font-size: 8pt;
+    font-weight: 700;
+    color: #1a1a2e;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    padding: 6px 8px 5px;
+    background: #fafbfc;
+    border-bottom: 2px solid #e2e8f0;
+  }
+  .report-section-content td {
+    padding: 0;
+    vertical-align: top;
+  }
+  .report-section-content table {
+    margin: 0;
+    border: none;
+    width: 100%;
+  }
+  .report-section-footnote td {
+    font-size: 7pt;
+    color: #64748b;
+    font-style: italic;
+    text-align: center;
+    padding: 4px 8px 6px;
+    border-top: 1px solid #f1f5f9;
+    background: #fafbfc;
   }
 
   /* TABLES */
-  table { width: 100%; border-collapse: collapse; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
   th {
     font-size: 7.5pt;
     font-weight: 600;
     color: #64748b;
     text-align: right;
-    padding: 5px 6px;
+    padding: 4px 5px;
     background: #f8fafc;
     border-bottom: 1.5px solid #e2e8f0;
+    vertical-align: middle;
   }
   th:first-child { text-align: left; }
   td {
     font-size: 8pt;
     color: #334155;
     text-align: right;
-    padding: 5px 6px;
+    padding: 4px 5px;
     border-bottom: 1px solid #f1f5f9;
+    vertical-align: middle;
   }
   td:first-child { text-align: left; font-weight: 500; }
+  th.num, td.num { text-align: right; }
   tr:nth-child(even) td { background: #f8fafc; }
+  .num-cell { white-space: nowrap; }
+  .channel-table {
+    table-layout: fixed;
+    margin-bottom: 8px;
+  }
+  .channel-table th.num,
+  .channel-table td.num {
+    white-space: nowrap;
+    text-align: right;
+    padding-left: 4px;
+    padding-right: 4px;
+  }
   .total-row td {
     background: #1a1a2e !important;
     color: #e2e8f0;
     font-weight: 700;
     border-bottom: none;
+    padding: 7px 8px;
   }
   .total-row td:first-child { color: #e2e8f0; }
   .adjustment-row td {
@@ -121,140 +185,95 @@
     border-top: 1.5px solid #cbd5e1;
   }
 
-  /* FUNNEL ANALYSIS — side-by-side cards (xhtml2pdf-safe table layout) */
-  .funnel-layout {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 10px 0;
-    margin-bottom: 10px;
-    page-break-inside: avoid;
-  }
-  .funnel-card-cell {
-    width: 50%;
-    vertical-align: top;
-    padding: 0;
-  }
-  .funnel-card {
-    width: 100%;
-    border-collapse: collapse;
-    border: 1px solid #e2e8f0;
-    border-radius: 5px;
-    table-layout: fixed;
-    page-break-inside: avoid;
-  }
-  .funnel-card-title td {
-    font-size: 8.5pt;
-    font-weight: 700;
-    color: #1a1a2e;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    padding: 8px 10px;
-    background: #f8fafc;
-    border-bottom: 1.5px solid #e2e8f0;
-    text-align: left;
-  }
-  .funnel-card th {
-    font-size: 8pt;
-    font-weight: 600;
-    color: #64748b;
-    text-align: right;
-    padding: 5px 8px;
-    background: #f8fafc;
-    border-bottom: 1.5px solid #e2e8f0;
-    white-space: nowrap;
-  }
-  .funnel-card th.funnel-stage-head,
-  .funnel-card td.funnel-stage {
-    text-align: left;
-  }
-  .funnel-card td {
-    font-size: 8pt;
-    color: #334155;
-    text-align: right;
-    padding: 5px 8px;
-    border-bottom: 1px solid #f1f5f9;
-    vertical-align: middle;
-    line-height: 1.25;
-  }
-  .funnel-card td.funnel-stage {
-    font-weight: 500;
-    white-space: nowrap;
-  }
-  .funnel-card td.funnel-empty {
-    color: #94a3b8;
-  }
-  .funnel-card tr:nth-child(even) td {
-    background: #f8fafc;
-  }
-  .funnel-note {
-    font-size: 7pt;
-    color: #64748b;
-    font-style: italic;
-    padding: 4px 10px 8px;
-    text-align: left;
-  }
-
-  /* legacy unified funnel (kept for reference — unused) */
+  /* FUNNEL ANALYSIS — single unified table (row-synced Meta + Google) */
   .funnel-unified {
     width: 100%;
     border-collapse: collapse;
-    margin-bottom: 6px;
+    margin-bottom: 2px;
     page-break-inside: avoid;
     table-layout: fixed;
+    border: 1px solid #e2e8f0;
+  }
+  .funnel-unified th,
+  .funnel-unified td {
+    font-size: 7.5pt;
+    padding: 4px 5px;
+    vertical-align: middle;
+    line-height: 1.2;
+    overflow: hidden;
   }
   .funnel-unified th {
-    font-size: 7pt;
     font-weight: 600;
     color: #64748b;
     text-align: right;
-    padding: 4px 3px;
     background: #f8fafc;
     border-bottom: 1.5px solid #e2e8f0;
-    white-space: nowrap;
   }
   .funnel-unified th.funnel-stage-head,
   .funnel-unified td.funnel-stage {
     text-align: left;
-  }
-  .funnel-unified td {
-    font-size: 7pt;
-    color: #334155;
-    text-align: right;
-    padding: 4px 3px;
-    border-bottom: 1px solid #f1f5f9;
-    vertical-align: middle;
-    line-height: 1.15;
-    height: 16px;
-  }
-  .funnel-unified td.funnel-stage {
     font-weight: 500;
     white-space: nowrap;
+    padding-left: 6px;
+    padding-right: 4px;
   }
-  .funnel-unified td.funnel-empty {
+  .funnel-unified th.funnel-metric,
+  .funnel-unified td.funnel-metric {
+    text-align: right;
+    white-space: nowrap;
+    padding-left: 4px;
+    padding-right: 6px;
+  }
+  .funnel-unified td {
+    color: #334155;
+    text-align: right;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .funnel-unified td.funnel-empty,
+  .funnel-unified span.funnel-empty {
     color: #94a3b8;
+    text-align: right;
   }
   .funnel-unified tr:nth-child(even) td {
     background: #f8fafc;
   }
+  /* 50/50 divider — border only, no extra padding */
+  .funnel-unified th.funnel-divider,
+  .funnel-unified td.funnel-divider {
+    border-left: 1px solid #cbd5e1;
+  }
   .funnel-title-row td {
-    background: #ffffff !important;
-    border-bottom: none;
-    padding: 0 3px 4px;
-    height: auto;
+    background: #f8fafc !important;
+    border-bottom: 1.5px solid #e2e8f0;
+    padding: 6px 5px;
+    vertical-align: middle;
+    text-align: center;
+  }
+  .funnel-title-row td.funnel-divider {
+    border-left: 1px solid #cbd5e1;
   }
   .funnel-subtitle {
-    font-size: 7.5pt;
+    font-size: 8pt;
     font-weight: 700;
     color: #1a1a2e;
     text-transform: uppercase;
-    letter-spacing: 0.6px;
-    padding-bottom: 3px;
-    border-bottom: 2px solid #e2e8f0;
-    text-align: left;
+    letter-spacing: 0.4px;
+    text-align: center;
+    border-bottom: none;
+    padding: 0;
   }
-  .funnel-split {
-    border-left: 2px solid #e2e8f0;
-    padding-left: 6px !important;
+  .funnel-footnote {
+    font-size: 7pt;
+    color: #64748b;
+    font-style: italic;
+    text-align: center;
+    margin: 0;
+    padding: 0;
+  }
+  /* single-channel funnel (Meta-only or Google-only) */
+  .funnel-single {
+    width: 50%;
+    margin-bottom: 6px;
   }
 
   /* CAMPAIGN STATUS BADGE */
@@ -267,19 +286,19 @@
     table-layout: fixed;
   }
   .campaign-table th {
-    font-size: 6.7pt;
+    font-size: 6.8pt;
     padding: 4px 3px;
-    white-space: normal;
-    word-wrap: break-word;
+    white-space: nowrap;
+    text-align: right;
   }
   .campaign-table td {
     font-size: 6.9pt;
     padding: 4px 3px;
-    vertical-align: top;
+    vertical-align: middle;
   }
   .campaign-table th:first-child,
   .campaign-table td:first-child {
-    width: 28%;
+    width: 26%;
     text-align: left;
     white-space: normal;
     word-wrap: break-word;
@@ -292,9 +311,19 @@
     line-height: 1.25;
   }
   .campaign-metric {
-    width: 9%;
     text-align: right;
     white-space: nowrap;
+  }
+  .campaign-metric-wide {
+    text-align: right;
+    white-space: nowrap;
+    font-size: 6.7pt;
+  }
+  .campaign-profit {
+    text-align: right;
+    white-space: nowrap;
+    font-size: 6.6pt;
+    min-width: 52px;
   }
   .segment-header td {
     background: #f1f5f9 !important;
@@ -303,6 +332,8 @@
     font-size: 7.5pt;
     border-top: 1.5px solid #e2e8f0;
     border-bottom: 1px solid #e2e8f0;
+    padding: 6px 6px 5px;
+    vertical-align: middle;
   }
   .section-total td {
     background: #f8fafc !important;
@@ -369,68 +400,85 @@
 </table>
 
 <!-- CHANNEL PERFORMANCE -->
-<h2>Channel Performance</h2>
-<table>
+<table class="report-section">
+  <tr><td class="report-section-heading">Channel Performance</td></tr>
+  <tr><td class="report-section-content">
+<table class="channel-table">
+  <colgroup>
+    <col style="width:9%;">
+    <col style="width:9%;">
+    <col style="width:9%;">
+    <col style="width:8%;">
+    <col style="width:9%;">
+    <col style="width:9%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
+    <col style="width:7%;">
+    <col style="width:6%;">
+  </colgroup>
   <thead>
     <tr>
-      <th>Channel</th>
-      <th>Revenue</th>
-      <th>Ad Spend</th>
-      <th>COGS</th>
-      <th>Gross Profit</th>
-      <th>Net Profit</th>
-      <th>Gross ROAS</th>
-      <th>Net ROAS</th>
-      <th>BE ROAS</th>
-      <th>Orders</th>
-      <th>CPO</th>
+      <th align="left">Channel</th>
+      <th class="num" align="right">Revenue</th>
+      <th class="num" align="right">Ad Spend</th>
+      <th class="num" align="right">COGS</th>
+      <th class="num" align="right">Gross Profit</th>
+      <th class="num" align="right">Net Profit</th>
+      <th class="num" align="right">Gross ROAS</th>
+      <th class="num" align="right">Net ROAS</th>
+      <th class="num" align="right">BE ROAS</th>
+      <th class="num" align="right">Orders</th>
+      <th class="num" align="right">CPO</th>
     </tr>
   </thead>
   <tbody>
     {% for ch_name, ch in channels %}
     <tr>
       <td>{{ ch_name }}</td>
-      <td>{{ ch.sales | fmt_inr }}</td>
-      <td>{{ ch.ad_spend | fmt_inr }}</td>
-      <td>{{ ch.cogs | fmt_inr }}</td>
-      <td>{{ (ch.sales - ch.cogs) | fmt_inr }}</td>
-      <td class="{{ 'positive' if ch.net_profit >= 0 else 'negative' }}">{{ ch.net_profit | fmt_inr }}</td>
-      <td>{{ ch.gross_roas | fmt_roas }}</td>
-      <td>{{ ch.net_roas | fmt_roas }}</td>
-      <td>{{ ch.be_roas | fmt_roas }}</td>
-      <td>{{ ch.order_count }}</td>
-      <td>{{ ch.cpp | fmt_inr }}</td>
+      <td class="num" align="right">{{ ch.sales | fmt_inr }}</td>
+      <td class="num" align="right">{{ ch.ad_spend | fmt_inr }}</td>
+      <td class="num" align="right">{{ ch.cogs | fmt_inr }}</td>
+      <td class="num" align="right">{{ (ch.sales - ch.cogs) | fmt_inr }}</td>
+      <td class="num {{ 'positive' if ch.net_profit >= 0 else 'negative' }}" align="right">{{ ch.net_profit | fmt_inr }}</td>
+      <td class="num" align="right">{{ ch.gross_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ ch.net_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ ch.be_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ ch.order_count }}</td>
+      <td class="num" align="right">{{ ch.cpp | fmt_inr }}</td>
     </tr>
     {% endfor %}
     {% if returns_row and returns_row.show %}
     <tr class="adjustment-row">
-      <td>Returned / Cancelled</td>
-      <td>{{ returns_row.sales | fmt_inr }}</td>
-      <td>{{ returns_row.ad_spend | fmt_inr }}</td>
-      <td>{{ returns_row.cogs | fmt_inr }}</td>
-      <td>{{ (returns_row.sales - returns_row.cogs) | fmt_inr }}</td>
-      <td class="{{ 'positive' if returns_row.net_profit >= 0 else 'negative' }}">{{ returns_row.net_profit | fmt_inr }}</td>
-      <td>—</td>
-      <td>—</td>
-      <td>—</td>
-      <td>{{ returns_row.order_count }}</td>
-      <td>—</td>
+      <td>Returned / Cancelled{% if returns_row.cancelled_orders or returns_row.returned_orders %}<br/><span style="font-size:6.5pt;font-weight:400;">{{ returns_row.cancelled_orders }} cancel{% if returns_row.cancelled_orders != 1 %}s{% endif %}{% if returns_row.returned_orders %}, {{ returns_row.returned_orders }} return{% if returns_row.returned_orders != 1 %}s{% endif %}{% endif %}</span>{% endif %}</td>
+      <td class="num">{{ returns_row.total_amount | fmt_inr }}</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">—</td>
+      <td class="num">{{ returns_row.order_count }}</td>
+      <td class="num">—</td>
     </tr>
     {% endif %}
     <tr class="total-row">
       <td>Total</td>
-      <td>{{ total.sales | fmt_inr }}</td>
-      <td>{{ total.ad_spend | fmt_inr }}</td>
-      <td>{{ total.cogs | fmt_inr }}</td>
-      <td>{{ (total.sales - total.cogs) | fmt_inr }}</td>
-      <td>{{ total.net_profit | fmt_inr }}</td>
-      <td>{{ total.gross_roas | fmt_roas }}</td>
-      <td>{{ total.net_roas | fmt_roas }}</td>
-      <td>{{ total.be_roas | fmt_roas }}</td>
-      <td>{{ total.order_count }}</td>
-      <td>{{ total.cpp | fmt_inr }}</td>
+      <td class="num" align="right">{{ total.sales | fmt_inr }}</td>
+      <td class="num" align="right">{{ total.ad_spend | fmt_inr }}</td>
+      <td class="num" align="right">{{ total.cogs | fmt_inr }}</td>
+      <td class="num" align="right">{{ (total.sales - total.cogs) | fmt_inr }}</td>
+      <td class="num" align="right">{{ total.net_profit | fmt_inr }}</td>
+      <td class="num" align="right">{{ total.gross_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ total.net_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ total.be_roas | fmt_roas }}</td>
+      <td class="num" align="right">{{ total.order_count }}</td>
+      <td class="num" align="right">{{ total.cpp | fmt_inr }}</td>
     </tr>
   </tbody>
+</table>
+  </td></tr>
 </table>
 
 {# ROAS reconciliation temporarily disabled — re-enable when attribution parity is finalized
@@ -484,56 +532,89 @@
 
 <!-- FUNNEL ANALYSIS -->
 {% if meta_funnel_rows or google_funnel_rows %}
-<h2>Funnel Analysis</h2>
-<table class="funnel-layout">
-  <tr>
-    {% if meta_funnel_rows %}
-    <td class="funnel-card-cell">
-      <table class="funnel-card">
-        <tr class="funnel-card-title"><td colspan="4">Meta Funnel</td></tr>
-        <tr>
-          <th class="funnel-stage-head">Stage</th>
-          <th>Count</th>
-          <th>Rate</th>
-          <th>Drop-off</th>
-        </tr>
-        {% for row in meta_funnel_rows %}
-        <tr>
-          <td class="funnel-stage">{{ row.stage }}</td>
-          <td>{% if row.has_count %}{{ row.count | int | fmt_num }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-          <td>{% if row.has_rate %}{% if row.rate_prefix %}{{ row.rate_prefix }} {% endif %}{{ row.rate | fmt_pct }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-          <td>{% if row.has_drop_off %}<span class="warn">{{ row.drop_off | fmt_pct }}</span>{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-        </tr>
-        {% endfor %}
-      </table>
-    </td>
-    {% endif %}
-    {% if google_funnel_rows %}
-    <td class="funnel-card-cell">
-      <table class="funnel-card">
-        <tr class="funnel-card-title"><td colspan="4">Google Ads</td></tr>
-        <tr>
-          <th class="funnel-stage-head">Stage</th>
-          <th>Count</th>
-          <th>Rate</th>
-          <th>Drop-off</th>
-        </tr>
-        {% for row in google_funnel_rows %}
-        <tr>
-          <td class="funnel-stage">{{ row.stage }}</td>
-          <td>{% if row.has_count %}{{ row.count | int | fmt_num }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-          <td>{% if row.has_rate %}{% if row.rate_prefix %}{{ row.rate_prefix }} {% endif %}{{ row.rate | fmt_pct }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-          <td>{% if row.has_drop_off %}<span class="warn">{{ row.drop_off | fmt_pct }}</span>{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
-        </tr>
-        {% endfor %}
-        <tr><td colspan="4" class="funnel-note">On-site LP / cart stages are Meta-only; Google shows delivery funnel.</td></tr>
-      </table>
-    </td>
-    {% endif %}
+<table class="report-section">
+  <tr><td class="report-section-heading">Funnel Analysis</td></tr>
+  <tr><td class="report-section-content">
+{% if meta_funnel_rows and google_funnel_rows %}
+<table class="funnel-unified">
+  <colgroup>
+    <col style="width:11%;">
+    <col style="width:14%;">
+    <col style="width:12%;">
+    <col style="width:13%;">
+    <col style="width:11%;">
+    <col style="width:14%;">
+    <col style="width:12%;">
+    <col style="width:13%;">
+  </colgroup>
+  <tr class="funnel-title-row">
+    <td colspan="4" class="funnel-subtitle" align="center">Meta Funnel</td>
+    <td colspan="4" class="funnel-subtitle funnel-divider" align="center">Google Ads</td>
   </tr>
+  <tr>
+    <th class="funnel-stage-head">Stage</th>
+    <th class="funnel-metric">Count</th>
+    <th class="funnel-metric">Rate</th>
+    <th class="funnel-metric">Drop-off</th>
+    <th class="funnel-stage-head funnel-divider">Stage</th>
+    <th class="funnel-metric">Count</th>
+    <th class="funnel-metric">Rate</th>
+    <th class="funnel-metric">Drop-off</th>
+  </tr>
+  {% for row in meta_funnel_rows %}
+  {% set grow = google_funnel_rows[loop.index0] %}
+  <tr>
+    <td class="funnel-stage">{{ row.stage }}</td>
+    <td class="funnel-metric">{% if row.has_count %}{{ row.count | int | fmt_num }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td class="funnel-metric">{% if row.has_rate %}{% if row.rate_prefix %}{{ row.rate_prefix }} {% endif %}{{ row.rate | fmt_pct }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td class="funnel-metric">{% if row.has_drop_off %}<span class="warn">{{ row.drop_off | fmt_pct }}</span>{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td class="funnel-stage funnel-divider">{{ grow.stage }}</td>
+    <td class="funnel-metric">{% if grow.has_count %}{{ grow.count | int | fmt_num }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td class="funnel-metric">{% if grow.has_rate %}{% if grow.rate_prefix %}{{ grow.rate_prefix }} {% endif %}{{ grow.rate | fmt_pct }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td class="funnel-metric">{% if grow.has_drop_off %}<span class="warn">{{ grow.drop_off | fmt_pct }}</span>{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<table class="funnel-unified funnel-single">
+  <colgroup>
+    <col style="width:26%;">
+    <col style="width:24%;">
+    <col style="width:24%;">
+    <col style="width:26%;">
+  </colgroup>
+  {% set rows = meta_funnel_rows if meta_funnel_rows else google_funnel_rows %}
+  {% set title = 'Meta Funnel' if meta_funnel_rows else 'Google Ads' %}
+  <tr class="funnel-title-row">
+    <td colspan="4" class="funnel-subtitle" align="center">{{ title }}</td>
+  </tr>
+  <tr>
+    <th class="funnel-stage-head">Stage</th>
+    <th>Count</th>
+    <th>Rate</th>
+    <th>Drop-off</th>
+  </tr>
+  {% for row in rows %}
+  <tr>
+    <td class="funnel-stage">{{ row.stage }}</td>
+    <td>{% if row.has_count %}{{ row.count | int | fmt_num }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td>{% if row.has_rate %}{% if row.rate_prefix %}{{ row.rate_prefix }} {% endif %}{{ row.rate | fmt_pct }}{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+    <td>{% if row.has_drop_off %}<span class="warn">{{ row.drop_off | fmt_pct }}</span>{% else %}<span class="funnel-empty">—</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+  </td></tr>
+  {% if meta_funnel_rows and google_funnel_rows %}
+  <tr class="report-section-footnote"><td>On-site LP / cart stages are Meta-only; Google shows delivery funnel.</td></tr>
+  {% elif google_funnel_rows and not meta_funnel_rows %}
+  <tr class="report-section-footnote"><td>On-site LP / cart stages are Meta-only; Google shows delivery funnel.</td></tr>
+  {% endif %}
 </table>
 {% elif funnel or google_funnel %}
-<h2>Funnel Analysis</h2>
+<table class="report-section">
+  <tr><td class="report-section-heading">Funnel Analysis</td></tr>
+  <tr><td class="report-section-content">
 <table class="funnel-unified">
   {% if funnel and google_funnel %}
   <colgroup>
@@ -547,15 +628,15 @@
     <col style="width:13%;">
   </colgroup>
   <tr class="funnel-title-row">
-    <td colspan="4" class="funnel-subtitle">Meta Funnel</td>
-    <td colspan="4" class="funnel-subtitle funnel-split">Google Ads</td>
+    <td colspan="4" class="funnel-subtitle" align="center">Meta Funnel</td>
+    <td colspan="4" class="funnel-subtitle funnel-divider" align="center">Google Ads</td>
   </tr>
   <tr>
     <th class="funnel-stage-head">Stage</th>
-    <th>Count</th>
-    <th>Rate</th>
-    <th>Drop-off</th>
-    <th class="funnel-stage-head funnel-split">Stage</th>
+    <th class="funnel-metric">Count</th>
+    <th class="funnel-metric">Rate</th>
+    <th class="funnel-metric">Drop-off</th>
+    <th class="funnel-stage-head funnel-divider">Stage</th>
     <th>Count</th>
     <th>Rate</th>
     <th>Drop-off</th>
@@ -565,7 +646,7 @@
     <td>{{ funnel.impressions | int | fmt_num }}</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
-    <td class="funnel-stage funnel-split">Impressions</td>
+    <td class="funnel-stage funnel-divider">Impressions</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
@@ -575,7 +656,7 @@
     <td>{{ funnel.clicks | int | fmt_num }}</td>
     <td>CTR {{ funnel.ctr | fmt_pct }}</td>
     <td class="warn">{{ funnel.drop_off_impressions_to_clicks | fmt_pct }}</td>
-    <td class="funnel-stage funnel-split">Clicks</td>
+    <td class="funnel-stage funnel-divider">Clicks</td>
     <td>{{ google_funnel.clicks | int | fmt_num }}</td>
     <td>CTR {{ google_funnel.ctr | fmt_pct }}</td>
     <td class="funnel-empty">-</td>
@@ -585,7 +666,7 @@
     <td>{{ funnel.landing_page_views | int | fmt_num }}</td>
     <td>{{ funnel.landing_page_rate | fmt_pct }}</td>
     <td class="warn">{{ funnel.drop_off_clicks_to_landing | fmt_pct }}</td>
-    <td class="funnel-stage funnel-split">LP Views</td>
+    <td class="funnel-stage funnel-divider">LP Views</td>
     <td class="funnel-empty">-</td>
     <td>Int {{ google_funnel.interaction_rate | fmt_pct }}</td>
     <td class="funnel-empty">-</td>
@@ -595,7 +676,7 @@
     <td>{{ funnel.add_to_cart | int | fmt_num }}</td>
     <td>{{ funnel.add_to_cart_rate | fmt_pct }}</td>
     <td class="warn">{{ funnel.drop_off_landing_to_cart | fmt_pct }}</td>
-    <td class="funnel-stage funnel-split">Add to Cart</td>
+    <td class="funnel-stage funnel-divider">Add to Cart</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
@@ -605,7 +686,7 @@
     <td>{{ funnel.initiate_checkout | int | fmt_num }}</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
-    <td class="funnel-stage funnel-split">Checkout</td>
+    <td class="funnel-stage funnel-divider">Checkout</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
     <td class="funnel-empty">-</td>
@@ -615,7 +696,7 @@
     <td>{{ funnel.orders | int | fmt_num }}</td>
     <td>CVR {{ funnel.conversion_rate | fmt_pct }}</td>
     <td class="warn">{{ funnel.drop_off_cart_to_orders | fmt_pct }}</td>
-    <td class="funnel-stage funnel-split">Orders</td>
+    <td class="funnel-stage funnel-divider">Orders</td>
     <td>{{ google_funnel.orders | int | fmt_num }}</td>
     <td>{% if google_funnel.clicks %}CVR {{ (google_funnel.orders / google_funnel.clicks * 100) | fmt_pct }}{% else %}-{% endif %}</td>
     <td class="funnel-empty">-</td>
@@ -628,7 +709,7 @@
     <col style="width:22%;">
   </colgroup>
   <tr class="funnel-title-row">
-    <td colspan="4" class="funnel-subtitle">Meta Funnel</td>
+    <td colspan="4" class="funnel-subtitle" align="center">Meta Funnel</td>
   </tr>
   <tr>
     <th class="funnel-stage-head">Stage</th>
@@ -680,7 +761,7 @@
     <col style="width:22%;">
   </colgroup>
   <tr class="funnel-title-row">
-    <td colspan="4" class="funnel-subtitle">Google Ads</td>
+    <td colspan="4" class="funnel-subtitle" align="center">Google Ads</td>
   </tr>
   <tr>
     <th class="funnel-stage-head">Stage</th>
@@ -726,37 +807,38 @@
   </tr>
   {% endif %}
 </table>
+  </td></tr>
+</table>
 {% endif %}
 
 <!-- CAMPAIGN BREAKDOWN -->
-{% if campaign_segments or campaigns %}
-<div class="page-break"></div>
-{% endif %}
 {% if campaign_segments %}
-<h2>Campaigns by Net ROAS Segments</h2>
+<table class="report-section campaign-section">
+  <tr><td class="report-section-heading">Campaigns by Net ROAS Segments</td></tr>
+  <tr><td class="report-section-content">
 <table class="campaign-table">
   <colgroup>
-    <col style="width:28%;">
+    <col style="width:26%;">
     <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
-    <col style="width:9%;">
+    <col style="width:10%;">
+    <col style="width:11%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
+    <col style="width:8%;">
   </colgroup>
   <thead>
     <tr>
-      <th>Campaign Name</th>
-      <th class="campaign-metric">Spend</th>
-      <th class="campaign-metric">Revenue</th>
-      <th class="campaign-metric">Net Profit</th>
-      <th class="campaign-metric">CTR</th>
-      <th class="campaign-metric">Bounce</th>
-      <th class="campaign-metric">CR</th>
-      <th class="campaign-metric">GR</th>
-      <th class="campaign-metric">NR</th>
+      <th align="left">Campaign Name</th>
+      <th class="campaign-metric" align="right">Spend</th>
+      <th class="campaign-metric-wide" align="right">Revenue</th>
+      <th class="campaign-profit" align="right">Net Profit</th>
+      <th class="campaign-metric" align="right">CTR</th>
+      <th class="campaign-metric" align="right">Bounce</th>
+      <th class="campaign-metric" align="right">CR</th>
+      <th class="campaign-metric" align="right">GR</th>
+      <th class="campaign-metric" align="right">NR</th>
     </tr>
   </thead>
   <tbody>
@@ -767,28 +849,28 @@
     {% for row in segment.rows %}
     <tr>
       <td class="campaign-name">{{ row.campaign_name }}</td>
-      <td class="campaign-metric">{{ row.spend | fmt_inr_detail }}</td>
-      <td class="campaign-metric">{{ row.shopify_revenue | fmt_inr_detail }}</td>
-      <td class="campaign-metric {{ 'positive' if row.net_profit >= 0 else 'negative' }}">{{ row.net_profit | fmt_inr_detail }}</td>
-      <td class="campaign-metric">{{ row.ctr | fmt_pct2 }}</td>
-      <td class="campaign-metric" style="background:{{ row.bounce_bg }};">{{ row.bounce_rate | fmt_pct2 }}</td>
-      <td class="campaign-metric">{{ row.conversion_rate | fmt_pct2 }}</td>
-      <td class="campaign-metric">{{ row.gross_roas | fmt_metric }}</td>
-      <td class="campaign-metric {{ 'nr-low' if row.nr_low else '' }}">{{ row.net_roas | fmt_metric }}</td>
+      <td class="campaign-metric num-cell" align="right">{{ row.spend | fmt_inr_detail }}</td>
+      <td class="campaign-metric-wide num-cell" align="right">{{ row.shopify_revenue | fmt_inr_detail }}</td>
+      <td class="campaign-profit num-cell {{ 'positive' if row.net_profit >= 0 else 'negative' }}" align="right">{{ row.net_profit | fmt_inr_detail }}</td>
+      <td class="campaign-metric" align="right">{{ row.ctr | fmt_pct2 }}</td>
+      <td class="campaign-metric" align="right" style="background:{{ row.bounce_bg }};">{{ row.bounce_rate | fmt_pct2 }}</td>
+      <td class="campaign-metric" align="right">{{ row.conversion_rate | fmt_pct2 }}</td>
+      <td class="campaign-metric" align="right">{{ row.gross_roas | fmt_metric }}</td>
+      <td class="campaign-metric {{ 'nr-low' if row.nr_low else '' }}" align="right">{{ row.net_roas | fmt_metric }}</td>
     </tr>
     {% endfor %}
     {% if segment.total %}
     <tr class="section-total">
       <td>Section Total</td>
-      <td class="campaign-metric campaign-total-cell">
+      <td class="campaign-metric num-cell campaign-total-cell">
         {{ segment.total.spend | fmt_inr_detail }}<br/>
         <span class="pct">[{{ segment.total.spend_pct | fmt_metric }}%]</span>
       </td>
-      <td class="campaign-metric campaign-total-cell">
+      <td class="campaign-metric-wide num-cell campaign-total-cell">
         {{ segment.total.shopify_revenue | fmt_inr_detail }}<br/>
         <span class="pct">[{{ segment.total.revenue_pct | fmt_metric }}%]</span>
       </td>
-      <td class="campaign-metric {{ 'positive' if segment.total.net_profit >= 0 else 'negative' }}">{{ segment.total.net_profit | fmt_inr_detail }}</td>
+      <td class="campaign-profit num-cell {{ 'positive' if segment.total.net_profit >= 0 else 'negative' }}" align="right">{{ segment.total.net_profit | fmt_inr_detail }}</td>
       <td class="campaign-metric">{{ segment.total.ctr | fmt_pct2 }}</td>
       <td class="campaign-metric">{{ segment.total.bounce_rate | fmt_pct2 }}</td>
       <td class="campaign-metric">{{ segment.total.conversion_rate | fmt_pct2 }}</td>
@@ -800,9 +882,9 @@
     {% if campaign_total %}
     <tr class="overall-total">
       <td>Overall Total</td>
-      <td class="campaign-metric">{{ campaign_total.spend | fmt_inr_detail }}</td>
-      <td class="campaign-metric">{{ campaign_total.shopify_revenue | fmt_inr_detail }}</td>
-      <td class="campaign-metric {{ 'positive' if campaign_total.net_profit >= 0 else 'negative' }}">{{ campaign_total.net_profit | fmt_inr_detail }}</td>
+      <td class="campaign-metric num-cell">{{ campaign_total.spend | fmt_inr_detail }}</td>
+      <td class="campaign-metric-wide num-cell">{{ campaign_total.shopify_revenue | fmt_inr_detail }}</td>
+      <td class="campaign-profit num-cell {{ 'positive' if campaign_total.net_profit >= 0 else 'negative' }}" align="right">{{ campaign_total.net_profit | fmt_inr_detail }}</td>
       <td class="campaign-metric">{{ campaign_total.ctr | fmt_pct2 }}</td>
       <td class="campaign-metric">{{ campaign_total.bounce_rate | fmt_pct2 }}</td>
       <td class="campaign-metric">{{ campaign_total.conversion_rate | fmt_pct2 }}</td>
@@ -812,9 +894,13 @@
     {% endif %}
   </tbody>
 </table>
-<p class="campaign-note">Note: Campaign totals are computed from the displayed dailyrollup campaign data.</p>
+  </td></tr>
+  <tr class="report-section-footnote"><td>Note: Campaign totals are computed from the displayed dailyrollup campaign data.</td></tr>
+</table>
 {% elif campaigns %}
-<h2>Meta Campaign Performance</h2>
+<table class="report-section campaign-section">
+  <tr><td class="report-section-heading">Meta Campaign Performance</td></tr>
+  <tr><td class="report-section-content">
 <table>
   <thead>
     <tr>
@@ -868,9 +954,9 @@
     {% endif %}
   </tbody>
 </table>
+  </td></tr>
+</table>
 {% endif %}
-
-<!-- FOOTER NOTE -->
 <hr class="divider">
 <div style="font-size:7.5pt;color:#94a3b8;text-align:center;">
   Seleric Marketing Intelligence &nbsp;·&nbsp; {{ date_range }} &nbsp;·&nbsp; Full data in attached Excel sheets

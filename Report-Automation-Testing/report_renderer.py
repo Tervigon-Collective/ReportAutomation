@@ -67,7 +67,7 @@ def _get_env() -> jinja2.Environment:
             s = f"Rs.{_indian_group(v)}"
         if neg:
             suffix = s[3:] if s.startswith("Rs.") else s
-            return f"Rs. −{suffix}"
+            return f"Rs.-{suffix}"
         return s
 
     def fmt_roas(val) -> str:
@@ -92,13 +92,17 @@ def _get_env() -> jinja2.Environment:
         return f"{v:.2f}%"
 
     def fmt_inr_detail(val) -> str:
+        """Compact INR with decimals; no space after Rs. to avoid PDF line-wrap."""
         try:
             v = float(val)
         except Exception:
-            return "Rs 0.00"
+            return "Rs.0.00"
         neg = v < 0
         v = abs(v)
-        return f"-Rs {v:,.2f}" if neg else f"Rs {v:,.2f}"
+        s = f"Rs.{v:,.2f}"
+        if neg:
+            return f"Rs.-{v:,.2f}"
+        return s
 
     def fmt_metric(val) -> str:
         try:
@@ -367,7 +371,7 @@ def build_meta_funnel_rows(funnel: dict | None) -> list[dict]:
 
 
 def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
-    """Google Ads: delivery funnel only (no on-site LP/ATC/checkout stages)."""
+    """Google Ads delivery funnel; LP/ATC/checkout rows align with Meta card layout."""
     g = _normalize_google_funnel(funnel) or {}
     return [
         _funnel_row("Impressions", g.get("impressions")),
@@ -378,6 +382,13 @@ def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
             rate_prefix="CTR",
             drop_off=g.get("drop_off_impressions_to_clicks"),
         ),
+        _funnel_row(
+            "LP Views",
+            rate=g.get("interaction_rate"),
+            rate_prefix="Int",
+        ),
+        _funnel_row("Add to Cart"),
+        _funnel_row("Checkout"),
         _funnel_row(
             "Orders",
             g.get("orders"),
@@ -501,41 +512,54 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
     return segments, grand
 
 
-def build_returns_row(total: dict, channels: list[dict], returns_cancels_count: int = 0) -> dict:
-    """
-    Reconciling "Returned / Cancelled" row: the gap between the all-up dashboard ``total``
-    (event-date returns/cancels, marketplace adjustments) and the sum of the attributed
-    ``channels`` shown in a Channel Performance table. Adding this row to those channel
-    rows reconciles them to Total exactly so the net profit lines up.
-
-    ``channels`` is a list of channel metric dicts (the rows displayed in that table).
-    """
-    def _num(d, key):
-        try:
-            return float(d.get(key) or 0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    ch_sales = sum(_num(c, "sales") for c in channels)
-    ch_ad_spend = sum(_num(c, "ad_spend") for c in channels)
-    ch_cogs = sum(_num(c, "cogs") for c in channels)
-    ch_net_profit = sum(_num(c, "net_profit") for c in channels)
-    ch_orders = sum(int(c.get("order_count") or 0) for c in channels)
-
-    row = {
-        "sales": round(_num(total, "sales") - ch_sales, 2),
-        "ad_spend": round(_num(total, "ad_spend") - ch_ad_spend, 2),
-        "cogs": round(_num(total, "cogs") - ch_cogs, 2),
-        "net_profit": round(_num(total, "net_profit") - ch_net_profit, 2),
-        "order_count": int(total.get("order_count") or 0) - ch_orders,
+def build_returns_cancels_summary(total: dict) -> dict:
+    """Dashboard-aligned returns/cancels counts and amounts for the PDF summary."""
+    count = int(total.get("returns_cancels") or 0)
+    cancelled_orders = int(total.get("cancelled_orders") or 0)
+    returned_orders = int(total.get("returned_orders") or 0)
+    cancelled_amount = round(float(total.get("cancelled_amount") or 0), 2)
+    returned_amount = round(float(total.get("returned_amount") or 0), 2)
+    total_amount = round(float(total.get("returns_cancels_amount") or 0), 2)
+    if total_amount <= 0 and (cancelled_amount > 0 or returned_amount > 0):
+        total_amount = round(cancelled_amount + returned_amount, 2)
+    return {
+        "show": count > 0 or cancelled_orders > 0 or returned_orders > 0,
+        "total_count": count or (cancelled_orders + returned_orders),
+        "cancelled_orders": cancelled_orders,
+        "returned_orders": returned_orders,
+        "cancelled_amount": cancelled_amount,
+        "returned_amount": returned_amount,
+        "total_amount": total_amount or round(cancelled_amount + returned_amount, 2),
+        "gross_sales": round(float(total.get("gross_sales") or 0), 2),
     }
-    # Only show the row when the source explicitly reports returns/cancels and the
-    # reconciliation gap is material. This avoids inventing a synthetic row from
-    # ordinary attribution-vs-total drift when returns/cancels are actually zero.
-    row["show"] = (
-        int(returns_cancels_count or 0) > 0
-        and any(abs(row[k]) >= 1 for k in ("sales", "cogs", "net_profit"))
-    )
+
+
+def build_returns_row(total: dict, channels: list[dict] | None = None, returns_cancels_count: int = 0) -> dict:
+    """
+    Channel Performance "Returned / Cancelled" row — mirrors the General Statistics
+    dashboard returns/cancels counts and ex-GST amounts (event-date axis).
+
+    ``channels`` is accepted for backward compatibility but no longer used; the Total
+    row remains the dashboard headline and is not derived from summing channel rows.
+    """
+    _ = channels  # unused; kept for call-site compatibility
+    summary = build_returns_cancels_summary(total)
+    amount = summary["total_amount"]
+    row = {
+        "sales": amount,
+        "ad_spend": 0.0,
+        "cogs": 0.0,
+        "net_profit": amount,
+        "order_count": summary["total_count"],
+        "cancelled_orders": summary["cancelled_orders"],
+        "returned_orders": summary["returned_orders"],
+        "cancelled_amount": summary["cancelled_amount"],
+        "returned_amount": summary["returned_amount"],
+        "total_amount": amount,
+        "show": summary["show"],
+    }
+    if not row["show"] and int(returns_cancels_count or 0) > 0:
+        row["show"] = True
     return row
 
 
@@ -608,7 +632,6 @@ def build_daily_pdf_context(
         [c for _, c in channels],
         returns_cancels_count=int(total.get("returns_cancels") or 0),
     )
-
     return {
         "report_title": "Daily Marketing Performance Report",
         "date_range": report_date,

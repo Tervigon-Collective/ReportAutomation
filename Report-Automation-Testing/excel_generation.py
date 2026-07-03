@@ -1947,7 +1947,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
 
 def main():
     try:
-        # Single report day (default: yesterday). Locks globals so plots/rollup cannot
+        # Single report day (default: today in IST). Locks globals so plots/rollup cannot
         # inherit a wider MTD window left by another script in the same process.
         timeframe = get_daily_report_timeframe()
         set_global_dates(timeframe['start_date'], timeframe['end_date'])
@@ -2055,16 +2055,16 @@ def main():
                 sys.path.insert(0, _wr_src)
             from email_assets import build_weather_email_bundle
 
-            today_str = datetime.now(IST).strftime('%Y-%m-%d')
-            logger.info("Fetching live weather campaign data for %s (DB + Open-Meteo)...", today_str)
+            weather_day_str = report_day
+            logger.info("Fetching live weather campaign data for %s (DB + Open-Meteo)...", weather_day_str)
             weather_bundle = build_weather_email_bundle(
-                today_str, get_temp_dir(), top=15,
+                weather_day_str, get_temp_dir(), top=15,
             )
             if weather_bundle:
                 attachments.append(weather_bundle["csv_path"])
                 attachments.append(weather_bundle["combined_plot"])
                 if _daily_email_context is not None:
-                    _daily_email_context["weather_report_date"] = weather_bundle.get("report_date", today_str)
+                    _daily_email_context["weather_report_date"] = weather_bundle.get("report_date", weather_day_str)
                     _daily_email_context["weather_report_time"] = weather_bundle.get("report_time", "")
                     _daily_email_context["weather_fetched_at"] = weather_bundle.get("weather_fetched_at", "")
                 logger.info("Added weather report to email: %s", weather_bundle["csv_path"])

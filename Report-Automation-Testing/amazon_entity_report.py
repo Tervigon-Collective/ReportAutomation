@@ -949,12 +949,14 @@ def add_amazon_sheets_for_timeframe(
     start_date: datetime,
     end_date: datetime,
     round_for_output_fn: Optional[Callable] = None,
-    days_lag: int = 1,
+    days_lag: int = 0,
     brand_id: Optional[int] = None,
 ) -> None:
     """
     Add separate Amazon Ads and SP sheets for a WTD/MTD timeframe.
-    Gold tables lag ~1 day, so end_date is shifted back by days_lag.
+
+    Uses the same ``start_date`` / ``end_date`` as Meta/Google/Organic sheets.
+    ``days_lag`` optionally shifts the end date back (default 0).
 
     brand_id (optional): if set, filters all Amazon SP fetches to this brand.
     Defaults to CLICKHOUSE_BRAND_ID from the environment when unset.

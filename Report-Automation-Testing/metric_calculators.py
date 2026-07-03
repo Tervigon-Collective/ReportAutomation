@@ -159,6 +159,16 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
         ),
         be_roas=compute_be_roas(_f(data.get("total_cogs")), _f(data.get("total_ad_spend"))),
     )
+    rc = data.get("returns_cancels") or {}
+    totals.update({
+        "gross_sales": round(_f(data.get("gross_sales")), 2),
+        "returns_cancels": int(rc.get("total_count", 0) or 0),
+        "cancelled_orders": int(rc.get("cancelled_count", 0) or 0),
+        "returned_orders": int(rc.get("returned_count", 0) or 0),
+        "cancelled_amount": round(_f(rc.get("cancelled_amount")), 2),
+        "returned_amount": round(_f(rc.get("returned_amount")), 2),
+        "returns_cancels_amount": round(_f(rc.get("total_amount")), 2),
+    })
 
     return {
         "meta": channels["meta"],

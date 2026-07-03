@@ -192,6 +192,8 @@ WITH
         coalesce(ca.cancelled_orders, 0) AS cancelled_orders,
         coalesce(re.returned_orders, 0) AS returned_orders,
         coalesce(ca.cancelled_orders, 0) + coalesce(re.returned_orders, 0) AS returns_cancels,
+        coalesce(ca.cancelled_revenue_excl, 0) AS cancelled_revenue_excl,
+        coalesce(re.returned_revenue_excl, 0) AS returned_revenue_excl,
         (coalesce(por.gross_sales, 0) - coalesce(re.returned_revenue_excl, 0) - coalesce(ca.cancelled_revenue_excl, 0) - coalesce(por.discounts, 0)) + coalesce(amzd.amazon_net_revenue, 0) AS net_sales,
         coalesce(por.total_orders, 0) + coalesce(amzd.amazon_orders, 0) AS total_orders,
         coalesce(pl.product_cost, 0) + coalesce(pl.shipping_cost, 0) + coalesce(pl.packaging_cost, 0) + coalesce(pl.payment_gateway_fees, 0) + coalesce(cc.cancel_gateway_fees, 0) + coalesce(rc.return_rto_cost, 0) + coalesce(rc.return_shipping_cost, 0) + coalesce(rc.return_packaging_cost, 0) + coalesce(rc.return_gateway_fees, 0) + coalesce(amzd.amazon_net_cogs, 0) AS total_cogs,
@@ -218,6 +220,7 @@ WITH
     SELECT
       toString(report_date) AS report_date,
       total_sales, gross_sales, discounts, cancelled_orders, returned_orders, returns_cancels,
+      cancelled_revenue_excl, returned_revenue_excl,
       net_sales, total_cogs, meta_spend, google_spend, amazon_spend, total_ad_spend,
       total_orders, amazon_orders, amazon_gross_revenue, amazon_net_revenue, amazon_net_cogs,
       round(net_sales - total_cogs - total_ad_spend, 2) AS net_profit

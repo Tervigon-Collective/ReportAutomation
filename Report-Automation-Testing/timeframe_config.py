@@ -213,9 +213,11 @@ def get_current_timestamp():
 
 def get_daily_report_timeframe(lag_days: int | None = None):
     """
-    Single calendar day for the daily marketing email (default: yesterday in IST).
+    Single calendar day for the daily marketing email (default: today in IST).
 
-    Honors ROLLUP_START_DATE / ROLLUP_END_DATE when both are set (test/backfill).
+    Set DAILY_REPORT_LAG_DAYS=1 (or higher) when the scheduled job should report
+    on a completed prior day. Honors ROLLUP_START_DATE / ROLLUP_END_DATE when
+    both are set (test/backfill).
     """
     env_start = os.environ.get('ROLLUP_START_DATE')
     env_end = os.environ.get('ROLLUP_END_DATE')
@@ -224,9 +226,9 @@ def get_daily_report_timeframe(lag_days: int | None = None):
 
     if lag_days is None:
         try:
-            lag_days = int(os.environ.get('DAILY_REPORT_LAG_DAYS', '1'))
+            lag_days = int(os.environ.get('DAILY_REPORT_LAG_DAYS', '0'))
         except ValueError:
-            lag_days = 1
+            lag_days = 0
     lag_days = max(0, lag_days)
 
     report_day = (datetime.now(IST) - timedelta(days=lag_days)).strftime('%Y-%m-%d')

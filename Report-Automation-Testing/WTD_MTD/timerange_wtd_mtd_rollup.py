@@ -51,6 +51,23 @@ logger = logging.getLogger(__name__)
 # Set timezone to IST
 IST = pytz.timezone('Asia/Kolkata')
 
+
+def _report_now() -> datetime:
+    """
+    Effective report date for WTD/MTD/daily windows.
+    Set REPORT_AS_OF_DATE=YYYY-MM-DD in the shell to backfill / freeze the run date.
+    """
+    raw = os.environ.get('REPORT_AS_OF_DATE', '').strip()
+    if raw:
+        try:
+            d = datetime.strptime(raw, '%Y-%m-%d')
+            now = IST.localize(d.replace(hour=12, minute=0, second=0, microsecond=0))
+            logger.info("Using REPORT_AS_OF_DATE=%s for WTD/MTD windows", raw)
+            return now
+        except ValueError:
+            logger.warning("Invalid REPORT_AS_OF_DATE '%s'; using real now.", raw)
+    return datetime.now(IST)
+
 # Load environment variables
 load_dotenv()
 
@@ -74,11 +91,11 @@ def get_wtd_mtd_timeframes():
     Calculate Week-to-Date (WTD) and Month-to-Date (MTD) timeframes.
     Returns dict with 'wtd' and 'mtd' keys, each containing start_date and end_date.
 
-    WTD: Monday of the current week to today (calendar week, consistent with Amazon).
+    WTD: Monday of the current week to today.
     MTD: 1st of the current month to today.
-    Daily: Previous day only.
+    Daily: Previous day only (yesterday).
     """
-    now = datetime.now(IST)
+    now = _report_now()
 
     # Week-to-Date: Monday of the current week to today
     wtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
@@ -113,40 +130,11 @@ def get_wtd_mtd_timeframes():
 
 def get_amazon_calendar_timeframes():
     """
-    Calendar-based WTD/MTD for Amazon (per business requirement).
-
-    - WTD: start of current week (Monday) -> today (end of day); callers apply
-      `days_lag=1` (or subtract 1 day) so the effective window ends yesterday.
-    - MTD: 1st of current month -> yesterday (end of day)
-
-    Amazon gold tables lag ~1 day, so MTD must not include today.
-
-    To switch the week to start on Sunday, change `now.weekday()` below to
-    `(now.weekday() + 1) % 7`.
+    Deprecated: Amazon entity sheets now use the same windows as
+    ``get_wtd_mtd_timeframes()`` (WTD/MTD/daily). Kept for callers that
+    still import this helper.
     """
-    now = datetime.now(IST)
-    today_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    yesterday_end = (now - timedelta(days=1)).replace(
-        hour=23, minute=59, second=59, microsecond=0
-    )
-    # Monday-start week: weekday() == 0 on Monday, 6 on Sunday.
-    wtd_start = (
-        (today_end - timedelta(days=now.weekday()))
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-    mtd_start = today_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return {
-        'wtd': {
-            'start_date': wtd_start,
-            'end_date': today_end,
-            'label': 'Week-to-Date (calendar, Mon-today)',
-        },
-        'mtd': {
-            'start_date': mtd_start,
-            'end_date': yesterday_end,
-            'label': 'Month-to-Date (calendar, 1st-yesterday)',
-        },
-    }
+    return get_wtd_mtd_timeframes()
 
 
 def _create_unified_funnel_columns(df: pd.DataFrame, source_type: str) -> pd.DataFrame:
@@ -979,7 +967,7 @@ def run_amazon_report(out_dir: str = None) -> str:
         os.makedirs(out_dir, exist_ok=True)
         
         # Calculate date for 2 days earlier
-        now = datetime.now(IST)
+        now = _report_now()
         two_days_ago = (now - timedelta(days=2))
         date_str = two_days_ago.strftime('%Y-%m-%d')
         date_display = two_days_ago.strftime('%d-%m-%Y')
@@ -1400,34 +1388,21 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     if channel_key not in summary_data[timeframe_key]['channels']:
                         summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
             
-            # Amazon sheets from ClickHouse gold (separate from Meta/Google/Organic).
-            # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
-            # unlike Meta/Google which use the rolling 7/30-day window above.
-            print(f"\n[{label}] Processing Amazon data (ClickHouse, calendar window)...")
+            # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
+            print(f"\n[{label}] Processing Amazon data (ClickHouse)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
             try:
-                amazon_tf = get_amazon_calendar_timeframes().get(timeframe_key)
-                if amazon_tf is None:
-                    # Fall back to the standard window for any timeframe not
-                    # covered by the calendar helper (currently: 'daily').
-                    amz_start, amz_end = start_date, end_date
-                else:
-                    amz_start = amazon_tf['start_date']
-                    amz_end = amazon_tf['end_date']
                 print(
-                    f"[{label}] Amazon calendar range: "
-                    f"{amz_start.strftime('%Y-%m-%d')} to {amz_end.strftime('%Y-%m-%d')}"
+                    f"[{label}] Amazon range: "
+                    f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
                 )
-                # MTD calendar end is already yesterday; WTD/Daily use lag=1
-                # so the effective ads window also ends yesterday.
-                lag = 0 if timeframe_key == 'mtd' else 1
                 add_amazon_sheets_for_timeframe(
                     writer,
                     timeframe_key=timeframe_key,
-                    start_date=amz_start,
-                    end_date=amz_end,
+                    start_date=start_date,
+                    end_date=end_date,
                     round_for_output_fn=round_for_output,
-                    days_lag=lag,
+                    days_lag=0,
                 )
             except Exception as e:
                 print(f"[{label}] Failed to add ClickHouse Amazon sheets: {e}")
@@ -1664,7 +1639,7 @@ def run_product_profitability_report(for_date: str = None, out_dir: str = None) 
     if out_dir is None:
         out_dir = get_report_dir()
     os.makedirs(out_dir, exist_ok=True)
-    now = datetime.now(IST)
+    now = _report_now()
     ts = now.strftime('%Y%m%d_%H%M%S')
     yesterday_str = (now - timedelta(days=1)).strftime('%Y-%m-%d')
     xlsx_path = os.path.join(out_dir, f"Product_Profitability_{yesterday_str}_{ts}.xlsx")
@@ -2559,7 +2534,7 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
         access_token = result["access_token"]
         
         # Prepare email subject and body
-        now = datetime.now(IST)
+        now = _report_now()
         today_str = now.strftime('%Y-%m-%d')
         yesterday = (now - timedelta(days=1))
         yesterday_str = yesterday.strftime('%Y-%m-%d')
@@ -2578,34 +2553,48 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Could not extract daily efficiency metrics: {e}")
         
-        # Extract Amazon metrics for WTD and MTD date ranges.
-        # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
-        # then WTD end is shifted back 1 day to account for gold-table lag.
+        # Amazon WTD/MTD email metrics: same date windows as Meta/Google/Organic.
         amazon_wtd = None
         amazon_mtd = None
         try:
             wtd_timeframe = summary_data.get('wtd', {})
             mtd_timeframe = summary_data.get('mtd', {})
 
-            amazon_timeframes = get_amazon_calendar_timeframes()
+            def _tf_start(tf: dict) -> datetime:
+                return datetime.strptime(tf['start_date'], '%Y-%m-%d').replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
 
-            # Fetch Amazon data for WTD (calendar week start -> yesterday)
-            wtd_start = amazon_timeframes['wtd']['start_date']
-            wtd_end = amazon_timeframes['wtd']['end_date'] - timedelta(days=1)
-            amazon_wtd = get_amazon_summary_metrics(wtd_start, wtd_end)
-            if amazon_wtd.get('available', False):
-                logger.info(f"Extracted Amazon WTD metrics: Revenue=₹{amazon_wtd['revenue']:.2f}, Spend=₹{amazon_wtd['spend']:.2f}, Orders={amazon_wtd['orders']}, Range={amazon_wtd['date_range']}")
-            else:
-                logger.warning("No Amazon data available for WTD")
+            def _tf_end(tf: dict) -> datetime:
+                return datetime.strptime(tf['end_date'], '%Y-%m-%d').replace(
+                    hour=23, minute=59, second=59, microsecond=0
+                )
 
-            # Fetch Amazon data for MTD (1st of month -> yesterday)
-            mtd_start = amazon_timeframes['mtd']['start_date']
-            mtd_end = amazon_timeframes['mtd']['end_date']
-            amazon_mtd = get_amazon_summary_metrics(mtd_start, mtd_end)
-            if amazon_mtd.get('available', False):
-                logger.info(f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, Range={amazon_mtd['date_range']}")
-            else:
-                logger.warning("No Amazon data available for MTD")
+            if wtd_timeframe.get('start_date') and wtd_timeframe.get('end_date'):
+                amazon_wtd = get_amazon_summary_metrics(
+                    _tf_start(wtd_timeframe), _tf_end(wtd_timeframe)
+                )
+                if amazon_wtd.get('available', False):
+                    logger.info(
+                        f"Extracted Amazon WTD metrics: Revenue=₹{amazon_wtd['revenue']:.2f}, "
+                        f"Spend=₹{amazon_wtd['spend']:.2f}, Orders={amazon_wtd['orders']}, "
+                        f"Range={amazon_wtd['date_range']}"
+                    )
+                else:
+                    logger.warning("No Amazon data available for WTD")
+
+            if mtd_timeframe.get('start_date') and mtd_timeframe.get('end_date'):
+                amazon_mtd = get_amazon_summary_metrics(
+                    _tf_start(mtd_timeframe), _tf_end(mtd_timeframe)
+                )
+                if amazon_mtd.get('available', False):
+                    logger.info(
+                        f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, "
+                        f"Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, "
+                        f"Range={amazon_mtd['date_range']}"
+                    )
+                else:
+                    logger.warning("No Amazon data available for MTD")
         except Exception as e:
             logger.warning(f"Could not extract Amazon metrics: {e}")
         
@@ -2955,7 +2944,7 @@ def generate_wtd_mtd_pdf_reports(out_dir: str = None) -> dict:
 
     # Last 7 days channel chart for WTD/MTD email only (not daily — that is in the daily marketing email)
     try:
-        chart_end = (datetime.now(IST) - timedelta(days=1)).date()
+        chart_end = (_report_now() - timedelta(days=1)).date()
         channel_chart_path = os.path.join(
             out_dir,
             f"channel_performance_last_7_days_{chart_end}.png",
@@ -3156,7 +3145,7 @@ def main():
             logger.info("Starting daily report generation for previous day...")
             
             # Calculate yesterday's date
-            now = datetime.now(IST)
+            now = _report_now()
             yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
             
             # Generate daily report for yesterday using dailyrollup.py
@@ -3209,7 +3198,7 @@ def main():
         channel_plot_path = pdf_paths.get("channel_chart") if pdf_paths else None
         if not channel_plot_path:
             try:
-                report_end = (datetime.now(IST) - timedelta(days=1)).date()
+                report_end = (_report_now() - timedelta(days=1)).date()
                 channel_plot_path = os.path.join(
                     get_report_dir(),
                     f"channel_performance_last_7_days_{report_end}.png",

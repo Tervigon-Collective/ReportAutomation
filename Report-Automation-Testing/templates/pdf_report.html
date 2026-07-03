@@ -5,7 +5,7 @@
 <style>
   @page {
     size: A4;
-    margin: 6mm 5mm 8mm 5mm;
+    margin: 10mm 7mm 11mm 7mm;
     @bottom-right {
       content: "Page " counter(page) " of " counter(pages);
       font-size: 8pt;
@@ -33,11 +33,11 @@
     background: #1a1a2e;
     color: #fff;
     border-radius: 4px;
-    padding: 10px 12px;
-    margin-bottom: 10px;
+    padding: 13px 16px;
+    margin-bottom: 14px;
   }
   .header .brand { font-size: 8pt; color: #8892b0; text-transform: uppercase; letter-spacing: 1.5px; }
-  .header h1 { font-size: 16pt; font-weight: 700; margin: 4px 0 2px; color: #fff; }
+  .header h1 { font-size: 16pt; font-weight: 700; margin: 5px 0 3px; color: #fff; }
   .header .subtitle { font-size: 8pt; color: #8892b0; }
 
   /* KPI STRIP - table layout (xhtml2pdf does not support flexbox) */
@@ -46,11 +46,11 @@
     background: #0f3460;
     border-radius: 6px;
     border-collapse: collapse;
-    margin-bottom: 14px;
+    margin-bottom: 16px;
   }
   .kpi-cell {
     width: 20%;
-    padding: 10px 6px;
+    padding: 13px 8px;
     text-align: center;
     border-right: 1px solid #16213e;
     vertical-align: top;
@@ -82,7 +82,7 @@
   .report-section {
     width: 100%;
     border-collapse: collapse;
-    margin: 10px 0 6px;
+    margin: 0 0 16px;
     border: 1px solid #e2e8f0;
     page-break-inside: avoid;
   }
@@ -92,7 +92,7 @@
     color: #1a1a2e;
     text-transform: uppercase;
     letter-spacing: 0.6px;
-    padding: 6px 8px 5px;
+    padding: 8px 10px 7px;
     background: #fafbfc;
     border-bottom: 2px solid #e2e8f0;
   }
@@ -110,7 +110,7 @@
     color: #64748b;
     font-style: italic;
     text-align: center;
-    padding: 4px 8px 6px;
+    padding: 6px 10px 7px;
     border-top: 1px solid #f1f5f9;
     background: #fafbfc;
   }
@@ -122,7 +122,7 @@
     font-weight: 600;
     color: #64748b;
     text-align: right;
-    padding: 4px 5px;
+    padding: 6px 6px;
     background: #f8fafc;
     border-bottom: 1.5px solid #e2e8f0;
     vertical-align: middle;
@@ -132,7 +132,7 @@
     font-size: 8pt;
     color: #334155;
     text-align: right;
-    padding: 4px 5px;
+    padding: 5px 6px;
     border-bottom: 1px solid #f1f5f9;
     vertical-align: middle;
   }
@@ -197,7 +197,7 @@
   .funnel-unified th,
   .funnel-unified td {
     font-size: 7.5pt;
-    padding: 4px 5px;
+    padding: 5px 6px;
     vertical-align: middle;
     line-height: 1.2;
     overflow: hidden;
@@ -245,7 +245,7 @@
   .funnel-title-row td {
     background: #f8fafc !important;
     border-bottom: 1.5px solid #e2e8f0;
-    padding: 6px 5px;
+    padding: 7px 6px;
     vertical-align: middle;
     text-align: center;
   }
@@ -287,13 +287,13 @@
   }
   .campaign-table th {
     font-size: 6.8pt;
-    padding: 4px 3px;
+    padding: 5px 4px;
     white-space: nowrap;
     text-align: right;
   }
   .campaign-table td {
     font-size: 6.9pt;
-    padding: 4px 3px;
+    padding: 5px 4px;
     vertical-align: middle;
   }
   .campaign-table th:first-child,

@@ -1894,10 +1894,10 @@ def generate_plots_for_email(
     else:
         logger.info("No hourly AOV data provided for plotting")
 
-    # Generate AOV insights plot for display if daily data is available
-    if daily_insights_data:
-        logger.info("Generating AOV insights plot for display...")
-        plot_average_order_value(daily_insights_data)
+    # Temporarily disabled — AOV plot was not saved or attached to the email.
+    # if daily_insights_data:
+    #     logger.info("Generating AOV insights plot for display...")
+    #     plot_average_order_value(daily_insights_data)
 
     if not daily_insights_data and hourly_aov_data is None:
         logger.error(f"Failed to fetch data: Daily error: {daily_error}")

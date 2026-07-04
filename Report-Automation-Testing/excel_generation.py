@@ -392,9 +392,9 @@ def fetch_meta_data(today):
 
     logger.info(f"Using date range {start_date} to {end_date}")
 
-    # First, get active campaigns
-    active_campaigns = fetch_active_campaigns(today)
-    logger.info(f"Active campaigns found: {len(active_campaigns)}")
+    # Temporarily disabled — active-campaign fetch is unused (filtering never applied below).
+    # active_campaigns = fetch_active_campaigns(today)
+    # logger.info(f"Active campaigns found: {len(active_campaigns)}")
 
     params = {
         'access_token': ACCESS_TOKEN,
@@ -826,12 +826,12 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
         except Exception as _cae:
             logger.warning("Channel-from-attribution reconcile skipped: %s", _cae)
 
-    # Extract metrics for easier access
-    meta_metrics = api_metrics['meta']
-    google_metrics = api_metrics['google']
-    organic_metrics = api_metrics['organic']
-    total_metrics = api_metrics['total']
-    
+    # Temporarily disabled — assigned but never used; PDF context reads api_metrics directly.
+    # meta_metrics = api_metrics['meta']
+    # google_metrics = api_metrics['google']
+    # organic_metrics = api_metrics['organic']
+    # total_metrics = api_metrics['total']
+
     global _daily_email_context
     try:
         # Derive date range string
@@ -899,17 +899,18 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             logger.warning(f"Campaign data fetch failed: {_ce}")
             campaign_df = None
 
-        from channel_performance import reconcile_roas_with_pdf_metrics
-
-        reconcile_start = start_str or (
-            today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)[:10]
-        )
-        reconcile_end = end_str or reconcile_start
-        roas_reconciliation = reconcile_roas_with_pdf_metrics(
-            api_metrics, reconcile_start, reconcile_end
-        )
-        if roas_reconciliation and not roas_reconciliation.get("all_match"):
-            logger.warning("ROAS reconciliation mismatch for %s..%s", reconcile_start, reconcile_end)
+        # Temporarily disabled — PDF template section is commented out; only produced log warnings.
+        # from channel_performance import reconcile_roas_with_pdf_metrics
+        # reconcile_start = start_str or (
+        #     today.strftime("%Y-%m-%d") if hasattr(today, "strftime") else str(today)[:10]
+        # )
+        # reconcile_end = end_str or reconcile_start
+        # roas_reconciliation = reconcile_roas_with_pdf_metrics(
+        #     api_metrics, reconcile_start, reconcile_end
+        # )
+        # if roas_reconciliation and not roas_reconciliation.get("all_match"):
+        #     logger.warning("ROAS reconciliation mismatch for %s..%s", reconcile_start, reconcile_end)
+        roas_reconciliation = None
 
         # Render PDF via weasyprint + Jinja2
         from report_renderer import build_daily_pdf_context, render_pdf_html, html_to_pdf
@@ -1974,9 +1975,10 @@ def main():
         except Exception as e:
             logger.warning(f"Dailyrollup Excel generation failed: {e}")
 
-        # Fetch meta data and process it to get metrics (for campaign data)
-        data = fetch_meta_data(today)
-        metrics = process_data(data, today, timestamp_str)
+        # Temporarily disabled — fetch_meta_data/process_data output is unused by PDF/email path.
+        # data = fetch_meta_data(today)
+        # metrics = process_data(data, today, timestamp_str)
+        metrics = {"ad_level_report": None}
 
         # Generate the PDF report (ensure summary metrics respect timeframe range)
         pdf_file = generate_pdf_report(

@@ -29,6 +29,16 @@ def _indian_group(v: float) -> str:
     return ",".join(parts) + "," + tail
 
 
+def fmt_inr(val) -> str:
+    """Module-level INR formatter (Rs. + Indian grouping) for insight text."""
+    try:
+        v = float(val)
+    except Exception:
+        return "Rs.0"
+    neg = v < 0
+    return f"Rs.{'-' if neg else ''}{_indian_group(abs(v))}"
+
+
 def _get_env() -> jinja2.Environment:
     global _env
     if _env is not None:
@@ -69,6 +79,24 @@ def _get_env() -> jinja2.Environment:
             suffix = s[3:] if s.startswith("Rs.") else s
             return f"Rs.-{suffix}"
         return s
+
+    def fmt_inr_compact(val) -> str:
+        """Compact INR (Rs.20.4L / Rs.2.9L / Rs.4.2Cr / Rs.590) for dense tables."""
+        try:
+            v = float(val)
+        except Exception:
+            return "Rs.0"
+        neg = v < 0
+        v = abs(v)
+        if v >= 1_00_00_000:
+            s = f"Rs.{v/1_00_00_000:.2f}Cr"
+        elif v >= 1_00_000:
+            s = f"Rs.{v/1_00_000:.1f}L"
+        elif v >= 1_000:
+            s = f"Rs.{v/1_000:.1f}K"
+        else:
+            s = f"Rs.{v:.0f}"
+        return f"Rs.-{s[3:]}" if neg else s
 
     def fmt_roas(val) -> str:
         try:
@@ -125,6 +153,7 @@ def _get_env() -> jinja2.Environment:
         return s[: length - len(end)] + end
 
     _env.filters["fmt_inr"] = fmt_inr
+    _env.filters["fmt_inr_compact"] = fmt_inr_compact
     _env.filters["fmt_inr_detail"] = fmt_inr_detail
     _env.filters["fmt_roas"] = fmt_roas
     _env.filters["fmt_metric"] = fmt_metric
@@ -132,6 +161,7 @@ def _get_env() -> jinja2.Environment:
     _env.filters["fmt_pct2"] = fmt_pct2
     _env.filters["fmt_num"] = fmt_num
     _env.filters["truncate"] = truncate_filter
+    _env.filters["roas_grad"] = _roas_grad_class
 
     return _env
 
@@ -155,12 +185,20 @@ def render_pdf_html(context: dict) -> str:
 
 
 def _strip_page_css_for_xhtml2pdf(html: str) -> str:
-    """Remove @page rules that xhtml2pdf can't handle."""
+    """Adapt @page CSS for xhtml2pdf.
+
+    xhtml2pdf understands ``@page`` and its own ``@frame`` static frames (used here
+    for the repeating footer + page numbers), but chokes on the CSS Paged Media
+    margin-box at-rules that weasyprint uses (``@top-*`` / ``@bottom-*`` / ``@left-*``
+    / ``@right-*``). Strip only those margin boxes and leave ``@page``/``@frame`` intact.
+    """
     import re
-    # Remove @page blocks with nested rules (like @bottom-right)
-    # Match @page { ... } including nested braces
-    pattern = r'@page\s*\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-    return re.sub(pattern, '', html, flags=re.DOTALL)
+    return re.sub(
+        r'@(?:top|bottom|left|right)-\w+\s*\{[^{}]*\}',
+        '',
+        html,
+        flags=re.DOTALL,
+    )
 
 
 def _sanitize_for_xhtml2pdf(html: str) -> str:
@@ -495,6 +533,14 @@ def _decorate_campaign_row(row: dict) -> dict:
     net_roas = float(out.get("net_roas") or 0)
     out["bounce_bg"] = _bounce_bg(bounce)
     out["nr_low"] = net_roas < 1
+    out["roas_grad"] = _roas_grad_class(net_roas)
+    if net_roas >= 1.0:
+        out["roas_tone"] = "pos"
+    elif net_roas >= 0.8:
+        out["roas_tone"] = "warn"
+    else:
+        out["roas_tone"] = "neg"
+    out["orders"] = int(float(out.get("shopify_orders") or out.get("purchases") or 0))
     return out
 
 
@@ -511,9 +557,13 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
         return [], None
 
     segment_defs = [
-        ("Net ROAS > 1", lambda nr: nr > 1, False),
-        ("0.8 < Net ROAS <= 1", lambda nr: 0.8 < nr <= 1, False),
-        ("Net ROAS <= 0.8", lambda nr: nr <= 0.8, True),
+        # (internal label, tier, display label, sub, predicate, sort_ascending)
+        ("Net ROAS > 1", "high", "High Performing", "Net ROAS > 1.0x",
+         lambda nr: nr > 1, False),
+        ("0.8 < Net ROAS <= 1", "average", "Average Performance", "Net ROAS 0.8x – 1.0x",
+         lambda nr: 0.8 < nr <= 1, False),
+        ("Net ROAS <= 0.8", "low", "Underperforming", "Net ROAS < 0.8x",
+         lambda nr: nr <= 0.8, True),
     ]
 
     grand = _aggregate_campaign_rows(campaign_rows)
@@ -521,7 +571,7 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
     grand_revenue = grand["shopify_revenue"] if grand else 0
 
     segments: list[dict] = []
-    for label, predicate, sort_asc in segment_defs:
+    for label, tier, display_label, sub, predicate, sort_asc in segment_defs:
         bucket = [r for r in campaign_rows if predicate(float(r.get("net_roas") or 0))]
         if not bucket:
             continue
@@ -531,7 +581,15 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
         if total:
             total["spend_pct"] = (total["spend"] / grand_spend * 100.0) if grand_spend else 0.0
             total["revenue_pct"] = (total["shopify_revenue"] / grand_revenue * 100.0) if grand_revenue else 0.0
-        segments.append({"label": label, "rows": rows, "total": total})
+        segments.append({
+            "label": label,
+            "tier": tier,
+            "display_label": display_label,
+            "sub": sub,
+            "count": len(rows),
+            "rows": rows,
+            "total": total,
+        })
 
     return segments, grand
 
@@ -587,6 +645,232 @@ def build_returns_row(total: dict, channels: list[dict] | None = None, returns_c
     return row
 
 
+def _pct(n, d) -> int:
+    """Integer percentage (0..100) used for bar-cell widths."""
+    try:
+        n = float(n or 0)
+        d = float(d or 0)
+    except Exception:
+        return 0
+    if d <= 0:
+        return 0
+    return int(round(min(max(n / d, 0.0), 1.0) * 100))
+
+
+def _roas_grad_class(net_roas: float) -> str:
+    """CSS class for Net ROAS cell background gradient tier."""
+    try:
+        nr = float(net_roas or 0)
+    except Exception:
+        return "roas-grad-low"
+    if nr >= 1.0:
+        return "roas-grad-high"
+    if nr >= 0.8:
+        return "roas-grad-mid"
+    return "roas-grad-low"
+
+
+def _augment_funnel_rows(rows: list[dict]) -> list[dict]:
+    """Flag the biggest drop-off stage in each funnel table."""
+    if not rows:
+        return rows
+    max_drop = None
+    for r in rows:
+        if r.get("has_drop_off") and r.get("drop_off") is not None:
+            d = float(r.get("drop_off") or 0)
+            if max_drop is None or d > max_drop:
+                max_drop = d
+    for r in rows:
+        r["is_max_drop"] = (
+            r.get("has_drop_off")
+            and max_drop is not None
+            and abs(float(r.get("drop_off") or 0) - max_drop) < 1e-9
+            and max_drop > 0
+        )
+    return rows
+
+
+def _build_channel_viz(channels: list[tuple[str, dict]]) -> dict:
+    """Precompute bar widths for the Visual Analytics charts.
+
+    Returns dicts of per-channel rows scaled to the max in each series, plus a
+    signed 'half' width (0..50) for the centre-axis diverging Net Profit chart.
+    """
+    items = [(name, ch) for name, ch in channels if ch]
+    if not items:
+        return {}
+    rev_max = max((float(c.get("sales") or 0) for _, c in items), default=0)
+    spend_max = max((float(c.get("ad_spend") or 0) for _, c in items), default=0)
+    profit_absmax = max((abs(float(c.get("net_profit") or 0)) for _, c in items), default=0)
+    roas_items = [(n, c) for n, c in items if float(c.get("ad_spend") or 0) > 0]
+    roas_max = max((float(c.get("net_roas") or 0) for _, c in roas_items), default=0)
+    # cap the scale so a single high-ROAS channel doesn't crush the other bars;
+    # values above the cap simply render as a full bar
+    roas_scale = max(1.0, min(roas_max, 4.0))
+
+    rev_spend = [
+        {
+            "name": n,
+            "revenue": float(c.get("sales") or 0),
+            "spend": float(c.get("ad_spend") or 0),
+            "rev_w": _pct(c.get("sales") or 0, rev_max),
+            "spend_w": _pct(c.get("ad_spend") or 0, spend_max),
+        }
+        for n, c in items
+    ]
+    profit = [
+        {
+            "name": n,
+            "net_profit": float(c.get("net_profit") or 0),
+            "w": _pct(abs(float(c.get("net_profit") or 0)), profit_absmax),
+            "half": _pct(abs(float(c.get("net_profit") or 0)), profit_absmax) // 2,
+            "neg": float(c.get("net_profit") or 0) < 0,
+        }
+        for n, c in items
+    ]
+    profit_has_neg = any(p["neg"] for p in profit)
+    roas = [
+        {
+            "name": n,
+            "net_roas": float(c.get("net_roas") or 0),
+            "roas_w": _pct(c.get("net_roas") or 0, roas_scale),
+            "pos": float(c.get("net_roas") or 0) >= 1.0,
+        }
+        for n, c in roas_items
+    ]
+    # Breakeven line position on the ROAS chart (1.0x as a share of the scale).
+    be_w = _pct(1.0, roas_scale)
+    return {
+        "rev_spend": rev_spend,
+        "profit": profit,
+        "profit_has_neg": profit_has_neg,
+        "roas": roas,
+        "roas_breakeven_w": be_w,
+    }
+
+
+def _build_top_campaigns(campaign_rows: list[dict], n: int = 10) -> list[dict]:
+    """Top campaigns by net profit with centre-axis diverging bar widths."""
+    if not campaign_rows:
+        return []
+    rows = sorted(campaign_rows, key=lambda r: float(r.get("net_profit") or 0), reverse=True)[:n]
+    absmax = max((abs(float(r.get("net_profit") or 0)) for r in rows), default=0)
+    out = []
+    for r in rows:
+        np_ = float(r.get("net_profit") or 0)
+        out.append({
+            "campaign_name": r.get("campaign_name") or "",
+            "net_profit": np_,
+            "net_roas": float(r.get("net_roas") or 0),
+            "w": _pct(abs(np_), absmax),
+            "half": _pct(abs(np_), absmax) // 2,
+            "neg": np_ < 0,
+        })
+    return out
+
+
+def build_executive_insights(
+    channels: list[tuple[str, dict]],
+    campaign_rows: list[dict],
+    meta_rows: list[dict],
+    google_rows: list[dict],
+    total: dict,
+) -> list[dict]:
+    """Auto-generate concise, executive-level takeaways from the report data.
+
+    Each insight: {tone: good|bad|warn|info, title, text}.
+    """
+    insights: list[dict] = []
+
+    real = [(n, c) for n, c in channels if c]
+    if real:
+        top_rev = max(real, key=lambda kv: float(kv[1].get("sales") or 0))
+        rev = float(top_rev[1].get("sales") or 0)
+        share = (rev / float(total.get("sales") or 1) * 100.0) if total.get("sales") else 0
+        insights.append({
+            "tone": "good",
+            "title": "Top revenue channel",
+            "text": f"{top_rev[0]} drove {fmt_inr(rev)} ({share:.0f}% of revenue).",
+        })
+
+    if campaign_rows:
+        best = max(campaign_rows, key=lambda r: float(r.get("net_profit") or 0))
+        if float(best.get("net_profit") or 0) > 0:
+            insights.append({
+                "tone": "good",
+                "title": "Most profitable campaign",
+                "text": f"“{_short(best.get('campaign_name'))}” netted "
+                        f"{fmt_inr(best.get('net_profit'))} at "
+                        f"{float(best.get('net_roas') or 0):.2f}x Net ROAS.",
+            })
+        worst = min(
+            (r for r in campaign_rows if float(r.get("spend") or 0) > 0),
+            key=lambda r: float(r.get("net_roas") or 0),
+            default=None,
+        )
+        if worst is not None and float(worst.get("net_roas") or 0) < 0.8:
+            insights.append({
+                "tone": "bad",
+                "title": "Lowest-performing campaign",
+                "text": f"“{_short(worst.get('campaign_name'))}” returned only "
+                        f"{float(worst.get('net_roas') or 0):.2f}x Net ROAS on "
+                        f"{fmt_inr(worst.get('spend'))} spend.",
+            })
+
+    drop = _largest_dropoff(meta_rows, "Meta") or _largest_dropoff(google_rows, "Google")
+    if drop:
+        insights.append({
+            "tone": "warn",
+            "title": "Largest funnel drop-off",
+            "text": f"{drop['channel']} loses {drop['drop']:.0f}% between "
+                    f"{drop['from']} and {drop['to']} — the biggest leak.",
+        })
+
+    spenders = [(n, c) for n, c in real if float(c.get("ad_spend") or 0) > 0
+                and float(c.get("order_count") or 0) > 0]
+    if spenders:
+        hi_cpo = max(spenders, key=lambda kv: float(kv[1].get("cpp") or 0))
+        insights.append({
+            "tone": "info",
+            "title": "Highest cost per order",
+            "text": f"{hi_cpo[0]} at {fmt_inr(hi_cpo[1].get('cpp'))} per order.",
+        })
+
+    # Optimization opportunity: budget tied up in sub-breakeven campaigns.
+    under = [r for r in campaign_rows if float(r.get("net_roas") or 0) < 0.8
+             and float(r.get("spend") or 0) > 0]
+    if under:
+        under_spend = sum(float(r.get("spend") or 0) for r in under)
+        tot_spend = sum(float(r.get("spend") or 0) for r in campaign_rows) or 1
+        insights.append({
+            "tone": "warn",
+            "title": "Optimization opportunity",
+            "text": f"{fmt_inr(under_spend)} ({under_spend / tot_spend * 100:.0f}% of "
+                    f"campaign spend) sits in {len(under)} sub-breakeven "
+                    f"campaign{'s' if len(under) != 1 else ''} — reallocate or pause.",
+        })
+
+    return insights
+
+
+def _short(name, length: int = 34) -> str:
+    s = str(name or "")
+    return s if len(s) <= length else s[: length - 1] + "…"
+
+
+def _largest_dropoff(rows: list[dict], channel: str) -> dict | None:
+    if not rows:
+        return None
+    best = None
+    for i, r in enumerate(rows):
+        if r.get("has_drop_off") and r.get("drop_off") is not None:
+            d = float(r.get("drop_off") or 0)
+            prev = rows[i - 1]["stage"] if i > 0 else r["stage"]
+            if best is None or d > best["drop"]:
+                best = {"channel": channel, "drop": d, "from": prev, "to": r["stage"]}
+    return best
+
+
 def build_daily_pdf_context(
     api_metrics: dict,
     campaign_df,
@@ -604,11 +888,20 @@ def build_daily_pdf_context(
     """
     import pandas as pd
 
+    def _norm_channel(c: dict | None) -> dict:
+        """Fill missing numeric keys with 0 so templates never hit Undefined math."""
+        c = dict(c or {})
+        for k in ("sales", "ad_spend", "cogs", "net_profit", "gross_roas",
+                  "net_roas", "be_roas", "order_count", "cpp"):
+            if c.get(k) is None:
+                c[k] = 0
+        return c
+
     total = api_metrics.get("total", {})
-    meta = api_metrics.get("meta", {})
-    google = api_metrics.get("google", {})
-    organic = api_metrics.get("organic", {})
-    amazon = api_metrics.get("amazon", {})
+    meta = _norm_channel(api_metrics.get("meta"))
+    google = _norm_channel(api_metrics.get("google"))
+    organic = _norm_channel(api_metrics.get("organic"))
+    amazon = api_metrics.get("amazon")
 
     channels = [
         ("Meta", meta),
@@ -618,7 +911,7 @@ def build_daily_pdf_context(
     # Amazon is a separate marketplace; include it as a channel row only when the
     # source provides it (dashboard_stats). The legacy hourly source omits it.
     if amazon:
-        channels.append(("Amazon", amazon))
+        channels.append(("Amazon", _norm_channel(amazon)))
 
     campaigns = []
     campaign_segments = []
@@ -656,17 +949,40 @@ def build_daily_pdf_context(
         [c for _, c in channels],
         returns_cancels_count=int(total.get("returns_cancels") or 0),
     )
+
+    meta_funnel_rows = _augment_funnel_rows(
+        _visible_funnel_rows(build_meta_funnel_rows(funnel_metrics))
+    )
+    google_funnel_rows = _augment_funnel_rows(
+        _visible_funnel_rows(build_google_funnel_rows(google_funnel))
+    )
+
+    # Gross profit convenience field + zero-defaults so KPI cards never hit Undefined.
+    total = dict(total)
+    for k in ("sales", "ad_spend", "cogs", "net_profit", "gross_roas",
+              "net_roas", "be_roas", "order_count", "cpp"):
+        if total.get(k) is None:
+            total[k] = 0
+    total["gross_profit"] = float(total.get("sales") or 0) - float(total.get("cogs") or 0)
+
+    # Best channel (by net profit) for subtle row highlighting in the channel table.
+    best_channel_name = None
+    _real = [(n, c) for n, c in channels if c]
+    if _real:
+        best_channel_name = max(_real, key=lambda kv: float(kv[1].get("net_profit") or 0))[0]
+
     return {
         "report_title": "Daily Marketing Performance Report",
         "date_range": report_date,
         "report_time": report_time,
         "total": total,
         "channels": channels,
+        "best_channel_name": best_channel_name,
         "returns_row": returns_row,
         "funnel": _normalize_funnel(funnel_metrics),
         "google_funnel": _normalize_google_funnel(google_funnel),
-        "meta_funnel_rows": _visible_funnel_rows(build_meta_funnel_rows(funnel_metrics)),
-        "google_funnel_rows": _visible_funnel_rows(build_google_funnel_rows(google_funnel)),
+        "meta_funnel_rows": meta_funnel_rows,
+        "google_funnel_rows": google_funnel_rows,
         "campaigns": campaigns,
         "campaign_segments": campaign_segments,
         "campaign_total": campaign_total,

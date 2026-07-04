@@ -27,24 +27,27 @@ try:
 except ImportError:
     get_clickhouse_client = None
 
-PLATFORM_ORDER = ["meta", "google", "organic", "other"]
+PLATFORM_ORDER = ["meta", "google", "organic", "amazon", "other"]
 PLATFORM_LABELS = {
     "meta": "Meta",
     "google": "Google",
     "organic": "Organic",
+    "amazon": "Amazon",
     "other": "Other",
 }
 PLATFORM_COLORS = {
     "meta": "#1877F2",
     "google": "#E53935",
     "organic": "#2EAA63",
+    "amazon": "#FF9900",
     "other": "#78909C",
 }
 PLATFORM_MARKERS = {
     "meta": "o",
     "google": "s",
     "organic": "^",
-    "other": "D",
+    "amazon": "D",
+    "other": "X",
 }
 
 METRIC_COLORS = {
@@ -120,6 +123,66 @@ def get_brand_id() -> int:
         return 20
 
 
+def _amazon_row_from_dashboard(dash: dict, report_date: str) -> Optional[dict]:
+    """Build one Amazon channel row from a historical/dashboard payload."""
+    amz = dash.get("amazon") or {}
+    if not amz:
+        return None
+    ad_bd = dash.get("ad_spend_breakdown") or {}
+    raw_spend = ad_bd.get("amazon")
+    if isinstance(raw_spend, dict):
+        spend = float(raw_spend.get("total", 0) or 0)
+    else:
+        spend = float(raw_spend or 0)
+    rev = float(amz.get("net_sales") or amz.get("gross_sales") or 0)
+    co = float(amz.get("cogs") or 0)
+    orders = int(amz.get("orders") or 0)
+    if rev == 0 and co == 0 and spend == 0 and orders == 0:
+        return None
+    net_profit = rev - co - spend
+    return {
+        "report_date": report_date,
+        "platform": "amazon",
+        "attributed_orders": orders,
+        "gross_revenue_excl_gst": round(rev, 2),
+        "cogs": round(co, 2),
+        "ad_spend": round(spend, 2),
+        "net_profit": round(net_profit, 2),
+        "gross_roas": round(rev / spend, 2) if spend > 0 else None,
+    }
+
+
+def _append_amazon_rows_from_dashboard(
+    df: pd.DataFrame, start_str: str, end_str: str
+) -> pd.DataFrame:
+    """Merge Amazon daily rows when the primary source omits them (e.g. attribution)."""
+    from api_data_fetcher import fetch_historical_dashboard
+
+    if not df.empty and "amazon" in df["platform"].values:
+        return df
+
+    dates = pd.date_range(start_str, end_str, freq="D").strftime("%Y-%m-%d").tolist()
+    if not dates:
+        dates = [end_str]
+
+    amazon_rows: list[dict] = []
+    for d in dates:
+        dash = fetch_historical_dashboard(d, d)
+        if not dash:
+            continue
+        row = _amazon_row_from_dashboard(dash, d)
+        if row:
+            amazon_rows.append(row)
+
+    if not amazon_rows:
+        return df
+
+    amz_df = pd.DataFrame(amazon_rows)
+    if df.empty:
+        return amz_df
+    return pd.concat([df, amz_df], ignore_index=True)
+
+
 def _fetch_channel_performance_from_attribution(start_str: str, end_str: str) -> pd.DataFrame:
     """Per-day channel rows from marketing attribution (matches entity-report sheets)."""
     from api_data_fetcher import fetch_marketing_hourly
@@ -165,9 +228,10 @@ def _fetch_channel_performance_from_attribution(start_str: str, end_str: str) ->
             "cogs": round(co, 2),
             "ad_spend": round(spend, 2),
             "net_profit": round(net_profit, 2),
-            "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
+            "gross_roas": round(rev / spend, 2) if spend > 0 else None,
         })
-    return pd.DataFrame(rows) if rows else pd.DataFrame()
+    df = pd.DataFrame(rows) if rows else pd.DataFrame()
+    return _append_amazon_rows_from_dashboard(df, start_str, end_str)
 
 
 def _fetch_channel_performance_from_dashboard_by_day(start_str: str, end_str: str) -> pd.DataFrame:
@@ -187,7 +251,12 @@ def _fetch_channel_performance_from_dashboard_by_day(start_str: str, end_str: st
         cogs_bd = dash.get("cogs_breakdown") or {}
         ad_bd = dash.get("ad_spend_breakdown") or {}
         orders_bd = dash.get("orders_breakdown") or {}
-        for platform in ("meta", "google", "organic", "other"):
+        for platform in ("meta", "google", "organic", "amazon", "other"):
+            if platform == "amazon":
+                amz_row = _amazon_row_from_dashboard(dash, d)
+                if amz_row:
+                    rows.append(amz_row)
+                continue
             raw_spend = ad_bd.get(platform) if platform != "organic" else 0
             if isinstance(raw_spend, dict):
                 spend = float(raw_spend.get("total", 0) or 0)
@@ -206,7 +275,7 @@ def _fetch_channel_performance_from_dashboard_by_day(start_str: str, end_str: st
                 "cogs": round(co, 2),
                 "ad_spend": round(spend, 2),
                 "net_profit": round(net_profit, 2),
-                "net_roas": round((rev - co) / spend, 2) if spend > 0 else None,
+                "gross_roas": round(rev / spend, 2) if spend > 0 else None,
             })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -290,20 +359,36 @@ def fetch_channel_performance(
         SELECT
             toString(d.report_date) AS report_date,
             ch.platform AS platform,
-            coalesce(c.attributed_orders, 0) AS attributed_orders,
-            round(coalesce(c.gross_revenue_excl_gst, 0), 2) AS gross_revenue_excl_gst,
-            round(coalesce(g.cogs, 0), 2) AS cogs,
-            coalesce(s.ad_spend, 0) AS ad_spend,
+            coalesce(
+                if(ch.platform = 'amazon', amz.attributed_orders, c.attributed_orders), 0
+            ) AS attributed_orders,
+            round(coalesce(
+                if(ch.platform = 'amazon', amz.gross_revenue_excl_gst, c.gross_revenue_excl_gst), 0
+            ), 2) AS gross_revenue_excl_gst,
+            round(coalesce(
+                if(ch.platform = 'amazon', amz.cogs, g.cogs), 0
+            ), 2) AS cogs,
+            coalesce(
+                if(ch.platform = 'amazon', amz.ad_spend, s.ad_spend), 0
+            ) AS ad_spend,
             round(
-                coalesce(c.gross_revenue_excl_gst, 0) - coalesce(g.cogs, 0) - coalesce(s.ad_spend, 0),
+                coalesce(
+                    if(ch.platform = 'amazon', amz.gross_revenue_excl_gst, c.gross_revenue_excl_gst), 0
+                )
+                - coalesce(if(ch.platform = 'amazon', amz.cogs, g.cogs), 0)
+                - coalesce(if(ch.platform = 'amazon', amz.ad_spend, s.ad_spend), 0),
                 2
             ) AS net_profit,
             round(
-                if(coalesce(s.ad_spend, 0) > 0,
-                   (coalesce(c.gross_revenue_excl_gst, 0) - coalesce(g.cogs, 0)) / s.ad_spend,
-                   NULL),
+                if(
+                    coalesce(if(ch.platform = 'amazon', amz.ad_spend, s.ad_spend), 0) > 0,
+                    coalesce(
+                        if(ch.platform = 'amazon', amz.gross_revenue_excl_gst, c.gross_revenue_excl_gst), 0
+                    ) / coalesce(if(ch.platform = 'amazon', amz.ad_spend, s.ad_spend), 0),
+                    NULL
+                ),
                 2
-            ) AS net_roas
+            ) AS gross_roas
         FROM (
             SELECT DISTINCT report_date
             FROM gold.fct_daily_pnl
@@ -312,7 +397,7 @@ def fetch_channel_performance(
               AND report_date <= toDate(%(end_date)s)
         ) AS d
         CROSS JOIN (
-            SELECT arrayJoin(['meta', 'google', 'organic', 'other']) AS platform
+            SELECT arrayJoin(['meta', 'google', 'organic', 'amazon', 'other']) AS platform
         ) AS ch
         LEFT JOIN (
             SELECT
@@ -371,6 +456,12 @@ def fetch_channel_performance(
               AND report_date >= toDate(%(start_date)s)
               AND report_date <= toDate(%(end_date)s)
             UNION ALL
+            SELECT 'amazon', report_date, toFloat64(amazon_spend)
+            FROM gold.fct_daily_pnl
+            WHERE brand_id = %(brand_id)s
+              AND report_date >= toDate(%(start_date)s)
+              AND report_date <= toDate(%(end_date)s)
+            UNION ALL
             SELECT 'other', report_date, toFloat64(0)
             FROM gold.fct_daily_pnl
             WHERE brand_id = %(brand_id)s
@@ -378,6 +469,21 @@ def fetch_channel_performance(
               AND report_date <= toDate(%(end_date)s)
         ) AS s
             ON d.report_date = s.report_date AND ch.platform = s.platform
+        LEFT JOIN (
+            SELECT
+                report_date,
+                toInt64(coalesce(amazon_orders, 0)) AS attributed_orders,
+                toFloat64(coalesce(amazon_gross_revenue, 0)) AS gross_revenue_excl_gst,
+                toFloat64(
+                    coalesce(amazon_product_cost, 0) + coalesce(amazon_platform_fees, 0)
+                ) AS cogs,
+                toFloat64(coalesce(amazon_spend, 0)) AS ad_spend
+            FROM gold.fct_daily_pnl
+            WHERE brand_id = %(brand_id)s
+              AND report_date >= toDate(%(start_date)s)
+              AND report_date <= toDate(%(end_date)s)
+        ) AS amz
+            ON d.report_date = amz.report_date AND ch.platform = 'amazon'
         ORDER BY report_date, ch.platform
     """
     client = get_clickhouse_client()
@@ -394,8 +500,8 @@ def fetch_channel_performance(
     for col in ("attributed_orders", "gross_revenue_excl_gst", "cogs", "ad_spend", "net_profit"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    if "net_roas" in df.columns:
-        df["net_roas"] = pd.to_numeric(df["net_roas"], errors="coerce")
+    if "gross_roas" in df.columns:
+        df["gross_roas"] = pd.to_numeric(df["gross_roas"], errors="coerce")
     if "attributed_orders" in df.columns:
         df["attributed_orders"] = df["attributed_orders"].astype(int)
     return df
@@ -720,48 +826,94 @@ def _day_count_in_range(start_str: str, end_str: str) -> int:
         return 1
 
 
-def _prepare_daily_net_roas(raw: pd.DataFrame) -> pd.DataFrame:
-    """Daily net ROAS per platform; NaN where ad spend is zero."""
+def _prepare_daily_roas(
+    raw: pd.DataFrame,
+    *,
+    min_plot_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Daily gross ROAS per platform (revenue / ad spend).
+
+    When a day's ad spend is zero, the previous day's spend is used for ROAS so
+    delayed ad reporting (e.g. Amazon) does not suppress the metric.
+    """
     if raw.empty:
         return raw
     daily = raw.copy()
     daily["report_date"] = pd.to_datetime(daily["report_date"])
-    daily["net_roas"] = np.where(
-        daily["ad_spend"] > 0,
-        (daily["gross_revenue_excl_gst"] - daily["cogs"]) / daily["ad_spend"],
-        np.nan,
-    )
+    daily["gross_roas"] = np.nan
+
+    for platform in PLATFORM_ORDER:
+        plat = daily[daily["platform"] == platform].sort_values("report_date")
+        if plat.empty:
+            continue
+        prev_spend = 0.0
+        roas_vals = []
+        for _, row in plat.iterrows():
+            spend = float(row.get("ad_spend") or 0)
+            rev = float(row.get("gross_revenue_excl_gst") or 0)
+            effective_spend = spend if spend > 0 else prev_spend
+            if effective_spend > 0:
+                roas_vals.append(rev / effective_spend)
+            else:
+                roas_vals.append(np.nan)
+            if spend > 0:
+                prev_spend = spend
+        daily.loc[plat.index, "gross_roas"] = roas_vals
+
+    if min_plot_date:
+        min_dt = pd.to_datetime(min_plot_date)
+        daily = daily[daily["report_date"] >= min_dt]
+
     order_map = {p: i for i, p in enumerate(PLATFORM_ORDER)}
     daily["_sort"] = daily["platform"].map(order_map).fillna(99)
     return daily.sort_values(["report_date", "_sort"]).drop(columns=["_sort"])
 
 
-def _plot_net_roas_by_day(ax, raw: pd.DataFrame, *, roas_trend_days: int = 7, legend_below: bool = True) -> None:
-    """Line chart: net ROAS per channel for each day in the window."""
-    daily = _prepare_daily_net_roas(raw)
+def _plot_roas_by_day(
+    ax,
+    raw: pd.DataFrame,
+    *,
+    roas_trend_days: int = 7,
+    legend_below: bool = True,
+    min_plot_date: Optional[str] = None,
+    platforms: Optional[list[str]] = None,
+    title: Optional[str] = None,
+    show_legend: bool = True,
+) -> bool:
+    """Line chart: gross ROAS per channel for each day in the window. Returns False if nothing plotted."""
+    daily = _prepare_daily_roas(raw, min_plot_date=min_plot_date)
     if daily.empty:
         ax.set_visible(False)
-        return
+        return False
+
+    plot_platforms = platforms or [p for p in ("meta", "google") if p in PLATFORM_ORDER]
+    daily = daily[daily["platform"].isin(plot_platforms)]
+    if daily.empty:
+        ax.set_visible(False)
+        return False
 
     dates = sorted(daily["report_date"].unique())
     if len(dates) < 2:
         ax.set_visible(False)
-        return
+        return False
 
     x = np.arange(len(dates))
     date_labels = [pd.Timestamp(d).strftime("%d %b") for d in dates]
+    plotted = False
 
-    for platform in PLATFORM_ORDER:
+    for platform in plot_platforms:
         plat = daily[daily["platform"] == platform]
         if plat.empty:
             continue
         series = (
-            plat.set_index("report_date")["net_roas"]
+            plat.set_index("report_date")["gross_roas"]
             .reindex(dates)
         )
         y = series.values.astype(float)
         if np.all(np.isnan(y)):
             continue
+        plotted = True
         color = PLATFORM_COLORS.get(platform, "#666666")
         label = PLATFORM_LABELS.get(platform, platform.title())
         marker = PLATFORM_MARKERS.get(platform, "o")
@@ -792,8 +944,20 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame, *, roas_trend_days: int = 7, le
                 color=color,
             )
 
+    if not plotted:
+        ax.set_visible(False)
+        return False
+
+    if title:
+        chart_title = title
+    elif len(plot_platforms) == 1:
+        label = PLATFORM_LABELS.get(plot_platforms[0], plot_platforms[0].title())
+        chart_title = f"{label} ROAS — Last {roas_trend_days} Days"
+    else:
+        chart_title = f"ROAS by Channel — Last {roas_trend_days} Days"
+
     ax.set_title(
-        f"Net ROAS by Channel — Last {roas_trend_days} Days",
+        chart_title,
         fontsize=11,
         fontweight="bold",
         color="#1a1a1a",
@@ -802,11 +966,11 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame, *, roas_trend_days: int = 7, le
     ax.set_xticks(x)
     ax.set_xticklabels(
         date_labels,
-        fontsize=7 if len(dates) > 20 else 8,
+        fontsize=7 if len(dates) > 14 else 8,
         rotation=90,
         ha="center",
     )
-    ax.set_ylabel("Net ROAS", fontsize=10, color="#333333", labelpad=8)
+    ax.set_ylabel("ROAS", fontsize=10, color="#333333", labelpad=8)
     ax.set_facecolor("#FAFBFC")
     ax.grid(
         True,
@@ -824,27 +988,29 @@ def _plot_net_roas_by_day(ax, raw: pd.DataFrame, *, roas_trend_days: int = 7, le
     ax.spines["left"].set_color("#BBBBBB")
     ax.spines["bottom"].set_color("#BBBBBB")
 
-    valid = daily.loc[daily["ad_spend"] > 0, "net_roas"].dropna()
+    valid = daily["gross_roas"].dropna()
     if not valid.empty:
         ymax = float(valid.max())
         ax.set_ylim(0, max(ymax * 1.35, 0.5))
-    legend_kwargs = dict(
-        frameon=True,
-        fontsize=8,
-        title="Channels",
-        title_fontsize=8,
-        edgecolor="#DDDDDD",
-        facecolor="white",
-    )
-    if legend_below:
-        ax.legend(
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.20),
-            ncol=min(len(PLATFORM_ORDER), 4),
-            **legend_kwargs,
+    if show_legend and len(plot_platforms) > 1:
+        legend_kwargs = dict(
+            frameon=True,
+            fontsize=8,
+            title="Channels",
+            title_fontsize=8,
+            edgecolor="#DDDDDD",
+            facecolor="white",
         )
-    else:
-        ax.legend(loc="upper right", ncol=1, **legend_kwargs)
+        if legend_below:
+            ax.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.20),
+                ncol=len(plot_platforms),
+                **legend_kwargs,
+            )
+        else:
+            ax.legend(loc="upper right", ncol=1, **legend_kwargs)
+    return True
 
 
 def plot_channel_performance(
@@ -855,10 +1021,12 @@ def plot_channel_performance(
     period_label: Optional[str] = None,
     include_roas_trend: bool = False,
     roas_trend_days: int = 7,
+    amazon_roas_trend_days: int = 14,
 ) -> Optional[str]:
     """
     Grouped bar chart: revenue, COGS, ad spend, net profit, and orders by channel.
-    Optionally adds a daily net ROAS trend panel below (last N days ending on end_date).
+    Optionally adds ROAS trend panels below: Meta/Google (roas_trend_days) and
+    Amazon (amazon_roas_trend_days) side by side.
     """
     try:
         raw = fetch_channel_performance(start_date, end_date, brand_id=brand_id)
@@ -936,27 +1104,59 @@ def plot_channel_performance(
 
         trend_raw = pd.DataFrame()
         show_roas_trend = False
+        show_amazon_roas = False
         if include_roas_trend:
             try:
                 end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
-                trend_start = end_dt - timedelta(days=roas_trend_days - 1)
-                trend_raw = fetch_channel_performance(trend_start, end_str, brand_id=brand_id)
+                window_days = max(roas_trend_days, amazon_roas_trend_days)
+                trend_start = end_dt - timedelta(days=window_days - 1)
+                fetch_start = trend_start - timedelta(days=1)
+                trend_raw = fetch_channel_performance(fetch_start, end_str, brand_id=brand_id)
                 if not trend_raw.empty:
-                    daily_roas = _prepare_daily_net_roas(trend_raw)
-                    show_roas_trend = len(daily_roas["report_date"].unique()) >= 2
+                    main_start = end_dt - timedelta(days=roas_trend_days - 1)
+                    main_roas = _prepare_daily_roas(
+                        trend_raw,
+                        min_plot_date=main_start.strftime("%Y-%m-%d"),
+                    )
+                    show_roas_trend = len(main_roas["report_date"].unique()) >= 2
+                    amazon_start = end_dt - timedelta(days=amazon_roas_trend_days - 1)
+                    amazon_roas = _prepare_daily_roas(
+                        trend_raw,
+                        min_plot_date=amazon_start.strftime("%Y-%m-%d"),
+                    )
+                    amazon_roas = amazon_roas[amazon_roas["platform"] == "amazon"]
+                    show_amazon_roas = (
+                        not amazon_roas.empty
+                        and len(amazon_roas["report_date"].unique()) >= 2
+                        and amazon_roas["gross_roas"].notna().any()
+                    )
             except Exception as trend_err:
                 logger.warning("Could not load ROAS trend data: %s", trend_err)
 
-        if show_roas_trend:
-            fig = plt.figure(figsize=(14, 10.5), facecolor="white")
-            gs = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.42)
-            ax1 = fig.add_subplot(gs[0])
+        if show_roas_trend or show_amazon_roas:
+            fig = plt.figure(figsize=(16, 10.5), facecolor="white")
+            if show_roas_trend and show_amazon_roas:
+                gs = fig.add_gridspec(
+                    2, 2,
+                    height_ratios=[1.5, 1],
+                    width_ratios=[1, 1],
+                    hspace=0.42,
+                    wspace=0.22,
+                )
+                ax1 = fig.add_subplot(gs[0, :])
+                ax_roas = fig.add_subplot(gs[1, 0])
+                ax_amazon_roas = fig.add_subplot(gs[1, 1])
+            else:
+                gs = fig.add_gridspec(2, 1, height_ratios=[1.5, 1], hspace=0.42)
+                ax1 = fig.add_subplot(gs[0])
+                ax_roas = fig.add_subplot(gs[1]) if show_roas_trend else None
+                ax_amazon_roas = fig.add_subplot(gs[1]) if show_amazon_roas else None
             ax2 = ax1.twinx()
-            ax_roas = fig.add_subplot(gs[1])
         else:
             fig, ax1 = plt.subplots(figsize=(14, 7), facecolor="white")
             ax2 = ax1.twinx()
             ax_roas = None
+            ax_amazon_roas = None
 
         rev_colors = [METRIC_COLORS["revenue"]] * n
         cogs_colors = [METRIC_COLORS["cogs"]] * n
@@ -1132,12 +1332,37 @@ def plot_channel_performance(
         )
 
         if ax_roas is not None:
-            _plot_net_roas_by_day(
+            end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
+            main_start_str = (
+                end_dt - timedelta(days=roas_trend_days - 1)
+            ).strftime("%Y-%m-%d")
+            _plot_roas_by_day(
                 ax_roas,
                 trend_raw,
                 roas_trend_days=roas_trend_days,
                 legend_below=False,
+                min_plot_date=main_start_str,
+                platforms=["meta", "google"],
+                show_legend=True,
             )
+
+        if ax_amazon_roas is not None:
+            end_dt = datetime.strptime(end_str, "%Y-%m-%d").date()
+            amazon_start_str = (
+                end_dt - timedelta(days=amazon_roas_trend_days - 1)
+            ).strftime("%Y-%m-%d")
+            _plot_roas_by_day(
+                ax_amazon_roas,
+                trend_raw,
+                roas_trend_days=amazon_roas_trend_days,
+                legend_below=False,
+                min_plot_date=amazon_start_str,
+                platforms=["amazon"],
+                title=f"Amazon ROAS — Last {amazon_roas_trend_days} Days",
+                show_legend=False,
+            )
+
+        if ax_roas is not None or ax_amazon_roas is not None:
             layout_rect = [0.04, 0.03, 0.96, 0.80]
         else:
             layout_rect = [0.04, 0.06, 0.96, 0.82]
@@ -1175,7 +1400,8 @@ def plot_channel_performance_daily(
         brand_id=brand_id,
         period_label=label,
         include_roas_trend=True,
-        roas_trend_days=30,
+        roas_trend_days=14,
+        amazon_roas_trend_days=14,
     )
 
 

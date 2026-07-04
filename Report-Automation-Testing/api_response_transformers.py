@@ -272,6 +272,11 @@ def _attribution_row(
         product_details = ad_node.get("product_details")
         if not product_details and orders:
             product_details = orders
+    # Google PMax / sag_organic: orders may live on the hourly bucket, not ad_node
+    if not product_details:
+        bucket_orders = m.get("attributed_orders") or m.get("orders")
+        if bucket_orders:
+            product_details = bucket_orders
 
     return {
         "source": source,
@@ -313,8 +318,70 @@ def flatten_meta_attribution(data: dict) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _google_campaign_key(campaign_id, campaign_name=None, utm_campaign=None) -> str:
+    cid = str(campaign_id) if campaign_id not in (None, "") else "0"
+    name = str(campaign_name or utm_campaign or "").strip()
+    return f"{cid}|{name}"
+
+
+def _order_revenue(order: dict) -> float:
+    for key in ("revenue", "total", "total_price", "net_revenue_excl_tax", "gross_revenue_excl_tax"):
+        val = order.get(key)
+        if val not in (None, ""):
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def _attach_google_orders_to_rows(rows: list[dict], top_orders: list[dict]) -> None:
+    """Attach payload.orders to flattened rows missing product_details (PMax, sag_organic)."""
+    by_campaign: dict[str, list[dict]] = {}
+    orphan_orders: list[dict] = []
+
+    for order in top_orders:
+        if not isinstance(order, dict):
+            continue
+        cid = order.get("campaign_id")
+        cname = order.get("campaign_name")
+        if cid in (None, "", 0, "0") and not cname:
+            orphan_orders.append(order)
+            continue
+        key = _google_campaign_key(cid, cname, order.get("utm_campaign"))
+        by_campaign.setdefault(key, []).append(order)
+
+    for row in rows:
+        if int(row.get("attributed_orders_count") or 0) <= 0:
+            continue
+        if row.get("product_details"):
+            continue
+
+        key = _google_campaign_key(
+            row.get("campaign_id"),
+            row.get("campaign_name"),
+            row.get("utm_campaign"),
+        )
+        candidates = list(by_campaign.get(key, []))
+
+        # sag_organic / unattributed Google: campaign_id=0, name from utm_campaign
+        if not candidates and orphan_orders:
+            if str(row.get("campaign_name") or "").strip().lower() in ("sag_organic", ""):
+                row_rev = float(row.get("attributed_orders_revenue") or 0)
+                candidates = [
+                    o for o in orphan_orders
+                    if abs(_order_revenue(o) - row_rev) < 0.05
+                ] or list(orphan_orders)
+
+        if candidates:
+            row["product_details"] = candidates
+            row["attributed_orders"] = candidates
+
+
 def flatten_google_attribution(data: dict) -> pd.DataFrame:
     rows = _flatten_google_attribution_rows(data)
+    if rows and data.get("orders"):
+        _attach_google_orders_to_rows(rows, data.get("orders") or [])
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 

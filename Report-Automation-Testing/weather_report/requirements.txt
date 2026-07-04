@@ -1,0 +1,9 @@
+pandas>=2.0
+openpyxl>=3.1
+PyYAML>=6.0
+SQLAlchemy>=1.4
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+requests>=2.31
+openai>=1.40
+matplotlib>=3.7

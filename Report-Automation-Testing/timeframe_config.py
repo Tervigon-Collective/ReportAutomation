@@ -128,23 +128,33 @@ def get_timeframe_config(start_date=None, end_date=None, days_range: int | None 
 
     Resolution order (first non-null wins):
     1) Explicit start_date/end_date args
-    2) Module globals set via set_global_dates()
-    3) Environment variables ROLLUP_START_DATE / ROLLUP_END_DATE (YYYY-MM-DD)
-    4) Today's date in IST (start at 00:00:00, end at 23:59:59)
+    2) days_range (when no explicit args) — last N days ending today in IST
+    3) Module globals set via set_global_dates()
+    4) Environment variables ROLLUP_START_DATE / ROLLUP_END_DATE (YYYY-MM-DD)
+    5) Today's date in IST (start at 00:00:00, end at 23:59:59)
 
     Returns a dict with: start_date (datetime), end_date (datetime), today (str), timestamp_str (str), days (int)
     """
+    now = datetime.now(IST)
+
     # 1) Explicit arguments
     start_dt = _parse_date_input(start_date, is_end=False)
     end_dt = _parse_date_input(end_date, is_end=True)
 
-    # 2) Module globals
+    # 2) Relative window — must win over stale globals (e.g. MTD left from another script)
+    if start_dt is None and end_dt is None and days_range and isinstance(days_range, int) and days_range > 0:
+        start_dt = (now - timedelta(days=days_range - 1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    # 3) Module globals
     if start_dt is None and _GLOBAL_START_DT is not None:
         start_dt = _GLOBAL_START_DT
     if end_dt is None and _GLOBAL_END_DT is not None:
         end_dt = _GLOBAL_END_DT
 
-    # 3) Environment variables
+    # 4) Environment variables
     if start_dt is None:
         env_start = os.environ.get('ROLLUP_START_DATE')
         start_dt = _parse_date_input(env_start, is_end=False)
@@ -152,20 +162,12 @@ def get_timeframe_config(start_date=None, end_date=None, days_range: int | None 
         env_end = os.environ.get('ROLLUP_END_DATE')
         end_dt = _parse_date_input(env_end, is_end=True)
 
-    # 4) Default to today in IST (or N-day range if days_range provided)
-    now = datetime.now(IST)
+    # 5) Default to today in IST
     if start_dt is None or end_dt is None:
-        if days_range and isinstance(days_range, int) and days_range > 0:
-            # Use last `days_range` days ending today (inclusive)
-            start_candidate = (now - timedelta(days=days_range - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            end_candidate = now.replace(hour=23, minute=59, second=59, microsecond=0)
-            start_dt = start_dt or start_candidate
-            end_dt = end_dt or end_candidate
-        else:
-            if start_dt is None:
-                start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            if end_dt is None:
-                end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+        if start_dt is None:
+            start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if end_dt is None:
+            end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
 
     # Optional hardcoded test dates for reproducible testing
     # Enable via argument or env var USE_FIXED_DATES=true
@@ -207,6 +209,30 @@ def get_current_timestamp():
     """Return (today_str, timestamp_str) from the current timeframe configuration."""
     tf = get_timeframe_config()
     return tf['today'], tf['timestamp_str']
+
+
+def get_daily_report_timeframe(lag_days: int | None = None):
+    """
+    Single calendar day for the daily marketing email (default: today in IST).
+
+    Set DAILY_REPORT_LAG_DAYS=1 (or higher) when the scheduled job should report
+    on a completed prior day. Honors ROLLUP_START_DATE / ROLLUP_END_DATE when
+    both are set (test/backfill).
+    """
+    env_start = os.environ.get('ROLLUP_START_DATE')
+    env_end = os.environ.get('ROLLUP_END_DATE')
+    if env_start and env_end:
+        return get_timeframe_config(start_date=env_start, end_date=env_end)
+
+    if lag_days is None:
+        try:
+            lag_days = int(os.environ.get('DAILY_REPORT_LAG_DAYS', '0'))
+        except ValueError:
+            lag_days = 0
+    lag_days = max(0, lag_days)
+
+    report_day = (datetime.now(IST) - timedelta(days=lag_days)).strftime('%Y-%m-%d')
+    return get_timeframe_config(start_date=report_day, end_date=report_day)
 
 
 # Initialize default dates to current IST date when module is imported

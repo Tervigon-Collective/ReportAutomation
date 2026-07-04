@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Daily Marketing Report</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f5f7;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#1a1a2e;">
+
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+<tr><td align="center">
+<table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;">
+
+  <!-- HEADER -->
+  <tr>
+    <td style="background:#1a1a2e;border-radius:8px 8px 0 0;padding:28px 32px;">
+      <div style="font-size:22px;font-weight:600;color:#ffffff;letter-spacing:-0.3px;">Daily Marketing Report</div>
+      <div style="font-size:13px;color:#94a3b8;margin-top:6px;">{{ report_date }} · {{ report_time }} IST · {{ weekday }}</div>
+    </td>
+  </tr>
+
+  <!-- KPI STRIP -->
+  <tr>
+    <td style="background:#0f3460;padding:0 32px 0 32px;">
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          {% set kpis = [
+            ('Revenue', total.sales | fmt_inr, total.sales_delta),
+            ('Ad Spend', total.ad_spend | fmt_inr, None),
+            ('Net Profit', total.net_profit | fmt_inr, total.profit_delta),
+            ('Blended ROAS', total.gross_roas | fmt_roas, None),
+            ('Net ROAS', total.net_roas | fmt_roas, None),
+          ] %}
+          {% for label, value, delta in kpis %}
+          <td width="20%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">
+            <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">{{ label }}</div>
+            <div style="font-size:18px;font-weight:700;color:{% if label == 'Net Profit' and total.net_profit < 0 %}#f87171{% else %}#e2e8f0{% endif %};margin-top:4px;white-space:nowrap;">{{ value }}</div>
+            {% if delta %}
+            <div style="font-size:10px;color:{{ '#4ade80' if delta.startswith('+') else '#f87171' }};margin-top:2px;">{{ delta }} vs yesterday</div>
+            {% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- CHARTS -->
+  {% if chart_cids %}
+  {% set ns = namespace(weather_shown=false) %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Performance Charts</div>
+    </td>
+  </tr>
+  {% for cid in chart_cids %}
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ cid }}" alt="Chart" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;">
+    </td>
+  </tr>
+  {% if weather_chart_cid and cid.startswith('channel_performance_daily_') %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
+        {{ weather_report_date | default(report_date) }}
+        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
+        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
+    </td>
+  </tr>
+  {% set ns.weather_shown = true %}
+  {% endif %}
+  {% endfor %}
+  {% if weather_chart_cid and not ns.weather_shown %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
+        {{ weather_report_date | default(report_date) }}
+        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
+        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
+    </td>
+  </tr>
+  {% endif %}
+  {% elif weather_chart_cid %}
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
+        {{ weather_report_date | default(report_date) }}
+        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
+        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
+      </div>
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px;">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
+    </td>
+  </tr>
+  <tr>
+    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
+    </td>
+  </tr>
+  {% endif %}
+
+  <!-- FOOTER -->
+  <tr>
+    <td style="background:#ffffff;padding:20px 32px 24px 32px;">
+      <div style="border-top:1px solid #e2e8f0;margin-bottom:16px;"></div>
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="font-size:10px;color:#94a3b8;">Auto-generated · {{ report_date }} {{ report_time }} IST</td>
+          <td style="font-size:10px;color:#94a3b8;text-align:right;">Full data in attached Excel &amp; PDF</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+
+  <!-- BOTTOM BORDER -->
+  <tr>
+    <td style="background:#6366f1;border-radius:0 0 8px 8px;height:4px;"></td>
+  </tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>

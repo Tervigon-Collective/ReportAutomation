@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from timeframe_config import get_timeframe_config
-from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data, fetch_product_profitability
+from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data, fetch_product_profitability, fetch_canonical_pnl_totals
 from global_config import get_global_config, get_temp_dir, get_report_dir
 
 # Import functions from dailyrollup.py
@@ -51,6 +51,23 @@ logger = logging.getLogger(__name__)
 # Set timezone to IST
 IST = pytz.timezone('Asia/Kolkata')
 
+
+def _report_now() -> datetime:
+    """
+    Effective report date for WTD/MTD/daily windows.
+    Set REPORT_AS_OF_DATE=YYYY-MM-DD in the shell to backfill / freeze the run date.
+    """
+    raw = os.environ.get('REPORT_AS_OF_DATE', '').strip()
+    if raw:
+        try:
+            d = datetime.strptime(raw, '%Y-%m-%d')
+            now = IST.localize(d.replace(hour=12, minute=0, second=0, microsecond=0))
+            logger.info("Using REPORT_AS_OF_DATE=%s for WTD/MTD windows", raw)
+            return now
+        except ValueError:
+            logger.warning("Invalid REPORT_AS_OF_DATE '%s'; using real now.", raw)
+    return datetime.now(IST)
+
 # Load environment variables
 load_dotenv()
 
@@ -74,11 +91,11 @@ def get_wtd_mtd_timeframes():
     Calculate Week-to-Date (WTD) and Month-to-Date (MTD) timeframes.
     Returns dict with 'wtd' and 'mtd' keys, each containing start_date and end_date.
 
-    WTD: Monday of the current week to today (calendar week, consistent with Amazon).
+    WTD: Monday of the current week to today.
     MTD: 1st of the current month to today.
-    Daily: Previous day only.
+    Daily: Previous day only (yesterday).
     """
-    now = datetime.now(IST)
+    now = _report_now()
 
     # Week-to-Date: Monday of the current week to today
     wtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
@@ -113,49 +130,11 @@ def get_wtd_mtd_timeframes():
 
 def get_amazon_calendar_timeframes():
     """
-    Calendar-based WTD/MTD for Amazon (per business requirement).
-
-    - WTD: start of current week (Monday) -> today (end of day); callers apply
-      `days_lag=1` (or subtract 1 day) so the effective window ends yesterday.
-    - MTD: 1st of current month -> yesterday (end of day). On the 1st of the
-      month (no complete days in the new month yet), use the previous full month.
-
-    Amazon gold tables lag ~1 day, so MTD must not include today.
-
-    To switch the week to start on Sunday, change `now.weekday()` below to
-    `(now.weekday() + 1) % 7`.
+    Deprecated: Amazon entity sheets now use the same windows as
+    ``get_wtd_mtd_timeframes()`` (WTD/MTD/daily). Kept for callers that
+    still import this helper.
     """
-    now = datetime.now(IST)
-    today_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    yesterday_end = (now - timedelta(days=1)).replace(
-        hour=23, minute=59, second=59, microsecond=0
-    )
-    # Monday-start week: weekday() == 0 on Monday, 6 on Sunday.
-    wtd_start = (
-        (today_end - timedelta(days=now.weekday()))
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-    if now.day == 1:
-        # Gold data ends yesterday; on the 1st that is the prior month's last day.
-        mtd_start = yesterday_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        mtd_end = yesterday_end
-        mtd_label = 'Month-to-Date (prior month close)'
-    else:
-        mtd_start = today_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        mtd_end = yesterday_end
-        mtd_label = 'Month-to-Date (calendar, 1st-yesterday)'
-    return {
-        'wtd': {
-            'start_date': wtd_start,
-            'end_date': today_end,
-            'label': 'Week-to-Date (calendar, Mon-today)',
-        },
-        'mtd': {
-            'start_date': mtd_start,
-            'end_date': mtd_end,
-            'label': mtd_label,
-        },
-    }
+    return get_wtd_mtd_timeframes()
 
 
 def _create_unified_funnel_columns(df: pd.DataFrame, source_type: str) -> pd.DataFrame:
@@ -988,7 +967,7 @@ def run_amazon_report(out_dir: str = None) -> str:
         os.makedirs(out_dir, exist_ok=True)
         
         # Calculate date for 2 days earlier
-        now = datetime.now(IST)
+        now = _report_now()
         two_days_ago = (now - timedelta(days=2))
         date_str = two_days_ago.strftime('%Y-%m-%d')
         date_display = two_days_ago.strftime('%d-%m-%Y')
@@ -1209,6 +1188,13 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
             
             # Store timeframe info in summary
             summary_data[timeframe_key]['timeframe'] = f"{start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}"
+            summary_data[timeframe_key]['start_date'] = start_date.strftime('%Y-%m-%d')
+            summary_data[timeframe_key]['end_date'] = end_date.strftime('%Y-%m-%d')
+            # Canonical company P&L totals from /v1/historical/time-patterns — same source as
+            # the daily report + net-profit graph, so WTD/MTD headline net profit agrees with daily.
+            summary_data[timeframe_key]['canonical_totals'] = fetch_canonical_pnl_totals(
+                start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+            )
             
             # Format date range for sheet name (DD-MM format, / is invalid in Excel sheet names)
             date_range_str = f"{start_date.strftime('%d-%m')} to {end_date.strftime('%d-%m')}"
@@ -1402,34 +1388,21 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     if channel_key not in summary_data[timeframe_key]['channels']:
                         summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
             
-            # Amazon sheets from ClickHouse gold (separate from Meta/Google/Organic).
-            # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
-            # unlike Meta/Google which use the rolling 7/30-day window above.
-            print(f"\n[{label}] Processing Amazon data (ClickHouse, calendar window)...")
+            # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
+            print(f"\n[{label}] Processing Amazon data (ClickHouse)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
             try:
-                amazon_tf = get_amazon_calendar_timeframes().get(timeframe_key)
-                if amazon_tf is None:
-                    # Fall back to the standard window for any timeframe not
-                    # covered by the calendar helper (currently: 'daily').
-                    amz_start, amz_end = start_date, end_date
-                else:
-                    amz_start = amazon_tf['start_date']
-                    amz_end = amazon_tf['end_date']
                 print(
-                    f"[{label}] Amazon calendar range: "
-                    f"{amz_start.strftime('%Y-%m-%d')} to {amz_end.strftime('%Y-%m-%d')}"
+                    f"[{label}] Amazon range: "
+                    f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
                 )
-                # MTD calendar end is already yesterday; WTD/Daily use lag=1
-                # so the effective ads window also ends yesterday.
-                lag = 0 if timeframe_key == 'mtd' else 1
                 add_amazon_sheets_for_timeframe(
                     writer,
                     timeframe_key=timeframe_key,
-                    start_date=amz_start,
-                    end_date=amz_end,
+                    start_date=start_date,
+                    end_date=end_date,
                     round_for_output_fn=round_for_output,
-                    days_lag=lag,
+                    days_lag=0,
                 )
             except Exception as e:
                 print(f"[{label}] Failed to add ClickHouse Amazon sheets: {e}")
@@ -1666,7 +1639,7 @@ def run_product_profitability_report(for_date: str = None, out_dir: str = None) 
     if out_dir is None:
         out_dir = get_report_dir()
     os.makedirs(out_dir, exist_ok=True)
-    now = datetime.now(IST)
+    now = _report_now()
     ts = now.strftime('%Y%m%d_%H%M%S')
     yesterday_str = (now - timedelta(days=1)).strftime('%Y-%m-%d')
     xlsx_path = os.path.join(out_dir, f"Product_Profitability_{yesterday_str}_{ts}.xlsx")
@@ -2019,12 +1992,16 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
             continue
         
         # Calculate overall totals across all channels
-        total_revenue = sum(ch.get('revenue', 0) for ch in channels.values())
-        total_cogs = sum(ch.get('cogs', 0) for ch in channels.values())
-        total_spend = sum(ch.get('spend', 0) for ch in channels.values())
         total_orders = sum(ch.get('orders', 0) for ch in channels.values())
         total_quantity = sum(ch.get('quantity', 0) for ch in channels.values())
-        total_net_profit = sum(ch.get('net_profit', 0) for ch in channels.values())
+        # Company-level revenue/COGS/spend/net profit come from the canonical
+        # /historical/time-patterns totals (same as the daily report) when available,
+        # so the totals row agrees with daily. Falls back to channel sums otherwise.
+        canonical = timeframe_data.get('canonical_totals') or {}
+        total_revenue = canonical.get('revenue', sum(ch.get('revenue', 0) for ch in channels.values()))
+        total_cogs = canonical.get('cogs', sum(ch.get('cogs', 0) for ch in channels.values()))
+        total_spend = canonical.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values()))
+        total_net_profit = canonical.get('net_profit', sum(ch.get('net_profit', 0) for ch in channels.values()))
         total_net_roas = (total_revenue - total_cogs) / total_spend if total_spend > 0 else 0.0
         
         # Calculate overall efficiency metrics
@@ -2557,7 +2534,7 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
         access_token = result["access_token"]
         
         # Prepare email subject and body
-        now = datetime.now(IST)
+        now = _report_now()
         today_str = now.strftime('%Y-%m-%d')
         yesterday = (now - timedelta(days=1))
         yesterday_str = yesterday.strftime('%Y-%m-%d')
@@ -2576,34 +2553,48 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Could not extract daily efficiency metrics: {e}")
         
-        # Extract Amazon metrics for WTD and MTD date ranges.
-        # Amazon uses CALENDAR-based windows (Mon-to-today / 1st-to-yesterday),
-        # then WTD end is shifted back 1 day to account for gold-table lag.
+        # Amazon WTD/MTD email metrics: same date windows as Meta/Google/Organic.
         amazon_wtd = None
         amazon_mtd = None
         try:
             wtd_timeframe = summary_data.get('wtd', {})
             mtd_timeframe = summary_data.get('mtd', {})
 
-            amazon_timeframes = get_amazon_calendar_timeframes()
+            def _tf_start(tf: dict) -> datetime:
+                return datetime.strptime(tf['start_date'], '%Y-%m-%d').replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
 
-            # Fetch Amazon data for WTD (calendar week start -> yesterday)
-            wtd_start = amazon_timeframes['wtd']['start_date']
-            wtd_end = amazon_timeframes['wtd']['end_date'] - timedelta(days=1)
-            amazon_wtd = get_amazon_summary_metrics(wtd_start, wtd_end)
-            if amazon_wtd.get('available', False):
-                logger.info(f"Extracted Amazon WTD metrics: Revenue=₹{amazon_wtd['revenue']:.2f}, Spend=₹{amazon_wtd['spend']:.2f}, Orders={amazon_wtd['orders']}, Range={amazon_wtd['date_range']}")
-            else:
-                logger.warning("No Amazon data available for WTD")
+            def _tf_end(tf: dict) -> datetime:
+                return datetime.strptime(tf['end_date'], '%Y-%m-%d').replace(
+                    hour=23, minute=59, second=59, microsecond=0
+                )
 
-            # Fetch Amazon data for MTD (1st of month -> yesterday)
-            mtd_start = amazon_timeframes['mtd']['start_date']
-            mtd_end = amazon_timeframes['mtd']['end_date']
-            amazon_mtd = get_amazon_summary_metrics(mtd_start, mtd_end)
-            if amazon_mtd.get('available', False):
-                logger.info(f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, Range={amazon_mtd['date_range']}")
-            else:
-                logger.warning("No Amazon data available for MTD")
+            if wtd_timeframe.get('start_date') and wtd_timeframe.get('end_date'):
+                amazon_wtd = get_amazon_summary_metrics(
+                    _tf_start(wtd_timeframe), _tf_end(wtd_timeframe)
+                )
+                if amazon_wtd.get('available', False):
+                    logger.info(
+                        f"Extracted Amazon WTD metrics: Revenue=₹{amazon_wtd['revenue']:.2f}, "
+                        f"Spend=₹{amazon_wtd['spend']:.2f}, Orders={amazon_wtd['orders']}, "
+                        f"Range={amazon_wtd['date_range']}"
+                    )
+                else:
+                    logger.warning("No Amazon data available for WTD")
+
+            if mtd_timeframe.get('start_date') and mtd_timeframe.get('end_date'):
+                amazon_mtd = get_amazon_summary_metrics(
+                    _tf_start(mtd_timeframe), _tf_end(mtd_timeframe)
+                )
+                if amazon_mtd.get('available', False):
+                    logger.info(
+                        f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, "
+                        f"Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, "
+                        f"Range={amazon_mtd['date_range']}"
+                    )
+                else:
+                    logger.warning("No Amazon data available for MTD")
         except Exception as e:
             logger.warning(f"Could not extract Amazon metrics: {e}")
         
@@ -2649,7 +2640,148 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 "<p><em>Channel Performance chart (last 7 days) unavailable.</em></p>"
             )
         
-        email_body = f"""
+        # Build rich HTML email from Jinja2 template
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from report_renderer import render_email_wtd_mtd
+
+            _ch_display = {'meta_ads': 'Meta Ads', 'google_ads': 'Google Ads', 'organic': 'Organic'}
+            wtd_ch_data = summary_data.get('wtd', {}).get('channels', {})
+            mtd_ch_data = summary_data.get('mtd', {}).get('channels', {})
+
+            def _ch_row(d):
+                rev = float(d.get('revenue', 0))
+                spend = float(d.get('spend', 0))
+                cogs = float(d.get('cogs', 0))
+                return {
+                    'sales': rev,
+                    'cogs': cogs,
+                    'ad_spend': spend,
+                    'net_profit': float(d.get('net_profit', 0)),
+                    'net_roas': float(d.get('net_roas', (rev - cogs) / spend if spend > 0 else 0.0)),
+                    'order_count': int(d.get('orders', 0)),
+                    'units': int(d.get('quantity') or 0),
+                }
+
+            def _amazon_row(a):
+                """Amazon channel row from the ClickHouse Amazon summary (revenue, cogs,
+                spend, net_profit, net_roas, orders, units)."""
+                if not a:
+                    return None
+                rev = float(a.get('revenue', 0))
+                spend = float(a.get('spend', 0))
+                cogs = float(a.get('cogs', 0))
+                if rev == 0 and spend == 0 and cogs == 0:
+                    return None
+                return {
+                    'sales': rev,
+                    'cogs': cogs,
+                    'ad_spend': spend,
+                    'net_profit': float(a.get('net_profit', 0)),
+                    'net_roas': float(a.get('net_roas', (rev - cogs) / spend if spend > 0 else 0.0)),
+                    'order_count': int(a.get('orders', 0)),
+                    'units': int(a.get('units') or a.get('quantity') or 0),
+                }
+
+            def _build_channels(ch_data, amazon):
+                rows = [(_ch_display.get(k, k), _ch_row(v)) for k, v in ch_data.items()]
+                amz = _amazon_row(amazon)
+                if amz:
+                    rows.append(('Amazon', amz))
+                return rows
+
+            wtd_channels_ctx = _build_channels(wtd_ch_data, amazon_wtd)
+            mtd_channels_ctx = _build_channels(mtd_ch_data, amazon_mtd)
+
+            def _total_row(channel_rows):
+                rev = sum(r['sales'] for _, r in channel_rows)
+                cogs = sum(r['cogs'] for _, r in channel_rows)
+                spend = sum(r['ad_spend'] for _, r in channel_rows)
+                return {
+                    'sales': rev,
+                    'cogs': cogs,
+                    'ad_spend': spend,
+                    'net_profit': sum(r['net_profit'] for _, r in channel_rows),
+                    'net_roas': (rev - cogs) / spend if spend > 0 else 0.0,
+                    'order_count': sum(r['order_count'] for _, r in channel_rows),
+                    'units': sum(r['units'] for _, r in channel_rows),
+                }
+
+            wtd_total_ctx = _total_row(wtd_channels_ctx)
+            mtd_total_ctx = _total_row(mtd_channels_ctx)
+
+            # Performance efficiency comparison (CPO / CPU / AOV), WTD vs MTD, computed from
+            # the channel totals (incl. Amazon) shown above.
+            def _pct_change(wtd_val, mtd_val, is_cost=True):
+                if not mtd_val:
+                    return 'N/A', ''
+                change = ((wtd_val - mtd_val) / mtd_val) * 100
+                if abs(change) < 0.1:
+                    return '—', ''
+                arrow = '↑' if change > 0 else '↓'
+                if is_cost:
+                    bg = '#e8f5e9' if change < 0 else '#ffebee'
+                else:
+                    bg = '#e8f5e9' if change > 0 else '#ffebee'
+                return f"{arrow} {abs(change):.1f}%", bg
+
+            def _eff(total):
+                rev, spend = total['sales'], total['ad_spend']
+                orders, units = total['order_count'], total['units']
+                return {
+                    'cpo': spend / orders if orders > 0 else 0.0,
+                    'cpu': spend / units if units > 0 else 0.0,
+                    'aov': rev / orders if orders > 0 else 0.0,
+                }
+
+            _we, _me = _eff(wtd_total_ctx), _eff(mtd_total_ctx)
+
+            def _eff_row(label, key, is_cost):
+                change_text, change_bg = _pct_change(_we[key], _me[key], is_cost)
+                return {'label': label, 'wtd': _we[key], 'mtd': _me[key],
+                        'change': change_text, 'change_bg': change_bg}
+
+            efficiency_ctx = [
+                _eff_row('Cost Per Order (CPO)', 'cpo', True),
+                _eff_row('Cost Per Unit (CPU)', 'cpu', True),
+                _eff_row('Average Order Value (AOV)', 'aov', False),
+            ]
+
+            # Headline company totals come from the canonical /historical/time-patterns
+            # figures (same as the daily report) when available, so WTD/MTD agrees with
+            # daily. Per-channel rows below remain channel-contribution detail. Falls back
+            # to channel sums if the canonical API call returned nothing.
+            def _headline_totals(ch_data, canonical):
+                canonical = canonical or {}
+                return {
+                    'total_revenue': canonical.get('revenue', sum(v.get('revenue', 0) for v in ch_data.values())),
+                    'net_profit': canonical.get('net_profit', sum(v.get('net_profit', 0) for v in ch_data.values())),
+                    'ad_spend': canonical.get('ad_spend', sum(v.get('spend', 0) for v in ch_data.values())),
+                    'order_count': sum(v.get('orders', 0) for v in ch_data.values()),
+                }
+
+            wtd_totals = _headline_totals(wtd_ch_data, summary_data.get('wtd', {}).get('canonical_totals'))
+            mtd_totals = _headline_totals(mtd_ch_data, summary_data.get('mtd', {}).get('canonical_totals'))
+
+            email_ctx = {
+                'report_date': today_str,
+                'weekday': weekday,
+                'wtd_range': summary_data.get('wtd', {}).get('timeframe', ''),
+                'mtd_range': summary_data.get('mtd', {}).get('timeframe', ''),
+                'wtd': wtd_totals,
+                'mtd': mtd_totals,
+                'wtd_channels': wtd_channels_ctx,
+                'mtd_channels': mtd_channels_ctx,
+                'wtd_total': wtd_total_ctx,
+                'mtd_total': mtd_total_ctx,
+                'efficiency': efficiency_ctx,
+                'wtd_campaigns': [],
+            }
+            email_body = render_email_wtd_mtd(email_ctx)
+        except Exception as _tmpl_err:
+            logger.warning(f"WTD/MTD email template render failed: {_tmpl_err}; using fallback")
+            email_body = f"""
         <html>
         <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 1200px; margin: 0 auto;">
             <p style="font-size: 14px;">Dear Team,</p>
@@ -2657,16 +2789,13 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             <ul style="font-size: 14px;">
                 <li><strong>WTD/MTD Report:</strong> Week-to-Date, Month-to-Date, and Daily entity summary</li>
                 <li><strong>Daily Report:</strong> Detailed report for {yesterday_str}</li>
-                <li><strong>Amazon Report:</strong> Campaign performance for {two_days_ago_str} (2 days earlier)</li>
                 <li><strong>Product Profitability:</strong> Product profitability for {yesterday_str}</li>
             </ul>
-            
             {summary_html}
-            
+
             {channel_performance_html}
-            
+
             {daily_performers_html}
-            
             <p style="font-size: 12px; color: #666; margin-top: 30px; border-top: 1px solid #ddd; padding-top: 15px;">
                 This is an automated report. For questions, please contact the marketing team.
             </p>
@@ -2703,19 +2832,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             attachments.append(daily_attachment)
             logger.info(f"Added daily report to email: {daily_file_path}")
         
-        # Add Amazon report attachment if available
-        if amazon_file_path:
-            with open(amazon_file_path, "rb") as f:
-                amazon_content = base64.b64encode(f.read()).decode('utf-8')
-            
-            amazon_attachment = {
-                "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": f"Amazon_Campaign_Report_{two_days_ago_str}.xlsx",
-                "contentBytes": amazon_content
-            }
-            attachments.append(amazon_attachment)
-            logger.info(f"Added Amazon report to email: {amazon_file_path}")
-        
         # Add Product Profitability report attachment if available (previous day)
         if product_profitability_file_path and os.path.exists(product_profitability_file_path):
             try:
@@ -2731,38 +2847,10 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Failed to add Product Profitability to email: {e}")
         
-        # Add WTD PDF attachment if available
-        if pdf_paths and pdf_paths.get('wtd') and os.path.exists(pdf_paths['wtd']):
-            try:
-                with open(pdf_paths['wtd'], "rb") as f:
-                    wtd_pdf_content = base64.b64encode(f.read()).decode('utf-8')
-                
-                wtd_pdf_attachment = {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": f"WTD_Meta_Campaigns_Report_{today_str}.pdf",
-                    "contentBytes": wtd_pdf_content
-                }
-                attachments.append(wtd_pdf_attachment)
-                logger.info(f"Added WTD PDF report to email: {pdf_paths['wtd']}")
-            except Exception as e:
-                logger.warning(f"Failed to add WTD PDF to email: {e}")
-        
-        # Add MTD PDF attachment if available
-        if pdf_paths and pdf_paths.get('mtd') and os.path.exists(pdf_paths['mtd']):
-            try:
-                with open(pdf_paths['mtd'], "rb") as f:
-                    mtd_pdf_content = base64.b64encode(f.read()).decode('utf-8')
-                
-                mtd_pdf_attachment = {
-                    "@odata.type": "#microsoft.graph.fileAttachment",
-                    "name": f"MTD_Meta_Campaigns_Report_{today_str}.pdf",
-                    "contentBytes": mtd_pdf_content
-                }
-                attachments.append(mtd_pdf_attachment)
-                logger.info(f"Added MTD PDF report to email: {pdf_paths['mtd']}")
-            except Exception as e:
-                logger.warning(f"Failed to add MTD PDF to email: {e}")
-        
+        # NOTE: Per report spec, only three report files are attached — WTD/MTD Entity,
+        # Daily Entity, and Product Profitability. Amazon Campaign and the WTD/MTD Meta
+        # Campaigns PDFs are intentionally not attached.
+
         # Prepare email message
         message = {
             "message": {
@@ -2856,7 +2944,7 @@ def generate_wtd_mtd_pdf_reports(out_dir: str = None) -> dict:
 
     # Last 7 days channel chart for WTD/MTD email only (not daily — that is in the daily marketing email)
     try:
-        chart_end = (datetime.now(IST) - timedelta(days=1)).date()
+        chart_end = (_report_now() - timedelta(days=1)).date()
         channel_chart_path = os.path.join(
             out_dir,
             f"channel_performance_last_7_days_{chart_end}.png",
@@ -3057,7 +3145,7 @@ def main():
             logger.info("Starting daily report generation for previous day...")
             
             # Calculate yesterday's date
-            now = datetime.now(IST)
+            now = _report_now()
             yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
             
             # Generate daily report for yesterday using dailyrollup.py
@@ -3110,7 +3198,7 @@ def main():
         channel_plot_path = pdf_paths.get("channel_chart") if pdf_paths else None
         if not channel_plot_path:
             try:
-                report_end = (datetime.now(IST) - timedelta(days=1)).date()
+                report_end = (_report_now() - timedelta(days=1)).date()
                 channel_plot_path = os.path.join(
                     get_report_dir(),
                     f"channel_performance_last_7_days_{report_end}.png",

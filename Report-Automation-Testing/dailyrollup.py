@@ -6,13 +6,12 @@ import xlsxwriter
 import numpy as np
 from timeframe_config import get_timeframe_config
 from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_shopify_sales_orders_detail
-from database_manager import get_db_engine
 from revenue_gst import apply_net_revenue, apply_net_revenue_column
 
 # Preferred funnel-based column order
 FUNNEL_ORDER: list[str] = [
     # Meta delivery
-    'date_start', 'channel', 'campaign_name', 'campaign_status', 'adset_name', 'ad_name',
+    'date_start', 'channel', 'campaign_name', 'adset_name', 'ad_name',
     'net_profit',
     'clicks',
     'ctr',
@@ -44,6 +43,47 @@ def order_columns_by_funnel(df: pd.DataFrame, include_sku: bool = False) -> list
     remainder = [c for c in df.columns if c not in present_preferred]
     return present_preferred + remainder
 
+
+def drop_internal_id_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove internal ID fields from presentation/export sheets.
+    Keep these columns in intermediate dataframes for joins/enrichment only.
+    """
+    if df is None or df.empty:
+        return df
+    id_cols = [
+        "campaign_id",
+        "adset_id",
+        "ad_id",
+        "entity_id",
+        "order_item_id",
+        "product_id",
+        "variant_id",
+        "item_id",
+    ]
+    present = [c for c in id_cols if c in df.columns]
+    return df.drop(columns=present) if present else df
+
+
+def _meta_attributed_orders_total(start_date: str, end_date: str) -> int:
+    """
+    Return the exact Meta order total used by the channel performance section.
+    This keeps the Meta funnel's final "Orders" stage aligned with the PDF
+    channel table even when /v1/meta-funnel reports a narrower session-based
+    order count.
+    """
+    try:
+        from api_data_fetcher import fetch_historical_dashboard
+        from metric_calculators import channel_metrics_from_historical_dashboard
+
+        data = fetch_historical_dashboard(start_date, end_date)
+        if not data:
+            return 0
+        metrics = channel_metrics_from_historical_dashboard(data)
+        return int((metrics.get('meta') or {}).get('order_count', 0) or 0)
+    except Exception:
+        return 0
+
 # Columns to round to 2 decimals for presentation
 RATE_COLS: list[str] = [
     'ctr', 'bounce_rate', 'gross_roas', 'net_roas', 'profit_margin', 'conversion_rate', 'be_roas'
@@ -52,99 +92,6 @@ MONEY_COLS: list[str] = [
     'spend', 'shopify_revenue', 'shopify_cogs', 'net_profit',
     'unit_price', 'unit_cost', 'sku_revenue', 'sku_cogs'
 ]
-
-def fetch_campaign_statuses(campaign_ids: list[int], campaign_names: list[str] = None, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    """
-    Fetch campaign statuses from meta_entity_status_history table.
-    Matches by campaign name (entity_name) since campaign IDs may not match between tables.
-    
-    Args:
-        campaign_ids: List of campaign IDs from attribution (used for mapping results back)
-        campaign_names: List of campaign names for matching (required)
-        start_date: Start date for status lookup (optional)
-        end_date: End date for status lookup (optional)
-    
-    Returns:
-        DataFrame with columns: campaign_id, campaign_status (effective_status)
-    """
-    if not campaign_names or not campaign_ids:
-        return pd.DataFrame(columns=['campaign_id', 'campaign_status'])
-    
-    try:
-        engine = get_db_engine()
-        
-        # Build query to get current status for each campaign
-        # Get the most recent status where valid_to IS NULL or covers the date range
-        if not start_date or not end_date:
-            today = get_timeframe_config()['today']
-            start_date = start_date or today
-            end_date = end_date or today
-        
-        # Ensure campaign_ids are valid
-        campaign_ids_bigint = []
-        for cid in campaign_ids:
-            if cid is not None and str(cid).strip() != '':
-                try:
-                    campaign_ids_bigint.append(int(cid))
-                except (ValueError, TypeError):
-                    continue
-        
-        if not campaign_ids_bigint or len(campaign_names) != len(campaign_ids_bigint):
-            return pd.DataFrame(columns=['campaign_id', 'campaign_status'])
-        
-        # Create a mapping from normalized campaign name to campaign ID
-        campaign_name_to_id = {}
-        for idx, name in enumerate(campaign_names):
-            if idx < len(campaign_ids_bigint) and name and str(name).strip():
-                # Normalize name for matching (remove extra spaces, case insensitive)
-                normalized = str(name).strip().upper()
-                campaign_name_to_id[normalized] = campaign_ids_bigint[idx]
-        
-        if not campaign_name_to_id:
-            return pd.DataFrame(columns=['campaign_id', 'campaign_status'])
-        
-        # Query by entity_name (campaign name)
-        name_placeholders = ','.join(['%s'] * len(campaign_name_to_id))
-        name_sql = f"""
-            SELECT DISTINCT ON (entity_id)
-                entity_id,
-                entity_name,
-                effective_status as campaign_status
-            FROM public.meta_entity_status_history
-            WHERE entity_level = 'campaign'
-                AND UPPER(TRIM(entity_name)) IN ({name_placeholders})
-                AND (
-                    valid_to IS NULL 
-                    OR (valid_to >= %s::date AND valid_from <= %s::date)
-                )
-            ORDER BY entity_id, valid_from DESC
-        """
-        name_params = tuple(campaign_name_to_id.keys()) + (start_date, end_date)
-        name_df = pd.read_sql(name_sql, engine, params=name_params)
-        
-        # Map back to original campaign_ids from attribution
-        result_rows = []
-        if not name_df.empty:
-            for _, row in name_df.iterrows():
-                entity_name_norm = str(row['entity_name']).strip().upper() if pd.notna(row['entity_name']) else ''
-                if entity_name_norm in campaign_name_to_id:
-                    original_campaign_id = campaign_name_to_id[entity_name_norm]
-                    result_rows.append({
-                        'campaign_id': original_campaign_id,
-                        'campaign_status': row['campaign_status']
-                    })
-        
-        if result_rows:
-            df = pd.DataFrame(result_rows)
-        else:
-            df = pd.DataFrame(columns=['campaign_id', 'campaign_status'])
-        
-        return df
-    except Exception as e:
-        print(f"[Campaign Status] Error fetching campaign statuses: {e}")
-        import traceback
-        traceback.print_exc()
-        return pd.DataFrame(columns=['campaign_id', 'campaign_status'])
 
 def round_for_output(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -202,6 +149,47 @@ def _append_spend_to_google_rows(df: pd.DataFrame, total_spend: float) -> pd.Dat
         return df
     except Exception:
         return df
+
+
+def _normalize_product_details_list(product_details: str | dict | list | None) -> list[dict]:
+    """Parse product_details into a list of order/line dicts."""
+    if product_details is None:
+        return []
+    try:
+        if isinstance(product_details, list):
+            data = product_details
+        elif isinstance(product_details, dict):
+            if 'skus' in product_details and 'summary' in product_details:
+                data = [product_details]
+            else:
+                data = [product_details]
+        else:
+            s = str(product_details).strip()
+            try:
+                data = json.loads(s)
+            except Exception:
+                s2 = s.encode('utf-8').decode('unicode_escape')
+                data = json.loads(s2)
+            if not isinstance(data, list):
+                data = [data]
+        return [item for item in data if isinstance(item, dict)]
+    except Exception:
+        return []
+
+
+def _merge_product_details_orders(product_details_values) -> list[dict]:
+    """Merge hourly product_details payloads, keeping one copy of each order_id."""
+    by_order_id: dict[str, dict] = {}
+    anon_idx = 0
+    for product_details in product_details_values:
+        for order in _normalize_product_details_list(product_details):
+            order_id = order.get('order_id') or order.get('order_name')
+            key = str(order_id) if order_id else f'__anon_{anon_idx}'
+            if not order_id:
+                anon_idx += 1
+            by_order_id[key] = order
+    return list(by_order_id.values())
+
 
 def parse_product_details(product_details: str | dict | list, attributed_revenue: float = 0.0, attributed_cogs: float = 0.0, attributed_quantity: int = 0) -> list[dict]:
     """
@@ -261,13 +249,45 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
         
         cleaned = []
         
+        # Flat Shopify line-item list (organic channel-attribution items[])
+        if (
+            isinstance(data, list)
+            and data
+            and isinstance(data[0], dict)
+            and data[0].get("sku")
+            and "skus" not in data[0]
+            and "order_id" not in data[0]
+        ):
+            sku_metadata = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                sku_code = item.get("sku") or item.get("seller_sku")
+                if not sku_code:
+                    continue
+                sku_metadata.append({
+                    "sku": str(sku_code),
+                    "vendor": str(item.get("vendor", "Unknown")),
+                    "quantity": int(item.get("quantity") or item.get("quantity_ordered") or 1),
+                    "product_title": str(item.get("product_title") or item.get("product_name") or item.get("title") or item.get("name") or "Unknown Product"),
+                    "variant_title": str(item.get("variant_title") or item.get("name") or sku_code),
+                })
+                if item.get("unit_price") is not None:
+                    sku_metadata[-1]["unit_price"] = float(item.get("unit_price") or item.get("price") or 0)
+                if item.get("unit_cost") is not None or item.get("cogs") is not None:
+                    sku_metadata[-1]["unit_cost"] = float(item.get("unit_cost") or item.get("cogs") or item.get("net_cogs") or 0)
+            if sku_metadata:
+                data = [{"skus": sku_metadata}] if use_attribution_mode else data
+        
         if use_attribution_mode:
             # ATTRIBUTION MODE: Extract metadata, distribute attributed values
             sku_metadata = []
             for order in data:
                 if not isinstance(order, dict):
                     continue
-                
+
+                order_handled = False
+
                 # Check if this is standard format (has 'skus' array)
                 if 'skus' in order and isinstance(order['skus'], list) and len(order['skus']) > 0:
                     first_sku = order['skus'][0] if order['skus'] else None
@@ -289,6 +309,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                                 if 'unit_cost' in sku_obj:
                                     sku_meta['unit_cost'] = float(sku_obj.get('unit_cost', 0) or 0)
                                 sku_metadata.append(sku_meta)
+                        order_handled = True
                     elif isinstance(first_sku, str):
                         # Legacy format: skus array contains SKU strings only
                         for sku_code in order['skus']:
@@ -300,7 +321,36 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                                     'product_title': f'Product {sku_code}',
                                     'variant_title': str(sku_code),
                                 })
-                else:
+                        order_handled = True
+
+                # v1 attribution API: order objects carry Shopify line_items, not skus[]
+                if not order_handled:
+                    line_items = order.get("line_items") or order.get("items") or []
+                    if line_items:
+                        for item in line_items:
+                            if not isinstance(item, dict):
+                                continue
+                            sku_code = item.get("sku") or item.get("seller_sku")
+                            if not sku_code:
+                                continue
+                            qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                            sku_metadata.append({
+                                'sku': str(sku_code),
+                                'vendor': str(item.get('vendor', 'Unknown')),
+                                'quantity': qty if qty > 0 else 1,
+                                'product_title': str(
+                                    item.get('product_title')
+                                    or item.get('title')
+                                    or item.get('name')
+                                    or 'Unknown Product'
+                                ),
+                                'variant_title': str(
+                                    item.get('variant_title') or item.get('name') or sku_code
+                                ),
+                            })
+                        order_handled = True
+
+                if not order_handled:
                     # No SKUs in product_details - extract from legacy format if available
                     skus_list = order.get('skus', [])
                     if skus_list and skus_list != [None]:
@@ -366,6 +416,65 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
             # DIRECT MODE: Use revenue/COGS values from product_details directly
             for order in data:
                 if not isinstance(order, dict):
+                    continue
+
+                # Single line-item dict (flat list from some API payloads)
+                if order.get("sku") and not order.get("line_items") and not order.get("items") and not order.get("skus"):
+                    item = order
+                    sku_code = item.get("sku") or item.get("seller_sku")
+                    if sku_code:
+                        qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                        qty_safe = qty if qty > 0 else 1
+                        up_gross = float(item.get("unit_price") or item.get("price") or 0)
+                        sr_gross = float(item.get("sku_revenue") or item.get("line_value") or item.get("total") or 0)
+                        base_rev = sr_gross if sr_gross else up_gross * qty_safe
+                        sr = apply_net_revenue(base_rev)
+                        up = sr / qty_safe if qty_safe else apply_net_revenue(up_gross)
+                        cleaned.append({
+                            "sku": str(sku_code),
+                            "vendor": str(item.get("vendor", "Unknown")),
+                            "quantity": qty if qty > 0 else 1,
+                            "sku_cogs": float(item.get("sku_cogs") or item.get("cogs") or item.get("net_cogs") or 0),
+                            "unit_cost": float(item.get("unit_cost") or item.get("cogs") or item.get("net_cogs") or 0),
+                            "unit_price": up,
+                            "sku_revenue": sr,
+                            "product_title": str(item.get("product_title") or item.get("product_name") or item.get("title") or "Unknown Product"),
+                            "variant_title": str(item.get("variant_title") or item.get("name") or sku_code),
+                        })
+                    continue
+
+                line_items = order.get("line_items") or order.get("items") or []
+                if line_items:
+                    for item in line_items:
+                        if not isinstance(item, dict):
+                            continue
+                        sku_code = item.get("sku") or item.get("seller_sku")
+                        if not sku_code:
+                            continue
+                        qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                        qty_safe = qty if qty > 0 else 1
+                        up_gross = float(item.get("unit_price") or item.get("price") or 0)
+                        sr_gross = float(
+                            item.get("sku_revenue")
+                            or item.get("line_value")
+                            or item.get("total")
+                            or item.get("item_revenue")
+                            or 0
+                        )
+                        base_rev = sr_gross if sr_gross else up_gross * qty_safe
+                        sr = apply_net_revenue(base_rev)
+                        up = sr / qty_safe if qty_safe else apply_net_revenue(up_gross)
+                        cleaned.append({
+                            "sku": str(sku_code),
+                            "vendor": str(item.get("vendor", "Unknown")),
+                            "quantity": qty if qty > 0 else 1,
+                            "sku_cogs": float(item.get("sku_cogs") or item.get("cogs") or item.get("net_cogs") or 0),
+                            "unit_cost": float(item.get("unit_cost") or item.get("cogs") or item.get("net_cogs") or 0),
+                            "unit_price": up,
+                            "sku_revenue": sr,
+                            "product_title": str(item.get("product_title") or item.get("title") or item.get("name") or "Unknown Product"),
+                            "variant_title": str(item.get("variant_title") or item.get("name") or sku_code),
+                        })
                     continue
                 
                 # Check if this is standard format (has 'skus' array with full SKU objects)
@@ -478,7 +587,7 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or 'product_details' not in df.columns:
         return pd.DataFrame()
 
-    # Determine data source
+    df = df.copy()
     data_source = None
     if not df.empty and 'source' in df.columns:
         data_source = df['source'].iloc[0] if len(df) > 0 else None
@@ -495,11 +604,75 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
     if data_source == 'Organic':
         # Organic data doesn't have adset_name, ad_name
         id_cols = ['date_start','hour','channel','campaign_name']
+        ad_group_cols = ['date_start','channel','campaign_name']
     else:
         # Meta/Google data has full hierarchy
         id_cols = ['date_start','hour','channel','campaign_name','adset_name','ad_name']
+        ad_group_cols = ['date_start','channel','campaign_name','adset_name','ad_name']
     
     id_cols = [c for c in id_cols if c in df.columns]
+    ad_group_cols = [c for c in ad_group_cols if c in df.columns]
+
+    if data_source == 'Google Ads' and ad_group_cols:
+        # Google: collapse to campaign/day and dedupe orders (direct-mode parse).
+        if 'attributed_orders_count' in df.columns:
+            df['attributed_orders_count'] = pd.to_numeric(
+                df['attributed_orders_count'], errors='coerce'
+            ).fillna(0)
+        attr_df = df[df.get('attributed_orders_count', 0) > 0].copy()
+        if attr_df.empty:
+            return pd.DataFrame()
+
+        google_group_cols = [c for c in ['date_start', 'channel', 'campaign_name'] if c in df.columns]
+        for _, group in attr_df.groupby(google_group_cols, dropna=False):
+            merged_orders = _merge_product_details_orders(group['product_details'])
+            skus = parse_product_details(merged_orders, 0.0, 0.0, 0)
+            if not skus:
+                continue
+            base = {c: group.iloc[0][c] for c in google_group_cols}
+            for s in skus:
+                sku_rows.append({**base, **s})
+        return pd.DataFrame(sku_rows) if sku_rows else pd.DataFrame()
+
+    if data_source in ['Meta Ads', 'Organic'] and ad_group_cols:
+        # Collapse hourly rows to ad/day grain: the API repeats the day's orders in
+        # product_details on every hour row, so row-wise parsing over-counts SKUs.
+        numeric_attr = {
+            'attributed_orders_revenue': 0.0,
+            'attributed_orders_cogs': 0.0,
+            'attributed_orders_quantity': 0,
+            'attributed_orders_count': 0,
+        }
+        for col, default in numeric_attr.items():
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(default)
+
+        has_attr = (
+            (df.get('attributed_orders_count', 0) > 0)
+            | (df.get('attributed_orders_quantity', 0) > 0)
+            | (df.get('attributed_orders_revenue', 0) > 0)
+        )
+        attr_df = df[has_attr].copy()
+        if attr_df.empty:
+            return pd.DataFrame()
+
+        for _, group in attr_df.groupby(ad_group_cols, dropna=False):
+            attributed_revenue = apply_net_revenue(float(group['attributed_orders_revenue'].sum()))
+            attributed_cogs = float(group['attributed_orders_cogs'].sum())
+            attributed_quantity = int(group['attributed_orders_quantity'].sum())
+            merged_orders = _merge_product_details_orders(group['product_details'])
+            skus = parse_product_details(
+                merged_orders,
+                attributed_revenue=attributed_revenue,
+                attributed_cogs=attributed_cogs,
+                attributed_quantity=attributed_quantity,
+            )
+            if not skus:
+                continue
+            base = {c: group.iloc[0][c] for c in ad_group_cols}
+            for s in skus:
+                sku_rows.append({**base, **s})
+        return pd.DataFrame(sku_rows) if sku_rows else pd.DataFrame()
 
     for idx, row in df.iterrows():
         product_details = row.get('product_details')
@@ -513,6 +686,12 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
             attributed_revenue = apply_net_revenue(float(row.get('attributed_orders_revenue', 0) or 0))
             attributed_cogs = float(row.get('attributed_orders_cogs', 0) or 0)
             attributed_quantity = int(row.get('attributed_orders_quantity', 0) or 0)
+            attributed_orders = int(row.get('attributed_orders_count', 0) or 0)
+            # Hourly rows often carry the day's product_details even when that hour
+            # has zero attributed orders. Parsing those rows in direct mode duplicates
+            # every SKU once per hour and inflates quantity (e.g. 5 units -> 55).
+            if attributed_orders == 0 and attributed_quantity == 0 and attributed_revenue == 0:
+                continue
         else:
             # Google: Use product_details directly (pass 0 to use values from product_details)
             attributed_revenue = 0.0
@@ -665,11 +844,68 @@ def transform_attribution_data(df: pd.DataFrame) -> pd.DataFrame:
         if col in transformed.columns:
             transformed[col] = pd.to_numeric(transformed[col], errors='coerce').fillna(0)
 
-    for _rev_col in ('attributed_orders_revenue', 'shopify_revenue'):
-        if _rev_col in transformed.columns:
-            transformed[_rev_col] = apply_net_revenue_column(transformed[_rev_col])
+    # NOTE: revenue from the v1 attribution API is ALREADY ex-GST (the backend's
+    # net_sales / attributed_orders_revenue; the tax-inclusive value is a
+    # separate field). Applying apply_net_revenue_column (÷1.18) here double-nets
+    # GST and understates revenue ~18%, so meta_ads_rollup no longer reconciled
+    # with the dashboard/email channel cards (e.g. 51,902.55 vs the correct
+    # 61,245.01). Left un-adjusted so it matches /v1/pnl/summary and the KPI strip.
+    # (Was: apply_net_revenue_column on attributed_orders_revenue / shopify_revenue.)
 
     return transformed
+
+
+def _fetch_meta_funnel_by_ad(start_date: str, end_date: str) -> tuple[dict, dict]:
+    """Real on-site funnel metrics per ad_id from GET /v1/meta-funnel.
+
+    Returns ({ad_id: {sessions, landing_page_views, add_to_cart, checkout_start,
+    bounce_rate, conversion_rate}}, summary). The attribution API carries no
+    landing-page/product-view counts, so the old (clicks - LPV)/clicks bounce
+    rate collapsed to a fake 100; this sources the canonical session-funnel
+    numbers instead (docs/data_sources_cannonical.md §3).
+    """
+    try:
+        from entity_report import _meta_funnel_maps
+        return _meta_funnel_maps(start_date, end_date)
+    except Exception as e:
+        print(f"[Meta Funnel] fetch failed; keeping attribution-derived funnel: {e}")
+        return {}, {}
+
+
+def build_channel_summary_from_marketing_df(df: pd.DataFrame) -> dict:
+    """Channel-performance buckets (meta/google/organic) derived from the SAME
+    attribution DataFrame the entity-report sheets are built from.
+
+    This lets the email Channel Performance rows reconcile with the entity report
+    by construction: identical source, identical aggregation. Revenue is the
+    attributed order revenue (net of returns/cancels; on days with none it equals
+    gross). Returns {channel: enrich_channel_bucket(...)} matching the
+    get_dashboard_pdf_metrics channel contract. The all-up P&L 'total' and
+    'amazon' rows are intentionally left to the caller (they include Amazon and
+    event-date returns and are not the sum of these channels).
+    """
+    from metric_calculators import enrich_channel_bucket
+
+    empty = enrich_channel_bucket(0, 0, 0, 0)
+    if df is None or df.empty:
+        return {"meta": dict(empty), "google": dict(empty), "organic": dict(empty)}
+
+    t = transform_attribution_data(df)
+
+    def _sum(frame, col):
+        return float(pd.to_numeric(frame[col], errors="coerce").fillna(0).sum()) if col in frame.columns else 0.0
+
+    out = {}
+    for key, src in (("meta", "Meta Ads"), ("google", "Google Ads"), ("organic", "Organic")):
+        sub = t[t.get("source") == src]
+        out[key] = enrich_channel_bucket(
+            sales=_sum(sub, "shopify_revenue"),
+            ad_spend=(_sum(sub, "spend") if key != "organic" else 0.0),
+            cogs=_sum(sub, "shopify_cogs"),
+            order_count=int(_sum(sub, "shopify_orders")),
+        )
+    return out
+
 
 def build_meta_ads_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -731,7 +967,7 @@ def build_meta_ads_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
         metrics_first = [
             'impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
             'shopify_orders','total_sku_quantity','shopify_revenue','shopify_cogs','spend',
-            'campaign_id','campaign_status'
+            'ad_id','bounce_rate'
         ]
         # No summation for ad-level spend/revenue/cogs to avoid double counting across SKU rows
         revenue_sum = []
@@ -752,10 +988,10 @@ def build_meta_ads_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
             agg_map[c] = 'first'
         out = out.groupby(group_keys, dropna=False).agg(agg_map).reset_index()
 
-        # Recompute derived metrics from sums (keep original CTR from metrics)
-        if 'clicks' in out.columns and '_landing_page_view' in out.columns:
-            denom = out['clicks'].replace(0, pd.NA)
-            out['bounce_rate'] = ((out['clicks'] - out['_landing_page_view']) / denom * 100).fillna(0).clip(lower=0, upper=100)
+        # Recompute derived metrics from sums (keep original CTR from metrics).
+        # NOTE: bounce_rate is NOT recomputed here — it is the real session-funnel
+        # value carried from build_meta_ads_rollup (via meta-funnel by ad_id). The
+        # old (clicks - _landing_page_view)/clicks formula produced a fake ~100.
         if '_initiate_checkout' in out.columns and '_landing_page_view' in out.columns:
             denom_vc = out['_landing_page_view'].replace(0, pd.NA)
         if 'shopify_revenue' in out.columns and 'spend' in out.columns:
@@ -972,37 +1208,6 @@ def build_meta_ads_rollup(df: pd.DataFrame) -> pd.DataFrame:
                    meta_df.get(on_ic, pd.Series([0]*len(meta_df))).fillna(0))
     )
     
-    # Fetch campaign statuses if campaign_id is available
-    campaign_status_df = pd.DataFrame()
-    if 'campaign_id' in meta_df.columns:
-        try:
-            # Get unique campaign IDs, names, and date range
-            # Create a mapping from campaign_id to campaign_name
-            if 'campaign_name' in meta_df.columns:
-                campaign_id_to_name = meta_df[['campaign_id', 'campaign_name']].dropna(subset=['campaign_id']).drop_duplicates(subset=['campaign_id'])
-                unique_campaign_ids = campaign_id_to_name['campaign_id'].unique().tolist()
-                # Create ordered list of names matching the IDs
-                unique_campaign_names = campaign_id_to_name.set_index('campaign_id')['campaign_name'].to_dict()
-                # Convert to list in same order as IDs
-                unique_campaign_names_list = [unique_campaign_names.get(cid) for cid in unique_campaign_ids]
-            else:
-                unique_campaign_ids = meta_df['campaign_id'].dropna().unique().tolist()
-                unique_campaign_names_list = None
-            
-            if unique_campaign_ids:
-                start_date_str = str(meta_df['date_start'].min()) if 'date_start' in meta_df.columns else None
-                end_date_str = str(meta_df['date_start'].max()) if 'date_start' in meta_df.columns else None
-                campaign_status_df = fetch_campaign_statuses(
-                    campaign_ids=unique_campaign_ids,
-                    campaign_names=unique_campaign_names_list,
-                    start_date=start_date_str,
-                    end_date=end_date_str
-                )
-        except Exception as e:
-            print(f"[Campaign Status] Error fetching campaign statuses: {e}")
-            import traceback
-            traceback.print_exc()
-    
     # Group by campaign hierarchy
     group_cols = [
         'date_start','channel','campaign_name','adset_name','ad_name'
@@ -1021,48 +1226,33 @@ def build_meta_ads_rollup(df: pd.DataFrame) -> pd.DataFrame:
         '_add_to_cart':'sum',
         '_initiate_checkout':'sum',
     }
-    # Add campaign_id as 'first' if available (for status join)
-    if 'campaign_id' in meta_df.columns:
-        agg_dict['campaign_id'] = 'first'
-    
+    # Add ad_id as 'first' if available (for real funnel join by ad_id)
+    if 'ad_id' in meta_df.columns:
+        agg_dict['ad_id'] = 'first'
+
     present_agg = {k:v for k,v in agg_dict.items() if k in meta_df.columns}
     
     rollup = meta_df.groupby(present_group_cols, dropna=False).agg(present_agg).reset_index()
     
-    # Join campaign status if available
-    if not campaign_status_df.empty and 'campaign_id' in rollup.columns:
-        # Ensure campaign_id types match for join
-        rollup['campaign_id'] = pd.to_numeric(rollup['campaign_id'], errors='coerce')
-        campaign_status_df['campaign_id'] = pd.to_numeric(campaign_status_df['campaign_id'], errors='coerce')
-        
-        rollup = rollup.merge(
-            campaign_status_df[['campaign_id', 'campaign_status']],
-            on='campaign_id',
-            how='left'
-        )
-        rollup['campaign_status'] = rollup['campaign_status'].fillna('')
+    # CTR: derive from summed clicks/impressions (percentage scale, matches campaign rollup)
+    if {'clicks', 'impressions'}.issubset(rollup.columns):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ctr_calc = (
+                pd.to_numeric(rollup['clicks'], errors='coerce')
+                / pd.to_numeric(rollup['impressions'], errors='coerce')
+            ) * 100
+        rollup['ctr'] = pd.to_numeric(ctr_calc, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
     else:
-        rollup['campaign_status'] = ''
-    
-    # Derived metrics (exact same logic as dailyrollup_orig.py)
-    # CTR: take from table if available; compute weighted average by impressions
-    if 'ctr' in meta_df.columns and 'impressions' in meta_df.columns:
-        # compute weighted CTR: sum(ctr * impressions) / sum(impressions)
-        def weighted_ctr(g):
-            imp = g['impressions'].sum()
-            if imp and not pd.isna(imp) and imp != 0:
-                return ((g['ctr'] * g['impressions']).sum() / imp)
-            return 0
-        ctr_series = meta_df.groupby(present_group_cols, dropna=False).apply(weighted_ctr, include_groups=False).reset_index(name='ctr')
-        rollup = rollup.merge(ctr_series, on=present_group_cols, how='left')
-    elif 'impressions' in rollup.columns and 'clicks' in rollup.columns:
-        rollup['ctr'] = (rollup['clicks'] / rollup['impressions']).fillna(0)
+        rollup['ctr'] = 0
     
     if 'spend' in rollup.columns and 'shopify_revenue' in rollup.columns:
         rollup['gross_roas'] = (rollup['shopify_revenue'] / rollup['spend']).replace([pd.NA, pd.NaT], 0).fillna(0)
     if 'shopify_revenue' in rollup.columns and 'shopify_cogs' in rollup.columns and 'spend' in rollup.columns:
         rollup['net_profit'] = (rollup['shopify_revenue'] - rollup['shopify_cogs'] - rollup['spend']).fillna(0)
         rollup['profit_margin'] = (rollup['net_profit'] / rollup['shopify_revenue']).replace([pd.NA, pd.NaT], 0).fillna(0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            net = (rollup['shopify_revenue'] - rollup['shopify_cogs']) / rollup['spend']
+        rollup['net_roas'] = pd.to_numeric(net, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
     
     # Rates requested (exact same logic as dailyrollup_orig.py)
     if 'clicks' in rollup.columns and '_landing_page_view' in rollup.columns:
@@ -1073,7 +1263,40 @@ def build_meta_ads_rollup(df: pd.DataFrame) -> pd.DataFrame:
     if '_initiate_checkout' in rollup.columns and '_landing_page_view' in rollup.columns:
         denom_vc = rollup['_landing_page_view'].replace(0, pd.NA)
         cvr = (rollup['_initiate_checkout'] / denom_vc) * 100
-    
+
+    # --- Real on-site funnel metrics (override attribution-derived values) ---
+    # Join /v1/meta-funnel by ad_id: real landing-page views, add-to-cart,
+    # checkout starts and (crucially) the real session bounce rate — replacing
+    # the fake 100 that came from (clicks - 0)/clicks because attribution has no
+    # landing-page counts. Ads not present in the funnel keep their prior values.
+    if 'ad_id' in rollup.columns and 'date_start' in meta_df.columns:
+        try:
+            _fs = str(meta_df['date_start'].min())[:10]
+            _fe = str(meta_df['date_start'].max())[:10]
+            by_ad, _ = _fetch_meta_funnel_by_ad(_fs, _fe)
+            if by_ad:
+                ids = rollup['ad_id'].astype(str).tolist()
+
+                def _funnel_col(field, fallback_col):
+                    fb = rollup[fallback_col].tolist() if fallback_col in rollup.columns else [0.0] * len(ids)
+                    out = []
+                    for i, a in enumerate(ids):
+                        if a in by_ad:
+                            out.append(by_ad[a][field])
+                        else:
+                            try:
+                                out.append(float(fb[i] or 0))
+                            except (TypeError, ValueError):
+                                out.append(0.0)
+                    return out
+
+                rollup['_landing_page_view'] = _funnel_col('landing_page_views', '_landing_page_view')
+                rollup['_add_to_cart'] = _funnel_col('add_to_cart', '_add_to_cart')
+                rollup['_initiate_checkout'] = _funnel_col('checkout_start', '_initiate_checkout')
+                rollup['bounce_rate'] = _funnel_col('bounce_rate', 'bounce_rate')
+        except Exception as _funnel_exc:
+            print(f"[Meta Funnel] enrichment skipped: {_funnel_exc}")
+
     # Order columns with funnel order (without SKU fields at this level)
     cols = order_columns_by_funnel(rollup, include_sku=False)
     # Sort rows for readability
@@ -1084,142 +1307,82 @@ def build_meta_ads_rollup(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_meta_campaigns_rollup(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build Meta campaigns rollup at campaign level.
+    Build Meta campaigns rollup at campaign level by aggregating ad-level rollup.
+    Deriving from ad rollup ensures spend/revenue/orders reconcile with meta_ads_rollup.
     """
-    if df.empty:
+    ad_rollup = build_meta_ads_rollup(df)
+    if ad_rollup.empty:
         return pd.DataFrame()
-    
-    # Filter for Meta Ads only
-    meta_df = df[df['source'] == 'Meta Ads'].copy()
-    if meta_df.empty:
-        return pd.DataFrame()
-    
-    # Transform the data
-    meta_df = transform_attribution_data(meta_df)
-    
-    # Fetch campaign statuses if campaign_id is available
-    campaign_status_df = pd.DataFrame()
-    if 'campaign_id' in meta_df.columns:
-        try:
-            # Get unique campaign IDs, names, and date range
-            # Create a mapping from campaign_id to campaign_name
-            if 'campaign_name' in meta_df.columns:
-                campaign_id_to_name = meta_df[['campaign_id', 'campaign_name']].dropna(subset=['campaign_id']).drop_duplicates(subset=['campaign_id'])
-                unique_campaign_ids = campaign_id_to_name['campaign_id'].unique().tolist()
-                # Create ordered list of names matching the IDs
-                unique_campaign_names = campaign_id_to_name.set_index('campaign_id')['campaign_name'].to_dict()
-                # Convert to list in same order as IDs
-                unique_campaign_names_list = [unique_campaign_names.get(cid) for cid in unique_campaign_ids]
-            else:
-                unique_campaign_ids = meta_df['campaign_id'].dropna().unique().tolist()
-                unique_campaign_names_list = None
-            
-            if unique_campaign_ids:
-                start_date_str = str(meta_df['date_start'].min()) if 'date_start' in meta_df.columns else None
-                end_date_str = str(meta_df['date_start'].max()) if 'date_start' in meta_df.columns else None
-                campaign_status_df = fetch_campaign_statuses(
-                    campaign_ids=unique_campaign_ids,
-                    campaign_names=unique_campaign_names_list,
-                    start_date=start_date_str,
-                    end_date=end_date_str
-                )
-        except Exception as e:
-            print(f"[Campaign Status] Error fetching campaign statuses: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    # Group by campaign level
-    group_cols = [c for c in ['date_start','channel','campaign_name'] if c in meta_df.columns]
+
+    group_cols = [c for c in ['date_start', 'channel', 'campaign_name'] if c in ad_rollup.columns]
     if not group_cols:
         return pd.DataFrame()
-    
-    # Ensure numeric columns (exclude 'ctr' as it should be recalculated, not summed)
+
     numeric_cols = [
-        'impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-        '_landing_page_view','_initiate_checkout','_add_to_cart'
+        'impressions', 'clicks', 'spend', 'shopify_orders', 'shopify_revenue', 'shopify_cogs',
+        '_landing_page_view', '_initiate_checkout', '_add_to_cart',
     ]
     for col in numeric_cols:
-        if col in meta_df.columns:
-            meta_df[col] = pd.to_numeric(meta_df[col], errors='coerce').fillna(0)
-    
-    # Include campaign_id in aggregation if available (for status join)
-    agg_dict = {col: 'sum' for col in numeric_cols if col in meta_df.columns}
-    if 'campaign_id' in meta_df.columns:
-        agg_dict['campaign_id'] = 'first'
-    
-    summed = meta_df.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
-    
-    # Join campaign status if available
-    if not campaign_status_df.empty and 'campaign_id' in summed.columns:
-        # Ensure campaign_id types match for join
-        summed['campaign_id'] = pd.to_numeric(summed['campaign_id'], errors='coerce')
-        campaign_status_df['campaign_id'] = pd.to_numeric(campaign_status_df['campaign_id'], errors='coerce')
-        
-        summed = summed.merge(
-            campaign_status_df[['campaign_id', 'campaign_status']],
-            on='campaign_id',
-            how='left'
-        )
-        summed['campaign_status'] = summed['campaign_status'].fillna('')
-    else:
-        summed['campaign_status'] = ''
-    
-    # Recalculate funnel metrics from sums
-    # CTR: calculate from aggregated clicks and impressions
-    if {'clicks','impressions'}.issubset(summed.columns):
+        if col in ad_rollup.columns:
+            ad_rollup[col] = pd.to_numeric(ad_rollup[col], errors='coerce').fillna(0)
+
+    agg_dict = {col: 'sum' for col in numeric_cols if col in ad_rollup.columns}
+    summed = ad_rollup.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+
+    # Recalculate rate metrics from summed base columns (weighted, never averaged)
+    if {'clicks', 'impressions'}.issubset(summed.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
-            ctr_calc = (pd.to_numeric(summed['clicks'], errors='coerce') / pd.to_numeric(summed['impressions'], errors='coerce')) * 100
+            ctr_calc = (
+                pd.to_numeric(summed['clicks'], errors='coerce')
+                / pd.to_numeric(summed['impressions'], errors='coerce')
+            ) * 100
         summed['ctr'] = pd.to_numeric(ctr_calc, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
     else:
         summed['ctr'] = 0
-    if {'shopify_revenue','spend'}.issubset(summed.columns):
+    if {'shopify_revenue', 'spend'}.issubset(summed.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
             g = pd.to_numeric(summed['shopify_revenue'], errors='coerce') / pd.to_numeric(summed['spend'], errors='coerce')
         summed['gross_roas'] = pd.to_numeric(g, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
-    if {'shopify_revenue','shopify_cogs','spend'}.issubset(summed.columns):
+    if {'shopify_revenue', 'shopify_cogs', 'spend'}.issubset(summed.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
-            n = (pd.to_numeric(summed['shopify_revenue'], errors='coerce') - pd.to_numeric(summed['shopify_cogs'], errors='coerce')) / pd.to_numeric(summed['spend'], errors='coerce')
+            n = (
+                pd.to_numeric(summed['shopify_revenue'], errors='coerce')
+                - pd.to_numeric(summed['shopify_cogs'], errors='coerce')
+            ) / pd.to_numeric(summed['spend'], errors='coerce')
         summed['net_roas'] = pd.to_numeric(n, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
         with np.errstate(divide='ignore', invalid='ignore'):
-            b = (pd.to_numeric(summed['shopify_cogs'], errors='coerce') + pd.to_numeric(summed['spend'], errors='coerce')) / pd.to_numeric(summed['spend'], errors='coerce')
+            b = (
+                pd.to_numeric(summed['shopify_cogs'], errors='coerce')
+                + pd.to_numeric(summed['spend'], errors='coerce')
+            ) / pd.to_numeric(summed['spend'], errors='coerce')
         summed['be_roas'] = pd.to_numeric(b, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
-        # Calculate net profit: revenue - cogs - spend
-        summed['net_profit'] = (pd.to_numeric(summed['shopify_revenue'], errors='coerce') - 
-                               pd.to_numeric(summed['shopify_cogs'], errors='coerce') - 
-                               pd.to_numeric(summed['spend'], errors='coerce')).fillna(0)
-    # Conversion rate: purchases / clicks * 100
-    if {'shopify_orders','clicks'}.issubset(summed.columns):
+        summed['net_profit'] = (
+            pd.to_numeric(summed['shopify_revenue'], errors='coerce')
+            - pd.to_numeric(summed['shopify_cogs'], errors='coerce')
+            - pd.to_numeric(summed['spend'], errors='coerce')
+        ).fillna(0)
+    if {'shopify_orders', 'clicks'}.issubset(summed.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
-            cr = (pd.to_numeric(summed['shopify_orders'], errors='coerce') / pd.to_numeric(summed['clicks'], errors='coerce')) * 100
+            cr = (
+                pd.to_numeric(summed['shopify_orders'], errors='coerce')
+                / pd.to_numeric(summed['clicks'], errors='coerce')
+            ) * 100
         summed['conversion_rate'] = pd.to_numeric(cr, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
-    
-    # Calculate bounce_rate from aggregated data
-    if {'clicks', '_landing_page_view'}.issubset(summed.columns):
-        # Calculate bounce_rate: (clicks - landing_page_views) / clicks * 100
-        denom = summed['clicks'].replace(0, pd.NA)
-        bounce = ((summed['clicks'] - summed['_landing_page_view']) / denom) * 100
-        summed['bounce_rate'] = bounce.fillna(0).clip(lower=0, upper=100)
-    else:
-        summed['bounce_rate'] = 0
-    
-    
-    # Select and order requested columns when present
+
     desired = [
-        'date_start','channel','campaign_name','campaign_status',
+        'date_start', 'channel', 'campaign_name',
         'net_profit',
         'clicks',
         'ctr',
-        'spend','shopify_revenue','shopify_cogs',
-        'bounce_rate',
-        'gross_roas','net_roas','be_roas','conversion_rate'
+        'spend', 'shopify_revenue', 'shopify_cogs',
+        'gross_roas', 'net_roas', 'be_roas', 'conversion_rate',
     ]
     present = [c for c in desired if c in summed.columns]
     out = summed[present].copy()
     out = round_for_output(out)
-    # Sort by net_roas descending, then by keys for stability
     if 'net_roas' in out.columns:
-        secondary = [c for c in ['date_start','channel','campaign_name'] if c in out.columns]
-        out = out.sort_values(['net_roas'] + secondary, ascending=[False] + [True]*len(secondary)).reset_index(drop=True)
+        secondary = [c for c in ['date_start', 'channel', 'campaign_name'] if c in out.columns]
+        out = out.sort_values(['net_roas'] + secondary, ascending=[False] + [True] * len(secondary)).reset_index(drop=True)
     return out
 
 def build_google_campaigns_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
@@ -1231,6 +1394,16 @@ def build_google_campaigns_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
     metrics = build_google_campaigns_rollup(df)
     # Get SKU-level rollup for Google campaigns
     sku_rollup = build_ad_sku_rollup(df[df['source'] == 'Google Ads'])
+    if not sku_rollup.empty:
+        sku_group = ['date_start', 'channel', 'campaign_name', 'sku']
+        sku_group = [c for c in sku_group if c in sku_rollup.columns]
+        sku_rollup = sku_rollup.groupby(sku_group, dropna=False).agg({
+            'sku_revenue': 'sum',
+            'sku_cogs': 'sum',
+            'quantity': 'sum',
+            'unit_price': 'first',
+            'unit_cost': 'first',
+        }).reset_index()
     
     # Normalize key columns to ensure grouping/merging works even with stray spaces/case
     key_cols = ['date_start','channel','campaign_name','sku']
@@ -1300,6 +1473,16 @@ def build_organic_campaigns_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
         organic_df['campaign_name'] = organic_df['campaign_name'].fillna('Organic Traffic')
     
     sku_rollup = build_ad_sku_rollup(organic_df)
+    if not sku_rollup.empty:
+        sku_group = ['date_start', 'channel', 'campaign_name', 'sku']
+        sku_group = [c for c in sku_group if c in sku_rollup.columns]
+        sku_rollup = sku_rollup.groupby(sku_group, dropna=False).agg({
+            'sku_revenue': 'sum',
+            'sku_cogs': 'sum',
+            'quantity': 'sum',
+            'unit_price': 'first',
+            'unit_cost': 'first',
+        }).reset_index()
     
     # Normalize key columns to ensure grouping/merging works even with stray spaces/case
     key_cols = ['date_start','channel','campaign_name','sku']
@@ -1382,18 +1565,13 @@ def build_google_campaigns_rollup(df: pd.DataFrame) -> pd.DataFrame:
     summed = google_df.groupby(group_cols, dropna=False)[numeric_cols].sum().reset_index()
     
     # Recalculate funnel metrics from sums (same logic as Meta campaigns)
-    # CTR: Take campaign-wise average from database CTR column (same approach as WTD/MTD)
-    if 'ctr' in google_df.columns:
-        ctr_avg = google_df.groupby(group_cols, dropna=False)['ctr'].mean().reset_index()
-        # For Google Ads: CTR is stored as decimal (0-1), multiply by 100 for percentage
-        ctr_avg['ctr'] = ctr_avg['ctr'] * 100  # Convert to percentage
-        summed = summed.merge(ctr_avg[group_cols + ['ctr']], on=group_cols, how='left')
-        summed['ctr'] = summed['ctr'].fillna(0)
-    elif {'clicks','impressions'}.issubset(summed.columns):
-        # Fallback: Calculate from aggregated clicks/impressions if CTR column not available
+    # CTR: weighted clicks/impressions — API ctr is already a percentage, never average it
+    if {'clicks','impressions'}.issubset(summed.columns):
         with np.errstate(divide='ignore', invalid='ignore'):
-            ctr_calc = (pd.to_numeric(summed['clicks'], errors='coerce') / pd.to_numeric(summed['impressions'], errors='coerce'))
+            ctr_calc = (pd.to_numeric(summed['clicks'], errors='coerce') / pd.to_numeric(summed['impressions'], errors='coerce')) * 100
         summed['ctr'] = pd.to_numeric(ctr_calc, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+    else:
+        summed['ctr'] = 0
     
     # Calculate bounce rate (same logic as Meta campaigns)
     if {'clicks','_landing_page_view'}.issubset(summed.columns):
@@ -1681,13 +1859,15 @@ def get_meta_funnel_metrics(start_date: str | None = None, end_date: str | None 
             if col in meta_df.columns:
                 meta_df[col] = pd.to_numeric(meta_df[col], errors='coerce').fillna(0)
 
+        attributed_orders_total = _meta_attributed_orders_total(s, e)
+
         # Calculate totals for Meta channel
         impressions = float(meta_df['impressions'].sum()) if 'impressions' in meta_df.columns else 0.0
         clicks = float(meta_df['clicks'].sum()) if 'clicks' in meta_df.columns else 0.0
         landing_page_views = float(meta_df['_landing_page_view'].sum()) if '_landing_page_view' in meta_df.columns else 0.0
         add_to_cart = float(meta_df['_add_to_cart'].sum()) if '_add_to_cart' in meta_df.columns else 0.0
         checkout = float(meta_df['_initiate_checkout'].sum()) if '_initiate_checkout' in meta_df.columns else 0.0
-        orders = float(meta_df['shopify_orders'].sum()) if 'shopify_orders' in meta_df.columns else 0.0
+        orders = float(attributed_orders_total)
         revenue = float(meta_df['shopify_revenue'].sum()) if 'shopify_revenue' in meta_df.columns else 0.0
         cogs = float(meta_df['shopify_cogs'].sum()) if 'shopify_cogs' in meta_df.columns else 0.0
         spend = float(meta_df['spend'].sum()) if 'spend' in meta_df.columns else 0.0
@@ -1815,19 +1995,17 @@ def get_campaign_grand_total_for_pdf(start_date: str | None = None, end_date: st
             meta_df['_initiate_checkout'] = 0
 
         # Build Meta campaign-level rollup to get proper Meta totals
+        ad_rollup = build_meta_ads_rollup(meta_df)
         meta_campaign_level = build_meta_campaigns_rollup(meta_df)
-        
-        # Use Meta campaign-level data for corrected spend and metrics
-        if not meta_campaign_level.empty:
-            # Get corrected spend from Meta campaign_level
-            spend = float(meta_campaign_level['spend'].sum()) if 'spend' in meta_campaign_level.columns else 0.0
-            # Get base metrics from Meta raw data for accurate calculations
-            impressions = float(meta_df['impressions'].sum()) if 'impressions' in meta_df.columns else 0.0
-            clicks = float(meta_df['clicks'].sum()) if 'clicks' in meta_df.columns else 0.0
-            orders = float(meta_df['shopify_orders'].sum()) if 'shopify_orders' in meta_df.columns else 0.0
-            revenue = float(meta_df['shopify_revenue'].sum()) if 'shopify_revenue' in meta_df.columns else 0.0
-            cogs = float(meta_df['shopify_cogs'].sum()) if 'shopify_cogs' in meta_df.columns else 0.0
-        else:
+
+        if not ad_rollup.empty:
+            spend = float(ad_rollup['spend'].sum()) if 'spend' in ad_rollup.columns else 0.0
+            impressions = float(ad_rollup['impressions'].sum()) if 'impressions' in ad_rollup.columns else 0.0
+            clicks = float(ad_rollup['clicks'].sum()) if 'clicks' in ad_rollup.columns else 0.0
+            orders = float(ad_rollup['shopify_orders'].sum()) if 'shopify_orders' in ad_rollup.columns else 0.0
+            revenue = float(ad_rollup['shopify_revenue'].sum()) if 'shopify_revenue' in ad_rollup.columns else 0.0
+            cogs = float(ad_rollup['shopify_cogs'].sum()) if 'shopify_cogs' in ad_rollup.columns else 0.0
+        elif not meta_campaign_level.empty:
             # Fallback to Meta raw data if campaign_level is empty
             impressions = float(meta_df['impressions'].sum()) if 'impressions' in meta_df.columns else 0.0
             clicks = float(meta_df['clicks'].sum()) if 'clicks' in meta_df.columns else 0.0
@@ -1888,6 +2066,54 @@ def get_campaign_grand_total_for_pdf(start_date: str | None = None, end_date: st
             'gross_roas': 0.0, 'net_roas': 0.0, 'be_roas': 0.0, 'conversion_rate': 0.0,
             'net_profit': 0.0,
         }
+
+
+def _write_amazon_sp_sheet(writer, start_date_str: str, end_date_str: str, sheet_name: str = "amazon_sp", days_lag: int = 1) -> None:
+    """Write an Amazon SP (Seller Partner) line-item P&L sheet.
+
+    One row per (amazon_order_id, seller_sku) with order-level P&L allocated down
+    to each line. Reuses the proven builders in amazon_entity_report.py. Amazon gold
+    tables lag ~1 day, so the window end is shifted back by days_lag; if that makes a
+    single-day (today) report invalid, the last complete day is used instead.
+    """
+    try:
+        from datetime import datetime as _dt, timedelta as _td
+        from amazon_entity_report import (
+            fetch_amazon_sp_items_gold,
+            fetch_amazon_sp_orders_gold,
+            fetch_amazon_sp_order_pnl_gold,
+            _build_sp_line_items_display,
+            _apply_sp_sheet_formatting,
+        )
+
+        s = _dt.strptime(str(start_date_str)[:10], "%Y-%m-%d")
+        e = _dt.strptime(str(end_date_str)[:10], "%Y-%m-%d") - _td(days=days_lag)
+        if e < s:
+            s = e  # single last-complete day (respect the ~1-day gold lag)
+        ss, ee = s.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")
+
+        items = fetch_amazon_sp_items_gold(ss, ee)
+        orders = fetch_amazon_sp_orders_gold(ss, ee)
+        pnl = fetch_amazon_sp_order_pnl_gold(ss, ee)
+        sp_display = _build_sp_line_items_display(items, orders, pnl)
+
+        if sp_display is not None and not sp_display.empty:
+            sp_display = round_for_output(sp_display)
+            sp_display.to_excel(writer, sheet_name=sheet_name, index=False)
+            try:
+                _apply_sp_sheet_formatting(writer, sheet_name, sp_display)
+            except Exception as fe:
+                print(f"[Amazon SP] formatting error: {fe}")
+            print(f"[Amazon SP] Wrote {len(sp_display)} line items for {ss} to {ee}")
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+            print(f"[Amazon SP] No data for {ss} to {ee}; wrote empty sheet")
+    except Exception as ex:
+        print(f"[Amazon SP] Error building sheet: {ex}")
+        try:
+            pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+        except Exception:
+            pass
 
 
 def _write_sales_report_sheet(writer, start_date_str: str, end_date_str: str) -> None:
@@ -1954,9 +2180,11 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
             # pd.DataFrame().to_excel(writer, sheet_name='raw_google_data', index=False)
             # pd.DataFrame().to_excel(writer, sheet_name='raw_organic_data', index=False)
             _write_sales_report_sheet(writer, s, e)
+            _write_amazon_sp_sheet(writer, s, e)
         return xlsx_path
 
     # Build rollups
+    meta_ads_base = build_meta_ads_rollup(df)
     meta_ads_rollup = build_meta_ads_rollup_with_sku(df)
     meta_campaigns = build_meta_campaigns_rollup(df)
     google_campaigns = build_google_campaigns_rollup_with_sku(df)
@@ -1996,7 +2224,7 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
         # Meta ads rollup sheet (similar to ad_rollup from dailyrollup_orig.py)
         if not meta_ads_rollup.empty:
             # Sort by net_roas descending, then by hierarchy for proper merging of repeated values
-            key_cols_for_merge = ['date_start','channel','campaign_name','campaign_status','adset_name','ad_name']
+            key_cols_for_merge = ['date_start','channel','campaign_name','adset_name','ad_name']
             sort_cols = []
             if 'net_roas' in meta_ads_rollup.columns:
                 sort_cols.append('net_roas')
@@ -2008,8 +2236,8 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
             
             # Add Grand Total row with proper aggregation logic
             try:
-                # Use original data for accurate totals
-                src = meta_ads_rollup.copy()
+                # Use ad-level rollup (pre-SKU) for accurate totals that match meta_campaigns
+                src = meta_ads_base.copy()
                 # Normalize types with better error handling
                 numeric_cols = ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
                                'shopify_orders','spend','shopify_revenue','shopify_cogs','total_sku_quantity',
@@ -2019,18 +2247,15 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                         src[c] = pd.to_numeric(src[c], errors='coerce').fillna(0)
                 
                 ad_keys = [c for c in ['date_start','channel','campaign_name','adset_name','ad_name'] if c in src.columns]
-                # Sum non-SKU metrics from unique ad rows to avoid double-counting
-                dedup_ads = src.drop_duplicates(subset=ad_keys) if ad_keys else src
                 non_sku_cols = [c for c in ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
                                             'shopify_orders','spend','shopify_revenue','shopify_cogs','total_sku_quantity'] if c in src.columns]
-                sku_cols = [c for c in ['quantity'] if c in src.columns]  # Only sum quantity, not unit prices
-                
-                # Use pandas sum() for better precision, then convert to float for final storage
+                sku_cols = [c for c in ['quantity'] if c in meta_ads_rollup.columns]
+
                 total_map = {}
                 for c in non_sku_cols:
-                    total_map[c] = float(dedup_ads[c].sum())
-                for c in sku_cols:
                     total_map[c] = float(src[c].sum())
+                for c in sku_cols:
+                    total_map[c] = float(meta_ads_rollup[c].sum())
                 
                 # Compute derived totals with proper error handling (matching campaign rollup methodology)
                 with np.errstate(divide='ignore', invalid='ignore'):
@@ -2093,6 +2318,18 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                 
                 # Append total row
                 meta_ads_sorted = pd.concat([meta_ads_sorted, pd.DataFrame([total_row])], ignore_index=True)
+
+                # Override the Grand Total bounce rate with the real session-weighted
+                # value from /v1/meta-funnel (the total_map version above is the fake
+                # (clicks - LPV)/clicks ~100). Per-ad rows already carry the real value.
+                try:
+                    _, _fsum = _fetch_meta_funnel_by_ad(s, e)
+                    if 'bounce_rate' in meta_ads_sorted.columns and _fsum and _fsum.get('avg_bounce_rate') is not None:
+                        meta_ads_sorted.loc[meta_ads_sorted.index[-1], 'bounce_rate'] = max(
+                            0.0, min(100.0, float(_fsum.get('avg_bounce_rate') or 0))
+                        )
+                except Exception as _bexc:
+                    print(f"[Meta Ads Grand Total] Real bounce override skipped: {_bexc}")
             except Exception as e:
                 print(f"[Meta Ads Grand Total] Error calculating grand total: {e}")
                 # Continue without grand total rather than failing silently
@@ -2109,9 +2346,10 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                 'unit_cost': 'sku_unit_cogs',
             }
             meta_ads_rounded = meta_ads_rounded.rename(columns={k:v for k,v in rename_map.items() if k in meta_ads_rounded.columns})
+            meta_ads_rounded = drop_internal_id_columns(meta_ads_rounded)
             
             # Drop vendor, product_title, variant_title, profit_margin, total_sku_quantity, sku_revenue, sku_cogs, impressions, _landing_page_view, LPV for presentation
-            drop_cols = [c for c in ['vendor','product_title','variant_title','profit_margin','total_sku_quantity','sku_revenue','sku_cogs','impressions','_landing_page_view','LPV'] if c in meta_ads_rounded.columns]
+            drop_cols = [c for c in ['campaign_status','vendor','product_title','variant_title','profit_margin','total_sku_quantity','sku_revenue','sku_cogs','impressions','_landing_page_view','LPV','bounce_rate','Bounce Rate'] if c in meta_ads_rounded.columns]
             meta_ads_rounded = meta_ads_rounded.drop(columns=drop_cols)
             
             meta_ads_rounded.to_excel(writer, sheet_name='meta_ads_rollup', index=False)
@@ -2232,15 +2470,8 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
         if not meta_campaigns.empty:
             # Add Grand Total row with proper aggregation logic
             try:
-                # Use raw data for accurate totals (not the processed campaign data)
-                # Get the raw Meta data that was used to build the campaigns
-                meta_raw = df[df['source'] == 'Meta Ads'].copy()
-                if meta_raw.empty:
-                    # Fallback to campaign data if raw data not available
-                    src = meta_campaigns.copy()
-                else:
-                    # Transform the raw data to get the same column structure
-                    src = transform_attribution_data(meta_raw)
+                # Use ad-level rollup totals (matches sum of meta_campaigns rows)
+                src = meta_ads_base.copy()
                 
                 # Normalize types with better error handling
                 numeric_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
@@ -2262,13 +2493,6 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                         total_map['ctr'] = (total_map['clicks'] / total_map['impressions']) * 100
                     else:
                         total_map['ctr'] = 0.0
-                    
-                    # Bounce Rate: Use simple aggregation with clipping (same as campaign rollup)
-                    if 'clicks' in total_map and '_landing_page_view' in total_map and total_map['clicks'] > 0:
-                        bounce = ((total_map['clicks'] - total_map['_landing_page_view']) / total_map['clicks']) * 100
-                        total_map['bounce_rate'] = max(0, min(100, bounce))  # Clip between 0-100 like campaign rollup
-                    else:
-                        total_map['bounce_rate'] = 0.0
                     
                     if 'shopify_revenue' in total_map and 'spend' in total_map and total_map['spend'] > 0:
                         total_map['gross_roas'] = total_map['shopify_revenue'] / total_map['spend']
@@ -2312,7 +2536,7 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                 
                 # Copy numeric totals with validation
                 numeric_total_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                                     '_landing_page_view','_add_to_cart','_initiate_checkout','ctr','bounce_rate',
+                                     '_landing_page_view','_add_to_cart','_initiate_checkout','ctr',
                                      'gross_roas','net_roas','be_roas','conversion_rate','net_profit','profit_margin']
                 for c in numeric_total_cols:
                     if c in total_row and c in total_map:
@@ -2325,6 +2549,7 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                 # Continue without grand total rather than failing silently
             
             meta_campaigns_rounded = round_for_output(meta_campaigns)
+            meta_campaigns_rounded = drop_internal_id_columns(meta_campaigns_rounded)
             meta_campaigns_rounded.to_excel(writer, sheet_name='meta_campaigns', index=False)
             
             # Apply formatting and color schema
@@ -2356,18 +2581,6 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                         })
                         worksheet.conditional_format(1, profit_col, len(meta_campaigns_rounded), profit_col, {
                             'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-                
-                # Heatmap for Bounce Rate
-                try:
-                    if 'bounce_rate' in meta_campaigns_rounded.columns:
-                        bounce_col = meta_campaigns_rounded.columns.get_loc('bounce_rate')
-                        worksheet.conditional_format(1, bounce_col, len(meta_campaigns_rounded), bounce_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 1, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 100, 'max_color': '#D9EAFB'
                         })
                 except Exception:
                     pass
@@ -2427,8 +2640,12 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
             })
             
             # Drop vendor, product_title, variant_title, profit_margin, total_sku_quantity, sku_revenue, sku_cogs for presentation
-            drop_cols = [c for c in ['vendor','product_title','variant_title','profit_margin','total_sku_quantity','sku_revenue','sku_cogs'] if c in google_campaigns.columns]
+            drop_cols = [c for c in [
+                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity',
+                'sku_revenue', 'sku_cogs', 'sku_unit_price', 'sku_unit_cogs', 'sku_quantity',
+            ] if c in google_campaigns.columns]
             google_campaigns = google_campaigns.drop(columns=drop_cols)
+            google_campaigns = drop_internal_id_columns(google_campaigns)
             
             # Add Grand Total row with proper aggregation logic
             try:
@@ -2658,6 +2875,7 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                 'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity', 'unit_price', 'unit_cost',
             ] if c in organic_campaigns.columns]
             organic_campaigns = organic_campaigns.drop(columns=drop_cols)
+            organic_campaigns = drop_internal_id_columns(organic_campaigns)
             
             # Add Grand Total row with proper aggregation logic
             try:
@@ -2816,6 +3034,17 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
         #     pd.DataFrame().to_excel(writer, sheet_name='raw_organic_data', index=False)
 
         _write_sales_report_sheet(writer, s, e)
+        _write_amazon_sp_sheet(writer, s, e)
+
+        # Clean, attribution-sourced entity sheets (API-only, gold-backed).
+        # Gated so it can run alongside the legacy PG-fed sheets for A/B
+        # comparison; enable with ENTITY_REPORT_CLEAN=true. See entity_report.py.
+        if os.getenv("ENTITY_REPORT_CLEAN", "false").lower() in ("1", "true", "yes"):
+            try:
+                from entity_report import add_entity_sheets
+                add_entity_sheets(writer, s, e, round_for_output, sheet_prefix="clean_")
+            except Exception as _entity_exc:
+                logger.warning("Clean entity sheets skipped: %s", _entity_exc)
 
     return xlsx_path
 

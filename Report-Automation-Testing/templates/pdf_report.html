@@ -1,0 +1,416 @@
+{% macro dbar(half, neg) %}<table class="dbar"><tr>{% if neg %}<td width="{{ 50 - half }}%"></td><td class="fill-red" width="{{ half }}%"></td><td class="axis"></td><td width="50%"></td>{% else %}<td width="50%"></td><td class="axis"></td><td class="fill-green" width="{{ half }}%"></td><td width="{{ 50 - half }}%"></td>{% endif %}</tr></table>{% endmacro %}
+{% macro funnel_stage(row, divider=False) %}<td class="f-stage{{ ' divider' if divider else '' }}">{{ row.stage }}{% if row.has_rate %}<span class="f-rate">{% if row.rate_prefix %}{{ row.rate_prefix }} {% endif %}{{ row.rate | fmt_pct }}</span>{% endif %}</td><td class="f-count">{% if row.has_count %}{{ row.count | int | fmt_num }}{% else %}<span class="f-empty">&mdash;</span>{% endif %}</td><td class="f-drop">{% if row.has_drop_off %}{% if row.is_max_drop %}<span class="chip-drop-max">{{ row.drop_off | fmt_pct }}</span>{% else %}<span class="chip-drop">{{ row.drop_off | fmt_pct }}</span>{% endif %}{% else %}<span class="f-empty">&mdash;</span>{% endif %}</td>{% endmacro %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  /* ============================================================
+     PREMIUM EXECUTIVE PERFORMANCE REPORT
+     Rendered by xhtml2pdf (no flexbox/grid/box-shadow/gradients):
+     - "cards" = white cells with a page-coloured border (fake gutter)
+     - "shadows" = hairline borders + subtle tint
+     - all bars = table cells with width attributes
+     ============================================================ */
+  @page {
+    size: A4 portrait;
+    margin: 13mm 12mm 13mm 12mm;
+    /* CSS Paged Media footer (weasyprint): report meta + live page numbers */
+    @bottom-left {
+      content: "{{ report_title }}  \00B7  {{ date_range }}";
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 7pt; color: #9aa4b2; padding-top: 5px;
+    }
+    @bottom-right {
+      content: "Generated {{ report_time }} IST  \00B7  Page " counter(page) " of " counter(pages);
+      font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+      font-size: 7pt; color: #9aa4b2; padding-top: 5px;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 9pt;
+    color: #0f172a;
+    line-height: 1.4;
+    background: #eef1f5;
+    margin: 0; padding: 0;
+  }
+  .page-break { page-break-before: always; break-before: page; }
+
+  /* ---------- HEADER ---------- */
+  .header { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .header td { border: none; background: transparent; padding: 0; vertical-align: bottom; }
+  .brand { font-size: 6.8pt; color: #2563eb; text-transform: uppercase; letter-spacing: 1.6px; font-weight: 700; }
+  .doc-title { font-size: 17pt; font-weight: 700; color: #0f172a; padding-top: 2px; }
+  .doc-meta { font-size: 7.5pt; color: #64748b; padding-top: 3px; }
+  .report-chip {
+    display: inline-block; background: #eaf1fe; color: #2563eb;
+    font-size: 6.6pt; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px;
+    padding: 4px 9px;
+  }
+  .accent-rule { height: 2px; background: #2563eb; font-size: 0; line-height: 0; margin-bottom: 14px; }
+
+  /* ---------- SECTION LABEL & CARD ---------- */
+  .section-label {
+    font-size: 8.5pt; font-weight: 700; color: #0f172a;
+    letter-spacing: 0.3px; margin: 2px 0 7px;
+  }
+  .section-label .hint { font-weight: 400; color: #94a3b8; font-size: 7pt; letter-spacing: 0; }
+  .card {
+    width: 100%; border-collapse: separate; border-spacing: 0;
+    border: 1px solid #e7eaef; background: #ffffff; border-radius: 8px;
+    margin-bottom: 15px;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.05), 0 4px 10px rgba(15,23,42,0.04);
+  }
+  /* long campaign table lives outside a cell so it can break across pages */
+  .card-head-only {
+    border: 1px solid #e7eaef; border-bottom: none; margin-bottom: 0;
+    border-radius: 8px 8px 0 0;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.05);
+  }
+  .camp-wrap {
+    border: 1px solid #e7eaef; border-top: none; border-radius: 0 0 8px 8px;
+    box-shadow: 0 4px 10px rgba(15,23,42,0.04);
+  }
+  .card-head td {
+    background: #ffffff; border-bottom: 1px solid #eef1f5;
+    padding: 9px 12px 8px;
+  }
+  .card-title { font-size: 8.5pt; font-weight: 700; color: #0f172a; }
+  .card-sub { font-size: 7pt; color: #94a3b8; font-weight: 400; }
+  .card-body td { padding: 0; border: none; }
+  .card-body > td > table { margin: 0; }
+  .card-foot td {
+    font-size: 6.8pt; color: #94a3b8; font-style: italic;
+    text-align: center; padding: 6px 10px; border-top: 1px solid #f1f4f8; background: #fbfcfe;
+  }
+
+  /* ---------- KPI GRID (Executive Summary) ---------- */
+  .kpi-grid { width: 100%; border-collapse: separate; border-spacing: 8px; margin: 0 0 8px; }
+  .kpi-card {
+    background: #ffffff; border: 1px solid #e7eaef; border-radius: 8px;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.05), 0 4px 10px rgba(15,23,42,0.04);
+    padding: 11px 14px 12px; width: 25%; vertical-align: top;
+  }
+  .kpi-label { font-size: 6.4pt; color: #8a94a6; text-transform: uppercase; letter-spacing: 0.9px; font-weight: 700; }
+  .kpi-value { font-size: 16pt; font-weight: 700; color: #0f172a; padding-top: 5px; white-space: nowrap; letter-spacing: -0.3px; }
+  .kpi-sub { font-size: 6.3pt; color: #98a2b3; padding-top: 4px; }
+  .kpi-value.pos { color: #16a34a; }
+  .kpi-value.neg { color: #dc2626; }
+
+  /* ---------- GENERIC DATA TABLE ---------- */
+  .data { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .data th {
+    font-size: 6.6pt; font-weight: 700; color: #8a94a6; text-transform: uppercase; letter-spacing: 0.3px;
+    text-align: right; padding: 8px 6px 7px; background: #fbfcfe; border-bottom: 1px solid #e6e9ee;
+    vertical-align: middle;
+  }
+  .data th:first-child { text-align: left; padding-left: 12px; }
+  .data td {
+    font-size: 7.4pt; color: #334155; text-align: right; padding: 6px 6px;
+    border-bottom: 1px solid #f1f4f8; vertical-align: middle; white-space: nowrap;
+  }
+  .data td:first-child { text-align: left; font-weight: 600; color: #0f172a; padding-left: 12px; }
+  .data td.wrap { white-space: normal; line-height: 1.2; }
+  .pos { color: #16a34a; font-weight: 700; }
+  .neg { color: #dc2626; font-weight: 700; }
+  .warn { color: #d97706; font-weight: 700; }
+  .muted { color: #94a3b8; }
+  .best-row td { background: #f2fbf5; }
+  .tag-best {
+    font-size: 5.8pt; color: #16a34a; background: #dcfce7; font-weight: 700;
+    padding: 1px 4px; letter-spacing: 0.3px; text-transform: uppercase;
+  }
+  .total-row td {
+    background: #f4f6f9; color: #0f172a; font-weight: 700;
+    border-top: 1.5px solid #d7dde6; border-bottom: none; padding: 7px 7px;
+  }
+  .total-row td:first-child { color: #0f172a; }
+  .adjustment-row td {
+    background: #fff8ef; color: #b45309; font-style: italic;
+    border-top: 1px solid #fbe6c8; border-bottom: 1px solid #fbe6c8;
+  }
+  .adjustment-row td:first-child { color: #b45309; }
+
+  /* ---------- BARS ---------- */
+  .fill-green { background: #16a34a; } .fill-amber { background: #d97706; } .fill-red { background: #dc2626; }
+  .dbar { width: 100%; border-collapse: collapse; height: 8px; line-height: 0; }
+  .dbar td { height: 8px; border: none; padding: 0; font-size: 0; line-height: 0; }
+  .dbar .axis { background: #cbd5e1; width: 1px; }
+
+  /* ---------- FUNNEL ---------- */
+  .funnel { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .funnel-head td {
+    text-align: center; font-size: 7.6pt; font-weight: 700; color: #0f172a;
+    padding: 8px 6px 7px; background: #fbfcfe; border-bottom: 1px solid #e6e9ee;
+  }
+  .funnel-head .g { color: #6366f1; } .funnel-head .m { color: #2563eb; }
+  .funnel-sub th {
+    font-size: 6.4pt; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.3px;
+    padding: 5px 6px; background: #ffffff; border-bottom: 1px solid #eef1f5; text-align: right;
+  }
+  .funnel-sub th.l { text-align: left; }
+  .funnel td {
+    font-size: 7.2pt; color: #334155; padding: 5px 6px; border-bottom: 1px solid #f4f6f9; vertical-align: middle;
+  }
+  .funnel .f-stage { text-align: left; font-weight: 600; color: #0f172a; white-space: nowrap; }
+  .funnel .f-stage .f-rate { display: block; font-size: 6pt; color: #94a3b8; font-weight: 400; }
+  .funnel .f-count { text-align: right; white-space: nowrap; font-weight: 600; }
+  .funnel .f-drop { text-align: right; white-space: nowrap; }
+  .funnel .divider { border-left: 1px solid #e6e9ee; }
+  .chip-drop { font-size: 6.4pt; color: #d97706; font-weight: 700; }
+  .chip-drop-max { font-size: 6.4pt; color: #b91c1c; background: #fde3e3; font-weight: 700; padding: 1px 4px; }
+  .f-empty { color: #cbd5e1; }
+
+  /* ---------- NET ROAS GRADIENT CELLS ---------- */
+  .roas-grad-high { background: linear-gradient(90deg, #ffffff 0%, #dcfce7 100%); background-color: #e8f7ed; }
+  .roas-grad-mid  { background: linear-gradient(90deg, #ffffff 0%, #fef3c7 100%); background-color: #fef8e6; }
+  .roas-grad-low  { background: linear-gradient(90deg, #ffffff 0%, #fee2e2 100%); background-color: #fdecec; }
+
+  /* ---------- CAMPAIGNS (dashboard style) ---------- */
+  .campaign-section { page-break-before: always; break-before: page; }
+  .camp { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  .camp th {
+    font-size: 6.6pt; font-weight: 700; color: #8a94a6; text-transform: uppercase; letter-spacing: 0.3px;
+    text-align: right; padding: 8px 6px 7px; background: #fbfcfe; border-bottom: 1px solid #e6e9ee;
+    vertical-align: middle;
+  }
+  .camp th:first-child { text-align: left; padding-left: 12px; }
+  .camp td {
+    font-size: 7.4pt; color: #334155; text-align: right; padding: 6px 6px;
+    border-bottom: 1px solid #f1f4f8; vertical-align: middle; white-space: nowrap;
+  }
+  .camp td.c-name { text-align: left; font-weight: 600; color: #0f172a; white-space: normal; word-wrap: break-word; line-height: 1.2; padding-left: 12px; }
+  .seg-head td {
+    padding: 7px 12px; border-bottom: 1px solid #e6e9ee; background: #f8fafc;
+    font-size: 7.2pt; font-weight: 700; color: #0f172a;
+  }
+  .seg-name { font-size: 7.2pt; font-weight: 700; color: #0f172a; }
+  .seg-sub { font-size: 6.8pt; color: #94a3b8; font-weight: 400; }
+  .seg-share { font-size: 6.8pt; color: #64748b; font-weight: 600; }
+  .roas-cell { white-space: nowrap; text-align: right; }
+  .roas-val { font-weight: 700; font-size: 7.4pt; color: #0f172a; }
+  .sec-total td {
+    background: #f4f6f9; color: #0f172a; font-weight: 700;
+    border-top: 1.5px solid #d7dde6; border-bottom: none; padding: 7px 7px;
+  }
+  .sec-total td:first-child { text-align: left; padding-left: 12px; }
+  .sec-total .pct { font-size: 6.4pt; color: #94a3b8; font-weight: 600; }
+  .grand-total td {
+    background: #eef1f5; color: #0f172a; font-weight: 700;
+    border-top: 2px solid #d7dde6; border-bottom: none; padding: 8px 7px;
+  }
+  .grand-total td:first-child { text-align: left; padding-left: 12px; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<table class="header">
+  <tr>
+    <td>
+      <div class="brand">Seleric &middot; Marketing Intelligence</div>
+      <div class="doc-title">{{ report_title }}</div>
+      <div class="doc-meta">{{ date_range }} &nbsp;&middot;&nbsp; Generated {{ report_time }} IST</div>
+    </td>
+    <td align="right" style="width:26%;vertical-align:bottom;">
+      <div class="report-chip">{{ report_title.split(' ')[0] }} Report</div>
+    </td>
+  </tr>
+</table>
+<div class="accent-rule">&nbsp;</div>
+
+<!-- 1. EXECUTIVE SUMMARY -->
+<div class="section-label">Executive Summary <span class="hint">&mdash; headline performance</span></div>
+<table class="kpi-grid">
+  <tr>
+    <td class="kpi-card"><div class="kpi-label">Revenue</div><div class="kpi-value">{{ total.sales | fmt_inr }}</div><div class="kpi-sub">Net of GST</div></td>
+    <td class="kpi-card"><div class="kpi-label">Ad Spend</div><div class="kpi-value">{{ total.ad_spend | fmt_inr }}</div><div class="kpi-sub">Meta + Google + Amazon</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross Profit</div><div class="kpi-value">{{ total.gross_profit | fmt_inr }}</div><div class="kpi-sub">Revenue &minus; COGS</div></td>
+    <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">After COGS &amp; ad spend</div></td>
+  </tr>
+  <tr>
+    <td class="kpi-card"><div class="kpi-label">Blended ROAS</div><div class="kpi-value">{{ total.gross_roas | fmt_roas }}</div><div class="kpi-sub">Revenue / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Net ROAS</div><div class="kpi-value">{{ total.net_roas | fmt_roas }}</div><div class="kpi-sub">Contribution / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Net of returns / cancels</div></td>
+    <td class="kpi-card"><div class="kpi-label">Cost per Order</div><div class="kpi-value">{{ total.cpp | fmt_inr }}</div><div class="kpi-sub">Ad spend / order</div></td>
+  </tr>
+</table>
+
+<!-- 2. CHANNEL PERFORMANCE -->
+<table class="card">
+  <tr class="card-head"><td>
+    <span class="card-title">Channel Performance</span>
+    <span class="card-sub">&nbsp; Revenue, profitability &amp; efficiency by channel</span>
+  </td></tr>
+  <tr class="card-body"><td>
+    <table class="data">
+      <colgroup>
+        <col style="width:14%;"><col style="width:9.5%;"><col style="width:9.5%;"><col style="width:9%;">
+        <col style="width:10.5%;"><col style="width:10.5%;"><col style="width:8.5%;"><col style="width:8.5%;">
+        <col style="width:8%;"><col style="width:9.5%;">
+      </colgroup>
+      <thead><tr>
+        <th>Channel</th><th>Revenue</th><th>Ad Spend</th><th>COGS</th><th>Gross Profit</th>
+        <th>Net Profit</th><th>Blended</th><th>Net ROAS</th><th>Orders</th><th>CPO</th>
+      </tr></thead>
+      <tbody>
+        {% for ch_name, ch in channels %}
+        <tr class="{{ 'best-row' if ch_name == best_channel_name else '' }}">
+          <td>{{ ch_name }}{% if ch_name == best_channel_name %} <span class="tag-best">Top</span>{% endif %}</td>
+          <td>{{ ch.sales | fmt_inr_compact }}</td>
+          <td>{{ ch.ad_spend | fmt_inr_compact }}</td>
+          <td class="muted">{{ ch.cogs | fmt_inr_compact }}</td>
+          <td class="{{ 'pos' if (ch.sales - ch.cogs) >= 0 else 'neg' }}">{{ (ch.sales - ch.cogs) | fmt_inr_compact }}</td>
+          <td class="{{ 'pos' if ch.net_profit >= 0 else 'neg' }}">{{ ch.net_profit | fmt_inr_compact }}</td>
+          <td>{{ ch.gross_roas | fmt_roas }}</td>
+          <td class="{{ ch.net_roas | roas_grad }}">{{ ch.net_roas | fmt_roas }}</td>
+          <td>{{ ch.order_count | fmt_num }}</td>
+          <td>{{ ch.cpp | fmt_inr_compact }}</td>
+        </tr>
+        {% endfor %}
+        {% if returns_row and returns_row.show %}
+        <tr class="adjustment-row">
+          <td class="wrap">Returned / Cancelled{% if returns_row.cancelled_orders or returns_row.returned_orders %} <span style="font-size:5.8pt;font-weight:400;">({{ returns_row.cancelled_orders }} cancel{% if returns_row.cancelled_orders != 1 %}s{% endif %}{% if returns_row.returned_orders %}, {{ returns_row.returned_orders }} return{% if returns_row.returned_orders != 1 %}s{% endif %}{% endif %})</span>{% endif %}</td>
+          <td>{{ returns_row.total_amount | fmt_inr_compact }}</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td>{{ returns_row.order_count }}</td><td class="muted">&mdash;</td>
+        </tr>
+        {% endif %}
+        <tr class="total-row">
+          <td>Total</td>
+          <td>{{ total.sales | fmt_inr_compact }}</td>
+          <td>{{ total.ad_spend | fmt_inr_compact }}</td>
+          <td>{{ total.cogs | fmt_inr_compact }}</td>
+          <td>{{ (total.sales - total.cogs) | fmt_inr_compact }}</td>
+          <td class="{{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr_compact }}</td>
+          <td>{{ total.gross_roas | fmt_roas }}</td>
+          <td class="{{ total.net_roas | roas_grad }}">{{ total.net_roas | fmt_roas }}</td>
+          <td>{{ total.order_count | fmt_num }}</td>
+          <td>{{ total.cpp | fmt_inr_compact }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </td></tr>
+</table>
+
+<!-- 3. FUNNEL PERFORMANCE -->
+{% if meta_funnel_rows or google_funnel_rows %}
+<table class="card">
+  <tr class="card-head"><td>
+    <span class="card-title">Funnel Performance</span>
+    <span class="card-sub">&nbsp; Stage-by-stage conversion &amp; drop-off &nbsp;&middot;&nbsp; biggest leak highlighted</span>
+  </td></tr>
+  <tr class="card-body"><td>
+    <table class="funnel">
+      {% if meta_funnel_rows and google_funnel_rows %}
+      <colgroup>
+        <col style="width:18%;"><col style="width:14%;"><col style="width:18%;">
+        <col style="width:18%;"><col style="width:14%;"><col style="width:18%;">
+      </colgroup>
+      <tr class="funnel-head">
+        <td colspan="3" class="m">Meta</td>
+        <td colspan="3" class="g divider">Google Ads</td>
+      </tr>
+      <tr class="funnel-sub">
+        <th class="l">Stage</th><th>Count</th><th>Drop-off</th>
+        <th class="l divider">Stage</th><th>Count</th><th>Drop-off</th>
+      </tr>
+      {% for row in meta_funnel_rows %}
+      {% set g = google_funnel_rows[loop.index0] %}
+      <tr>
+        {{ funnel_stage(row) }}
+        {{ funnel_stage(g, True) }}
+      </tr>
+      {% endfor %}
+      {% else %}
+      {% set rows = meta_funnel_rows if meta_funnel_rows else google_funnel_rows %}
+      {% set title = 'Meta' if meta_funnel_rows else 'Google Ads' %}
+      <colgroup><col style="width:40%;"><col style="width:30%;"><col style="width:30%;"></colgroup>
+      <tr class="funnel-head"><td colspan="3" class="{{ 'm' if meta_funnel_rows else 'g' }}">{{ title }}</td></tr>
+      <tr class="funnel-sub"><th class="l">Stage</th><th>Count</th><th>Drop-off</th></tr>
+      {% for row in rows %}
+      <tr>{{ funnel_stage(row) }}</tr>
+      {% endfor %}
+      {% endif %}
+    </table>
+  </td></tr>
+  <tr class="card-foot"><td>On-site LP / Add-to-Cart / Checkout stages are Meta-only; Google shows the ad-delivery funnel.</td></tr>
+</table>
+{% endif %}
+
+<!-- 4. CAMPAIGN PERFORMANCE -->
+{% if campaign_segments %}
+<table class="card card-head-only campaign-section">
+  <tr class="card-head"><td>
+    <span class="card-title">Campaign Performance</span>
+    <span class="card-sub">&nbsp; Grouped by Net ROAS tier</span>
+  </td></tr>
+</table>
+<div class="camp-wrap">
+    <table class="camp">
+      <colgroup>
+        <col style="width:22%;"><col style="width:9%;"><col style="width:10%;"><col style="width:10%;">
+        <col style="width:15%;"><col style="width:7%;"><col style="width:7%;"><col style="width:6%;"><col style="width:6%;">
+      </colgroup>
+      <thead><tr>
+        <th>Campaign</th><th>Spend</th><th>Revenue</th><th>Net Profit</th>
+        <th>Net ROAS</th><th>CTR</th><th>CVR</th><th>Bounce</th><th>Orders</th>
+      </tr></thead>
+      <tbody>
+        {% for segment in campaign_segments %}
+        <tr class="seg-head"><td colspan="9">
+          <span class="seg-name">{{ segment.display_label }}</span>
+          <span class="seg-sub">&nbsp; {{ segment.sub }} &nbsp;&middot;&nbsp; {{ segment.count }} campaign{% if segment.count != 1 %}s{% endif %}</span>
+          {% if segment.total %}<span class="seg-share">&nbsp;&middot;&nbsp; {{ segment.total.spend_pct | round | int }}% spend &nbsp; {{ segment.total.revenue_pct | round | int }}% rev</span>{% endif %}
+        </td></tr>
+        {% for row in segment.rows %}
+        <tr>
+          <td class="c-name">{{ row.campaign_name }}</td>
+          <td>{{ row.spend | fmt_inr_detail }}</td>
+          <td>{{ row.shopify_revenue | fmt_inr_detail }}</td>
+          <td class="{{ 'pos' if row.net_profit >= 0 else 'neg' }}">{{ row.net_profit | fmt_inr_detail }}</td>
+          <td class="roas-cell {{ row.roas_grad }}"><span class="roas-val">{{ row.net_roas | fmt_metric }}x</span></td>
+          <td>{{ row.ctr | fmt_pct2 }}</td>
+          <td>{{ row.conversion_rate | fmt_pct2 }}</td>
+          <td style="background:{{ row.bounce_bg }};">{{ row.bounce_rate | fmt_pct2 }}</td>
+          <td>{{ row.orders | fmt_num }}</td>
+        </tr>
+        {% endfor %}
+        {% if segment.total %}
+        <tr class="sec-total">
+          <td>Subtotal &nbsp;<span class="pct">{{ segment.total.spend_pct | round | int }}% spend &nbsp; {{ segment.total.revenue_pct | round | int }}% rev</span></td>
+          <td>{{ segment.total.spend | fmt_inr_detail }}</td>
+          <td>{{ segment.total.shopify_revenue | fmt_inr_detail }}</td>
+          <td class="{{ 'pos' if segment.total.net_profit >= 0 else 'neg' }}">{{ segment.total.net_profit | fmt_inr_detail }}</td>
+          <td class="{{ segment.total.net_roas | roas_grad }}">{{ segment.total.net_roas | fmt_metric }}x</td>
+          <td>{{ segment.total.ctr | fmt_pct2 }}</td>
+          <td>{{ segment.total.conversion_rate | fmt_pct2 }}</td>
+          <td>{{ segment.total.bounce_rate | fmt_pct2 }}</td>
+          <td>&mdash;</td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+        {% if campaign_total %}
+        <tr class="grand-total">
+          <td>Overall Total</td>
+          <td>{{ campaign_total.spend | fmt_inr_detail }}</td>
+          <td>{{ campaign_total.shopify_revenue | fmt_inr_detail }}</td>
+          <td class="{{ 'pos' if campaign_total.net_profit >= 0 else 'neg' }}">{{ campaign_total.net_profit | fmt_inr_detail }}</td>
+          <td class="{{ campaign_total.net_roas | roas_grad }}">{{ campaign_total.net_roas | fmt_metric }}x</td>
+          <td>{{ campaign_total.ctr | fmt_pct2 }}</td>
+          <td>{{ campaign_total.conversion_rate | fmt_pct2 }}</td>
+          <td>{{ campaign_total.bounce_rate | fmt_pct2 }}</td>
+          <td>&mdash;</td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+</div>
+<div style="font-size:6.8pt;color:#94a3b8;font-style:italic;text-align:center;padding:6px 10px;">Campaign totals are computed from displayed campaign data. Bounce shading intensifies with rate.</div>
+{% endif %}
+
+</body>
+</html>

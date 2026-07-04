@@ -1,0 +1,132 @@
+{
+  "start": "2026-06-24",
+  "end": "2026-06-30",
+  "results": [
+    {
+      "endpoint": "historical/dashboard",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 2928.8,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/time-patterns",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 972.1,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/sales-by-region",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 422.6,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/meta/ads",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 406.0,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/google/ads",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 410.5,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/amazon/dashboard",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 426.2,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/amazon/ads",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 384.4,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "historical/amazon-sp-sales",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 294.8,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "meta-attribution",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 1438.7,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "google-attribution",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 1096.9,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "channel-attribution",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 822.4,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "amazon-attribution",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 685.6,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "meta-funnel",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 1061.0,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    },
+    {
+      "endpoint": "pnl/summary",
+      "status": "PASS",
+      "http_status": 200,
+      "latency_ms": 798.3,
+      "error": null,
+      "missing_fields": [],
+      "has_data": true
+    }
+  ]
+}

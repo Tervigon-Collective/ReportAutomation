@@ -26,6 +26,41 @@ from channel_performance import plot_channel_performance_daily
 matplotlib.use('Agg')
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 
+# Shared palette aligned with channel_performance charts
+PLOT_COLORS = {
+    "spend": "#E07B00",
+    "revenue": "#1A7F4E",
+    "roas": "#DC2626",
+    "profit_pos": "#16A34A",
+    "profit_neg": "#DC2626",
+    "grid": "#E2E8F0",
+    "text": "#334155",
+}
+
+
+def _compact_rs(val: float) -> str:
+    """Compact Rs label for dense daily bar charts."""
+    v = float(val)
+    if v >= 100_000:
+        return f"{v / 100_000:.1f}L"
+    if v >= 1_000:
+        return f"{v / 1_000:.0f}K"
+    return f"{int(round(v))}"
+
+
+def _apply_light_grid(ax, *, zorder: int = 0) -> None:
+    ax.grid(
+        True,
+        which="both",
+        axis="both",
+        alpha=0.28,
+        linestyle="-",
+        linewidth=0.65,
+        color=PLOT_COLORS["grid"],
+        zorder=zorder,
+    )
+    ax.set_axisbelow(True)
+
 # Set up logging with cross-platform path that works in Azure Functions
 def _get_log_dir():
     """Get a writable log directory, handling Azure Functions permissions."""
@@ -207,43 +242,37 @@ def fetch_historical_hourly_insights_from_api(months, access_token, account_id, 
 # --- Function to Fetch ROAS Data from API ---
 def fetch_roas_data_from_api(start_date, end_date):
     """
-    Fetch ROAS data from the API for the specified date range.
-    Returns the API response data or None if failed.
+    Fetch daily ROAS-related metrics from GET /v1/historical/time-patterns.
     """
-    import requests
-    from datetime import datetime, timedelta
-    
-    # Calculate date range for last 30 days if not provided
+    from api_data_fetcher import fetch_net_profit_series_from_api
+
     if not start_date or not end_date:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=29)
         start_date = start_date.strftime('%Y-%m-%d')
         end_date = end_date.strftime('%Y-%m-%d')
-    
-    api_url = f"https://node.seleric.cloud//api/roas_by_date"
-    params = {
-        'start_date': start_date,
-        'end_date': end_date
-    }
-    
+
     try:
-        print(f"Fetching ROAS data from API for date range: {start_date} to {end_date}")
-        response = requests.get(api_url, params=params, headers=get_api_headers(), timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('success'):
-            print(f"Successfully fetched ROAS data for {len(data.get('roas_by_date', []))} days")
-            return data
-        else:
-            print(f"API returned success=False: {data}")
+        print(f"Fetching time-patterns from API for date range: {start_date} to {end_date}")
+        df = fetch_net_profit_series_from_api(start_date, end_date)
+        if df.empty:
             return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching ROAS data from API: {e}")
-        return None
+        roas_by_date = []
+        for _, row in df.iterrows():
+            spend = float(row.get("total_ad_spend", 0) or 0)
+            rev = float(row.get("revenue", 0) or 0)
+            np = float(row.get("net_profit", 0) or 0)
+            roas_by_date.append({
+                "date": str(row.get("sale_date", ""))[:10],
+                "net_roas": (np / spend) if spend > 0 else 0.0,
+                "gross_roas": (rev / spend) if spend > 0 else 0.0,
+                "ad_spend": spend,
+                "revenue": rev,
+            })
+        print(f"Successfully fetched ROAS data for {len(roas_by_date)} days")
+        return {"success": True, "roas_by_date": roas_by_date}
     except Exception as e:
-        print(f"Unexpected error fetching ROAS data: {e}")
+        print(f"Error fetching ROAS data from API: {e}")
         return None
 
 # --- Function to Plot Daily Spend, Purchase Value, and ROAS ---
@@ -365,77 +394,142 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     })
     df['Date'] = pd.to_datetime(df['Date'])
 
-    # Set Seaborn style
-    sns.set_style("whitegrid")
-
-    # Create figure and axes with secondary y-axis
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    n_days = len(df)
+    fig_w = max(12, min(16, 0.35 * n_days + 6))
+    fig, ax1 = plt.subplots(figsize=(fig_w, 7), facecolor="white")
     ax2 = ax1.twinx()
-    
-    # Move Amount axis to the right side
-    ax1.yaxis.set_label_position('right')
-    ax1.yaxis.tick_right()
 
-    # Plot bars for Spend and Purchase Value
-    bar_width = 0.4
-    x = range(len(dates))
-    ax1.bar([i - bar_width/2 for i in x], df['Spend'], width=bar_width/2, label='Ad Spend', color='#1f77b4')
-    ax1.bar([i + bar_width/2 for i in x], df['Purchase Value'], width=bar_width/2, label='Revenue', color='#2ca02c')
+    x = np.arange(n_days)
+    bar_width = 0.36
+    bars_spend = ax1.bar(
+        x - bar_width / 2,
+        df['Spend'],
+        width=bar_width / 2,
+        label='Ad Spend',
+        color=PLOT_COLORS["spend"],
+        edgecolor="white",
+        linewidth=0.8,
+        zorder=2,
+    )
+    bars_rev = ax1.bar(
+        x + bar_width / 2,
+        df['Purchase Value'],
+        width=bar_width / 2,
+        label='Revenue',
+        color=PLOT_COLORS["revenue"],
+        edgecolor="white",
+        linewidth=0.8,
+        zorder=2,
+    )
 
-    # Plot line for Net ROAS with label for legend on secondary axis
-    line_plot = sns.lineplot(x=x, y='ROAS', data=df, ax=ax2, color='#d62728', marker='o', linewidth=1.5, markersize=8, label='Net ROAS')
+    roas_vals = df['ROAS'].values.astype(float)
+    ax2.plot(
+        x,
+        roas_vals,
+        color=PLOT_COLORS["roas"],
+        marker="o",
+        markersize=4,
+        linewidth=2,
+        markerfacecolor=PLOT_COLORS["roas"],
+        markeredgecolor="white",
+        markeredgewidth=0.8,
+        label='Net ROAS',
+        zorder=4,
+    )
 
-    # Add value labels on ROAS data points - positioned on the actual points
-    for i, (x_pos, roas_val) in enumerate(zip(x, df['ROAS'])):
-        if roas_val > 0:  # Only show labels for non-zero ROAS values
-            ax2.annotate(f'{roas_val:.2f}', 
-                        (x_pos, roas_val), 
-                        textcoords="data", 
-                        ha='center', 
-                        va='center',
-                        fontsize=9, 
-                        fontweight='bold',
-                        color='white',
-                        bbox=dict(boxstyle="round,pad=0.2", facecolor='#d62728', edgecolor='#d62728', alpha=0.9))
+    ymax_money = max(float(df['Spend'].max()), float(df['Purchase Value'].max()), 1.0)
+    label_pad = ymax_money * 0.02
+    for i, bar in enumerate(bars_spend):
+        val = float(df['Spend'].iloc[i])
+        if val > 0:
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + label_pad,
+                _compact_rs(val),
+                ha="center",
+                va="bottom",
+                fontsize=6.5,
+                fontweight="600",
+                color=PLOT_COLORS["spend"],
+            )
+    for i, bar in enumerate(bars_rev):
+        val = float(df['Purchase Value'].iloc[i])
+        if val > 0:
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + label_pad,
+                _compact_rs(val),
+                ha="center",
+                va="bottom",
+                fontsize=6.5,
+                fontweight="600",
+                color=PLOT_COLORS["revenue"],
+            )
 
-    # Customize axes
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel('Amount (₹)', color='#1f77b4')
+    for i, roas in enumerate(roas_vals):
+        if roas > 0:
+            ax2.annotate(
+                f"{roas:.2f}x",
+                (x[i], roas),
+                textcoords="offset points",
+                xytext=(0, 6),
+                ha="center",
+                fontsize=6.5,
+                fontweight="600",
+                color=PLOT_COLORS["roas"],
+            )
+
     ax1.set_xticks(x)
-    ax1.set_xticklabels([d.strftime('%Y-%m-%d') for d in df['Date']], rotation=90)
-    ax1.tick_params(axis='y', colors='#1f77b4')
-    
-    # Adjust x-axis to align dates with the center of the bar groups
-    ax1.set_xlim(-0.5, len(x) - 0.5)
-    
-    # Hide ROAS axis but keep the data visible
-    ax2.set_ylabel('')  # Remove y-axis label
-    ax2.set_yticks([])  # Hide y-axis ticks
-    ax2.spines['right'].set_visible(False)  # Hide right spine
-    
-    # Adjust ROAS axis scale to make the line more prominent
-    roas_max = df['ROAS'].max()
-    roas_min = df['ROAS'].min()
-    roas_range = roas_max - roas_min
-    if roas_range > 0:
-        # Set ROAS axis to start at 0 and show more of the chart area
-        ax2.set_ylim(0, roas_max + roas_range * 0.3)
-    
-    # Ensure ROAS line is drawn on top of bars by setting zorder
-    ax2.set_zorder(ax1.get_zorder() + 1)
-    ax2.patch.set_visible(False)  # Make ax2 transparent so bars show through
+    ax1.set_xticklabels(
+        [d.strftime('%d %b') for d in df['Date']],
+        rotation=90,
+        ha="center",
+        fontsize=7 if n_days > 20 else 8,
+        color=PLOT_COLORS["text"],
+    )
+    ax1.set_xlim(-0.6, n_days - 0.4)
 
-    # Add legends
+    ax1.set_ylabel('Amount (Rs)', fontsize=10, color=PLOT_COLORS["text"], labelpad=8)
+    ax2.set_ylabel('Net ROAS', fontsize=10, color=PLOT_COLORS["roas"], labelpad=8)
+    ax2.tick_params(axis='y', labelcolor=PLOT_COLORS["roas"])
+    ax1.tick_params(axis='y', colors=PLOT_COLORS["text"])
+
+    ax1.set_facecolor("#FAFBFC")
+    _apply_light_grid(ax1)
+    for spine in ("top", "right"):
+        ax1.spines[spine].set_visible(False)
+        ax2.spines[spine].set_visible(False)
+    ax1.spines["left"].set_color("#BBBBBB")
+    ax1.spines["bottom"].set_color("#BBBBBB")
+    ax2.spines["right"].set_color("#BBBBBB")
+
+    roas_max = float(roas_vals.max()) if len(roas_vals) else 1.0
+    ax2.set_ylim(0, max(roas_max * 1.35, 0.5))
+    ax1.set_ylim(0, ymax_money * 1.18)
+
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=3)
+    fig.suptitle(
+        f'Daily Ad Spend, Revenue, and Net ROAS for Last {n_days} Days',
+        fontsize=13,
+        fontweight='bold',
+        color="#1a1a2e",
+        y=0.98,
+    )
+    fig.legend(
+        lines1 + lines2,
+        labels1 + labels2,
+        loc='upper center',
+        bbox_to_anchor=(0.5, 0.915),
+        ncol=3,
+        frameon=True,
+        fontsize=9,
+        edgecolor="#DDDDDD",
+        facecolor="white",
+    )
 
-    # Set title
-    plt.title(f'Daily Ad Spend, Revenue, and Net ROAS for Last {len(dates)} Days', pad=20)
-
-    # Adjust layout to prevent overlap and provide space for rotated labels
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.2)  # Add extra space at bottom for rotated labels
+    plt.subplots_adjust(bottom=0.24 if n_days > 20 else 0.20, top=0.82)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -1029,37 +1123,73 @@ def plot_daily_shopify_profit(save_path=None):
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         
-        logger.info(f"Fetching net profit data from DB for last 30 days")
+        # Net profit series — API time-patterns (dashboard-aligned), then ClickHouse, then Postgres
+        db_df = pd.DataFrame()
+        totals = {}
+        use_api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+        try:
+            from api_data_fetcher import fetch_net_profit_series_from_api
+            db_df = fetch_net_profit_series_from_api(start_str, end_str)
+            if not db_df.empty:
+                totals = {
+                    "revenue": float(db_df["revenue"].sum()),
+                    "cogs": float(db_df["cogs"].sum()),
+                    "adSpend": float(db_df["total_ad_spend"].sum()),
+                    "netProfit": float(db_df["net_profit"].sum()),
+                }
+                logger.info("Net profit series from API time-patterns (%d days)", len(db_df))
+        except Exception as e:
+            if use_api_only:
+                logger.error("API net profit series failed in API-only mode: %s", e)
+            else:
+                logger.warning("API net profit series failed (%s); trying ClickHouse", e)
 
-        db_result = fetch_net_profit_from_db(n_days=30)
-        db_df = db_result.get("dailyBreakdown", pd.DataFrame())
-        totals = db_result["totals"]
+        if db_df.empty and not use_api_only and os.getenv("USE_DASHBOARD_STATS", "true").lower() in ("1", "true", "yes"):
+            try:
+                from dashboard_stats import fetch_daily_net_profit_series
+                brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+                db_df = fetch_daily_net_profit_series(brand_id, start_str, end_str)
+                if not db_df.empty:
+                    totals = {
+                        "revenue": float(db_df["revenue"].sum()),
+                        "cogs": float(db_df["cogs"].sum()),
+                        "adSpend": float(db_df["total_ad_spend"].sum()),
+                        "netProfit": float(db_df["net_profit"].sum()),
+                    }
+                    logger.info("Net profit series from ClickHouse fct_order_items rollup (%d days)", len(db_df))
+            except Exception as e:
+                logger.warning("ClickHouse net profit series failed (%s); falling back to Postgres", e)
+                db_df = pd.DataFrame()
+
+        if db_df.empty and not use_api_only:
+            db_result = fetch_net_profit_from_db(n_days=30)
+            db_df = db_result.get("dailyBreakdown", pd.DataFrame())
+            totals = db_result.get("totals", {})
+            if not db_df.empty:
+                # For today, Postgres ad spend syncs with a lag; override today's
+                # net_profit with the real-time API value (ex-GST).
+                ist = pytz.timezone('Asia/Kolkata')
+                today_ist = datetime.now(pytz.utc).astimezone(ist).date()
+                today_str = today_ist.strftime('%Y-%m-%d')
+                db_df['sale_date'] = pd.to_datetime(db_df['sale_date']).dt.date
+                today_mask = db_df['sale_date'] == today_ist
+                if today_mask.any():
+                    try:
+                        api_today = fetch_net_profit_single_day(start_date=today_str, end_date=today_str)
+                        api_net_profit = float(
+                            (api_today.get('data') or {}).get('totals', {}).get('netProfit', 0) or 0
+                        )
+                        db_df.loc[today_mask, 'net_profit'] = api_net_profit
+                        logger.info(f"[Today override] DB net_profit replaced with API (ex-GST) value: {api_net_profit:.2f}")
+                    except Exception as e:
+                        logger.warning(f"[Today override] Failed to fetch API net profit for today, keeping DB value: {e}")
 
         if db_df.empty:
-            logger.error("No net profit data returned from DB")
+            logger.error("No net profit data returned")
             return None
 
-        # For today, DB data is partial (ad spend syncs with a lag).
-        # Override today's net_profit with the real-time API value.
-        ist = pytz.timezone('Asia/Kolkata')
-        today_ist = datetime.now(pytz.utc).astimezone(ist).date()
-        today_str = today_ist.strftime('%Y-%m-%d')
-        db_df['sale_date'] = pd.to_datetime(db_df['sale_date']).dt.date
-        today_mask = db_df['sale_date'] == today_ist
-        if today_mask.any():
-            try:
-                # fetch_net_profit_single_day applies GST adjustment (ex-GST revenue), matching the daily report
-                api_today = fetch_net_profit_single_day(start_date=today_str, end_date=today_str)
-                api_net_profit = float(
-                    (api_today.get('data') or {}).get('totals', {}).get('netProfit', 0) or 0
-                )
-                db_df.loc[today_mask, 'net_profit'] = api_net_profit
-                logger.info(f"[Today override] DB net_profit replaced with API (ex-GST) value: {api_net_profit:.2f}")
-            except Exception as e:
-                logger.warning(f"[Today override] Failed to fetch API net profit for today, keeping DB value: {e}")
-
-        logger.info(f"Fetched {len(db_df)} days of net profit data from DB")
-        logger.info(f"DB totals: Revenue=₹{totals['revenue']:,.2f}, COGS=₹{totals['cogs']:,.2f}, Ad Spend=₹{totals['adSpend']:,.2f}, Net Profit=₹{totals['netProfit']:,.2f}")
+        logger.info(f"Fetched {len(db_df)} days of net profit data")
+        logger.info(f"Totals: Revenue=Rs{totals.get('revenue',0):,.2f}, COGS=Rs{totals.get('cogs',0):,.2f}, Ad Spend=Rs{totals.get('adSpend',0):,.2f}, Net Profit=Rs{totals.get('netProfit',0):,.2f}")
 
         dates = []
         revenues = []
@@ -1097,30 +1227,33 @@ def plot_daily_shopify_profit(save_path=None):
         sns.set_style("whitegrid")
         
         # Create simple figure with single plot
-        fig, ax = plt.subplots(figsize=(12, 6))
+        fig, ax = plt.subplots(figsize=(12, 5.5), facecolor="white")
         
         # Plot net profit line with color-coded segments (green for positive/zero, red for negative)
-        # Plot line in segments: green for >=0, red for <0, handle zero crossings
+        pos_color = PLOT_COLORS["profit_pos"]
+        neg_color = PLOT_COLORS["profit_neg"]
         for i in range(1, len(dates_series)):
             x0, x1 = dates_series.iloc[i-1], dates_series.iloc[i]
             y0, y1 = net_profits[i-1], net_profits[i]
-            color = '#2ecc71' if y0 >= 0 and y1 >= 0 else 'red' if y0 < 0 and y1 < 0 else None
+            color = pos_color if y0 >= 0 and y1 >= 0 else neg_color if y0 < 0 and y1 < 0 else None
             if color:
-                ax.plot([x0, x1], [y0, y1], color=color, linewidth=1.35, solid_capstyle='round', zorder=1)
+                ax.plot([x0, x1], [y0, y1], color=color, linewidth=2.0, solid_capstyle='round', zorder=1)
             else:
                 # If the line crosses zero, split at zero for color change
                 if y0 < 0 and y1 >= 0 or y0 >= 0 and y1 < 0:
                     # Find the zero crossing point
                     if y1 != y0:
-                        x_cross = x0 + (x1 - x0) * (0 - y0) / (y1 - y0)
-                        ax.plot([x0, x_cross], [y0, 0], color='red' if y0 < 0 else '#2ecc71', linewidth=1.35, solid_capstyle='round', zorder=1)
-                        ax.plot([x_cross, x1], [0, y1], color='red' if y1 < 0 else '#2ecc71', linewidth=1.35, solid_capstyle='round', zorder=1)
+                        # Multiply the date delta by the bounded [0,1] ratio (not the raw
+                        # profit delta) to avoid Timedelta int64 overflow on large values.
+                        x_cross = x0 + (x1 - x0) * ((0 - y0) / (y1 - y0))
+                        ax.plot([x0, x_cross], [y0, 0], color=neg_color if y0 < 0 else pos_color, linewidth=2.0, solid_capstyle='round', zorder=1)
+                        ax.plot([x_cross, x1], [0, y1], color=neg_color if y1 < 0 else pos_color, linewidth=2.0, solid_capstyle='round', zorder=1)
         
         # Highlight points with color coding: green for positive/zero, red for negative
         neg = df['Net Profit'] < 0
         pos = df['Net Profit'] >= 0
-        ax.scatter(dates_series[pos], df['Net Profit'][pos], color='#2ecc71', marker='o', s=38, linewidths=0.6, edgecolors='#1e8449', zorder=2)
-        ax.scatter(dates_series[neg], df['Net Profit'][neg], color='red', marker='o', s=38, linewidths=0.6, edgecolors='#922b21', zorder=2)
+        ax.scatter(dates_series[pos], df['Net Profit'][pos], color=pos_color, marker='o', s=42, linewidths=0.6, edgecolors='#15803D', zorder=2)
+        ax.scatter(dates_series[neg], df['Net Profit'][neg], color=neg_color, marker='o', s=42, linewidths=0.6, edgecolors='#B91C1C', zorder=2)
         
         avg_net_profit = float(df['Net Profit'].mean())
         threshold_top = 80000.0
@@ -1139,35 +1272,62 @@ def plot_daily_shopify_profit(save_path=None):
         span = y_max - y_min
         pad = span * 0.05 if span > 0 else (abs(y_max) * 0.05 if y_max != 0 else 1000.0)
         ax.set_ylim(y_min - pad, y_max + pad)
-        ax.set_xmargin(0)
+        ax.set_xmargin(0.02)
         
         # Format axes
-        ax.set_xlabel('Date', fontsize=12)
-        ax.set_ylabel('Net Profit (Rs)', fontsize=12)
-        ax.set_title(f'Daily Net Profit ({start_str} to {end_str})', fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlabel('Date', fontsize=10, color=PLOT_COLORS["text"])
+        ax.set_ylabel('Net Profit (Rs)', fontsize=10, color=PLOT_COLORS["text"])
+        ax.set_title(
+            f'Daily Net Profit ({start_str} to {end_str})',
+            fontsize=13,
+            fontweight='bold',
+            color="#1a1a2e",
+            pad=16,
+        )
         
         # Format y-axis with currency (Rs instead of ₹)
         from matplotlib.ticker import FuncFormatter
         ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'Rs{x:,.0f}'))
         
-        # Format x-axis - show every day
+        # Format x-axis — all dates, vertical labels
+        n_days = len(df)
+        fig.set_size_inches(max(12, min(16, 0.35 * n_days + 6)), 6)
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
         ax.xaxis.set_major_formatter(mdates.DateFormatter('%d %b'))
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=90)
+        plt.setp(
+            ax.xaxis.get_majorticklabels(),
+            rotation=90,
+            ha="center",
+            fontsize=7 if n_days > 20 else 8,
+            color=PLOT_COLORS["text"],
+        )
         
-        # Add grid (light so the series and reference lines stay primary)
-        ax.grid(True, alpha=0.22, linewidth=0.65, linestyle='-')
-        ax.set_axisbelow(True)
+        ax.set_facecolor("#FAFBFC")
+        _apply_light_grid(ax)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#BBBBBB")
+        ax.spines["bottom"].set_color("#BBBBBB")
         
-        # Add data labels on significant points (like Rs626 and Rs-4,434 in the image)
-        for x, y in zip(df['Date'], df['Net Profit']):
-            # Show labels for non-zero values or significant positive values
-            if abs(y) > 500 or (y > 0 and y != 0):
-                ax.annotate(f'Rs{y:,.0f}', (x, y), textcoords="offset points", 
-                           xytext=(0, 10), ha='center', fontsize=9, color='black',
-                           bbox=dict(boxstyle="round,pad=0.2", facecolor='white', alpha=0.8))
+        # Label every data point
+        for x_val, y_val in zip(df['Date'], df['Net Profit']):
+            y_val = float(y_val)
+            label_color = neg_color if y_val < 0 else pos_color
+            offset = -12 if y_val < 0 else 10
+            ax.annotate(
+                f'Rs{y_val:,.0f}',
+                (x_val, y_val),
+                textcoords="offset points",
+                xytext=(0, offset),
+                ha='center',
+                va='top' if y_val < 0 else 'bottom',
+                fontsize=6.5,
+                fontweight='600',
+                color=label_color,
+            )
         
         plt.tight_layout()
+        plt.subplots_adjust(bottom=0.26 if n_days > 20 else 0.22)
         
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -1660,7 +1820,7 @@ def generate_plots_for_email(
     os.makedirs(report_path, exist_ok=True)
     logger.info(f"Created report directory: {report_path}")
 
-    # Plot Daily Insights
+    # 1. Daily ad spend, revenue, and net ROAS
     if daily_insights_data:
         plot_file = os.path.join(report_path, f'daily_insights_{today}.png')
         saved_path = plot_daily_amounts(daily_insights_data, save_path=plot_file)
@@ -1670,7 +1830,7 @@ def generate_plots_for_email(
     else:
         logger.error(f"Could not plot daily insights due to fetching error: {daily_error}")
 
-    # Plot Daily Shopify Profit (line graph)
+    # 2. Daily net profit
     logger.info("Generating daily Shopify profit plot...")
     plot_file = os.path.join(report_path, f'daily_shopify_profit_{today}.png')
     saved_path = plot_daily_shopify_profit(save_path=plot_file)
@@ -1679,33 +1839,8 @@ def generate_plots_for_email(
         logger.info(f"Daily Shopify profit plot saved to: {saved_path}")
     else:
         logger.error("Failed to generate daily Shopify profit plot")
-        
-    # Plot Hourly Sales for Last 7 Days
-    logger.info("Generating hourly sales plot for last 7 days...")
-    plot_file = os.path.join(report_path, f'hourly_sales_last_7_days_{today}.png')
-    saved_path = plot_hourly_sales_last_7_days(save_path=plot_file)
-    if saved_path and saved_path.endswith('.png'):
-        plot_files.append(saved_path)
-        logger.info(f"Hourly sales plot saved to: {saved_path}")
-    else:
-        logger.error("Failed to generate hourly sales plot")
 
-    logger.info(
-        "Generating sales-by-state pie chart (report day) for %s...",
-        sales_range_end,
-    )
-    plot_file = os.path.join(
-        report_path, f"sales_by_state_pie_current_day_{sales_range_end}.png"
-    )
-    saved_path = plot_sales_by_state_pie_chart(
-        sales_range_end, sales_range_end, save_path=plot_file
-    )
-    if saved_path and saved_path.endswith(".png"):
-        plot_files.append(saved_path)
-        logger.info(f"Sales by state pie chart saved to: {saved_path}")
-    else:
-        logger.warning("Sales by state pie chart not generated (no data or error)")
-
+    # 3. Channel performance (daily bars + last 7-day net ROAS trend)
     logger.info(
         "Generating daily channel performance chart for %s...",
         sales_range_end,
@@ -1722,6 +1857,33 @@ def generate_plots_for_email(
     else:
         logger.warning("Channel performance chart not generated (no data or error)")
 
+    # 4. Sales by state
+    logger.info(
+        "Generating sales-by-state pie chart (report day) for %s...",
+        sales_range_end,
+    )
+    plot_file = os.path.join(
+        report_path, f"sales_by_state_pie_current_day_{sales_range_end}.png"
+    )
+    saved_path = plot_sales_by_state_pie_chart(
+        sales_range_end, sales_range_end, save_path=plot_file
+    )
+    if saved_path and saved_path.endswith(".png"):
+        plot_files.append(saved_path)
+        logger.info(f"Sales by state pie chart saved to: {saved_path}")
+    else:
+        logger.warning("Sales by state pie chart not generated (no data or error)")
+
+    # 5. Hourly sales (last 7 days)
+    logger.info("Generating hourly sales plot for last 7 days...")
+    plot_file = os.path.join(report_path, f'hourly_sales_last_7_days_{today}.png')
+    saved_path = plot_hourly_sales_last_7_days(save_path=plot_file)
+    if saved_path and saved_path.endswith('.png'):
+        plot_files.append(saved_path)
+        logger.info(f"Hourly sales plot saved to: {saved_path}")
+    else:
+        logger.error("Failed to generate hourly sales plot")
+
     # Plot Hourly AOV if data is provided
     if hourly_aov_data is not None and not hourly_aov_data.empty:
         plot_file = os.path.join(report_path, f'hourly_aov_{today}.png')
@@ -1732,10 +1894,10 @@ def generate_plots_for_email(
     else:
         logger.info("No hourly AOV data provided for plotting")
 
-    # Generate AOV insights plot for display if daily data is available
-    if daily_insights_data:
-        logger.info("Generating AOV insights plot for display...")
-        plot_average_order_value(daily_insights_data)
+    # Temporarily disabled — AOV plot was not saved or attached to the email.
+    # if daily_insights_data:
+    #     logger.info("Generating AOV insights plot for display...")
+    #     plot_average_order_value(daily_insights_data)
 
     if not daily_insights_data and hourly_aov_data is None:
         logger.error(f"Failed to fetch data: Daily error: {daily_error}")

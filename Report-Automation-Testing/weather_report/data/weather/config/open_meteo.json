@@ -1,0 +1,17 @@
+{
+  "base_url": "https://api.open-meteo.com/v1/forecast",
+  "archive_url": "https://archive-api.open-meteo.com/v1/archive",
+  "params": {
+    "current": "temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,cloud_cover,wind_speed_10m",
+    "hourly": "precipitation_probability,precipitation,rain,showers,weather_code,cloud_cover,relative_humidity_2m",
+    "daily": "precipitation_sum,rain_sum,precipitation_probability_max,precipitation_hours,weather_code",
+    "forecast_days": 7,
+    "timezone": "Asia/Kolkata"
+  },
+  "request": {
+    "timeout_seconds": 30,
+    "max_retries": 3,
+    "retry_backoff_seconds": 2,
+    "batch_coordinates": true
+  }
+}

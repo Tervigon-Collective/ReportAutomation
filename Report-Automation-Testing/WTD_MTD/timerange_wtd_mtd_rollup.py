@@ -16,7 +16,11 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from timeframe_config import get_timeframe_config
-from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data, fetch_product_profitability, fetch_canonical_pnl_totals
+from api_data_fetcher import (
+    fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data,
+    fetch_product_profitability, fetch_canonical_pnl_totals,
+    fetch_wtd_mtd_dashboard_snapshot, clear_marketing_cache,
+)
 from global_config import get_global_config, get_temp_dir, get_report_dir
 
 # Import functions from dailyrollup.py
@@ -35,7 +39,6 @@ from excel_generation import generate_pdf_report, get_google_funnel_metrics
 # Amazon (ClickHouse gold) sheets for the WTD/MTD report
 from amazon_entity_report import add_amazon_sheets_for_timeframe, get_amazon_clickhouse_summary
 from channel_performance import plot_channel_performance_last_7_days
-
 # Set up logging
 _temp_dir = get_temp_dir()
 logging.basicConfig(
@@ -91,23 +94,33 @@ def get_wtd_mtd_timeframes():
     Calculate Week-to-Date (WTD) and Month-to-Date (MTD) timeframes.
     Returns dict with 'wtd' and 'mtd' keys, each containing start_date and end_date.
 
-    WTD: Monday of the current week to today.
-    MTD: 1st of the current month to today.
+    WTD: Monday of the week containing yesterday through yesterday.
+    MTD: 1st of the current month through yesterday (prior month if run on the 1st).
     Daily: Previous day only (yesterday).
+
+    Today is excluded so morning runs use settled prior-day figures only.
     """
     now = _report_now()
 
-    # Week-to-Date: Monday of the current week to today
-    wtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    wtd_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_end = yesterday.replace(hour=23, minute=59, second=59, microsecond=0)
 
-    # Month-to-Date: 1st of current month to today
-    mtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    # Week-to-Date: Monday of the week containing yesterday through yesterday
+    wtd_start = (yesterday - timedelta(days=yesterday.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    wtd_end = yesterday_end
+
+    # Month-to-Date: 1st of current month through yesterday
     mtd_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
+    mtd_end = yesterday_end
+    if mtd_end < mtd_start:
+        # Report runs on the 1st — no settled days in the new month yet
+        mtd_start = yesterday.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     # Daily: Previous day only (for daily entity report sheet)
-    daily_date = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    daily_end = daily_date.replace(hour=23, minute=59, second=59, microsecond=0)
+    daily_date = yesterday
+    daily_end = yesterday_end
     
     return {
         'wtd': {
@@ -1171,6 +1184,7 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
     }
     
     print(f"[WTD/MTD Report] Generating report: {xlsx_path}")
+    clear_marketing_cache()
     
     with pd.ExcelWriter(
         xlsx_path,
@@ -1190,204 +1204,203 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
             summary_data[timeframe_key]['timeframe'] = f"{start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}"
             summary_data[timeframe_key]['start_date'] = start_date.strftime('%Y-%m-%d')
             summary_data[timeframe_key]['end_date'] = end_date.strftime('%Y-%m-%d')
-            # Canonical company P&L totals from /v1/historical/time-patterns — same source as
-            # the daily report + net-profit graph, so WTD/MTD headline net profit agrees with daily.
-            summary_data[timeframe_key]['canonical_totals'] = fetch_canonical_pnl_totals(
-                start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d')
+            # Canonical company P&L totals from /v1/historical/dashboard — same source as
+            # Selenic dashboard, PDF channel KPIs, and WTD/MTD email headline cards.
+            start_date_str = start_date.strftime('%Y-%m-%d')
+            end_date_str = end_date.strftime('%Y-%m-%d')
+            dashboard_snapshot = fetch_wtd_mtd_dashboard_snapshot(start_date_str, end_date_str)
+            summary_data[timeframe_key]['canonical_totals'] = (
+                dashboard_snapshot.get('canonical_totals')
+                or fetch_canonical_pnl_totals(start_date_str, end_date_str)
             )
+            summary_data[timeframe_key]['dashboard_channel_rows'] = dashboard_snapshot.get('channel_rows', [])
+            summary_data[timeframe_key]['dashboard_total'] = dashboard_snapshot.get('total', {})
+            if dashboard_snapshot.get('channels'):
+                summary_data[timeframe_key]['channels'].update(dashboard_snapshot['channels'])
             
             # Format date range for sheet name (DD-MM format, / is invalid in Excel sheet names)
             date_range_str = f"{start_date.strftime('%d-%m')} to {end_date.strftime('%d-%m')}"
             
-            # Fetch data for this timeframe
-            df = fetch_marketing_hourly(
-                start_date.strftime('%Y-%m-%d'),
-                end_date.strftime('%Y-%m-%d')
-            )
+            # Fetch attribution detail for Excel entity sheets (campaign/SKU rollups).
+            df = fetch_marketing_hourly(start_date_str, end_date_str)
+            rollups = {}
             
             if df.empty:
-                print(f"[{label}] No data found for this timeframe")
+                print(f"[{label}] No attribution data found for this timeframe")
                 # Create empty sheets in order: Meta, Google, Organic
                 for channel_suffix in ['meta_ads', 'google_ads', 'organic']:
                     sheet_name = f'{timeframe_key}_{channel_suffix} ({date_range_str})'[:31]
                     pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                    summary_data[timeframe_key]['channels'][channel_suffix] = extract_channel_summary(pd.DataFrame(), channel_suffix)
-                continue
-            
-            print(f"[{label}] Found {len(df)} total records")
-            print(f"[{label}] Channels available: {df['source'].unique() if 'source' in df.columns else 'No source column'}")
-            
-            # Build channel rollups
-            rollups = build_channel_rollups(df, label)
-            
-            # Write each channel to separate sheet in specific order: Meta, Google, Organic
-            channel_order = ['meta_ads', 'google_ads', 'organic']
-            for channel_key in channel_order:
-                if channel_key not in rollups:
-                    # If channel doesn't exist in rollups, create empty sheet
+                    if channel_suffix not in summary_data[timeframe_key]['channels']:
+                        summary_data[timeframe_key]['channels'][channel_suffix] = extract_channel_summary(pd.DataFrame(), channel_suffix)
+            else:
+                print(f"[{label}] Found {len(df)} total records")
+                print(f"[{label}] Channels available: {df['source'].unique() if 'source' in df.columns else 'No source column'}")
+                
+                # Build channel rollups for Excel entity sheets only (email KPIs use dashboard API).
+                rollups = build_channel_rollups(df, label)
+                
+                # Write each channel to separate sheet in specific order: Meta, Google, Organic
+                channel_order = ['meta_ads', 'google_ads', 'organic']
+                for channel_key in channel_order:
+                    if channel_key not in rollups:
+                        # If channel doesn't exist in rollups, create empty sheet
+                        sheet_name = f'{timeframe_key}_{channel_key} ({date_range_str})'[:31]
+                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+                        if channel_key not in summary_data[timeframe_key]['channels']:
+                            summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
+                        continue
+                    
+                    channel_df = rollups[channel_key]
                     sheet_name = f'{timeframe_key}_{channel_key} ({date_range_str})'[:31]
-                    pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                    summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
-                    continue
-                
-                channel_df = rollups[channel_key]
-                sheet_name = f'{timeframe_key}_{channel_key} ({date_range_str})'[:31]
-                
-                if not channel_df.empty:
-                    print(f"[{label}] Writing {channel_key} data to sheet '{sheet_name}': {len(channel_df)} rows")
                     
-                    # Extract summary metrics for this channel (before adding grand total row)
-                    channel_summary = extract_channel_summary(channel_df, channel_key)
-                    summary_data[timeframe_key]['channels'][channel_key] = channel_summary
-                    
-                    # Add Grand Total row
-                    channel_df_with_total = add_grand_total_row(channel_df, f"{label}-{channel_key}")
-                    
-                    # Round for output
-                    channel_df_rounded = round_for_output(channel_df_with_total)
-                    
-                    # Apply column ordering (same as dailyrollup.py)
-                    channel_df_rounded = channel_df_rounded[order_columns_by_funnel(channel_df_rounded, include_sku=True)]
-                    
-                    # Rename columns for presentation (same as dailyrollup.py)
-                    rename_map = {
-                        'shopify_orders': 'orders',
-                        'shopify_revenue': 'revenue',
-                        'shopify_cogs': 'cogs',
-                        'sku_quantity': 'quantity',
-                    }
-                    channel_df_rounded = channel_df_rounded.rename(columns={k:v for k,v in rename_map.items() if k in channel_df_rounded.columns})
-                    
-                    # Channel-specific column handling
-                    if channel_key == 'organic':
-                        # Organic: Only keep specified columns with per-unit pricing
-                        organic_keep_cols = ['channel', 'sku', 'sku_unit_price', 'sku_unit_cogs', 'quantity']
-                        available_organic_cols = [c for c in organic_keep_cols if c in channel_df_rounded.columns]
-                        if available_organic_cols:
-                            channel_df_rounded = channel_df_rounded[available_organic_cols]
-                    else:
-                        # Drop unnecessary columns for cleaner presentation (channel-specific)
-                        base_drop_cols = [
-                            'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity',
-                            'sku_revenue', 'sku_cogs', 'impressions', 'clicks', '_landing_page_view'
-                        ]
-                        # Channel specific removals
-                        if channel_key == 'meta_ads':
-                            # Remove be_roas per requirements
-                            base_drop_cols.extend([c for c in ['be_roas'] if c in channel_df_rounded.columns])
-                        if channel_key == 'google_ads':
-                            # Remove bounce_rate, ATC, IC, be_roas per requirements (keep ctr)
-                            base_drop_cols.extend([c for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'be_roas'] if c in channel_df_rounded.columns])
-                        drop_cols = [c for c in base_drop_cols if c in channel_df_rounded.columns]
-                        if drop_cols:
-                            channel_df_rounded = channel_df_rounded.drop(columns=drop_cols)
-                    
-                    # Write to Excel
-                    channel_df_rounded.to_excel(writer, sheet_name=sheet_name, index=False)
-                    
-                    # Apply formatting
-                    try:
-                        workbook = writer.book
-                        center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                        header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
+                    if not channel_df.empty:
+                        print(f"[{label}] Writing {channel_key} data to sheet '{sheet_name}': {len(channel_df)} rows")
+                        channel_df_with_total = add_grand_total_row(channel_df, f"{label}-{channel_key}")
                         
-                        worksheet = writer.sheets[sheet_name]
-                        worksheet.set_column(0, len(channel_df_rounded.columns)-1, None, center_fmt)
-                        worksheet.freeze_panes(1, 0)
-                        worksheet.set_row(0, None, header_fmt)
+                        # Round for output
+                        channel_df_rounded = round_for_output(channel_df_with_total)
                         
-                        # Color Grand Total row (last row)
+                        # Apply column ordering (same as dailyrollup.py)
+                        channel_df_rounded = channel_df_rounded[order_columns_by_funnel(channel_df_rounded, include_sku=True)]
+                        
+                        # Rename columns for presentation (same as dailyrollup.py)
+                        rename_map = {
+                            'shopify_orders': 'orders',
+                            'shopify_revenue': 'revenue',
+                            'shopify_cogs': 'cogs',
+                            'sku_quantity': 'quantity',
+                        }
+                        channel_df_rounded = channel_df_rounded.rename(columns={k:v for k,v in rename_map.items() if k in channel_df_rounded.columns})
+                        
+                        # Channel-specific column handling
+                        if channel_key == 'organic':
+                            # Organic: Only keep specified columns with per-unit pricing
+                            organic_keep_cols = ['channel', 'sku', 'sku_unit_price', 'sku_unit_cogs', 'quantity']
+                            available_organic_cols = [c for c in organic_keep_cols if c in channel_df_rounded.columns]
+                            if available_organic_cols:
+                                channel_df_rounded = channel_df_rounded[available_organic_cols]
+                        else:
+                            # Drop unnecessary columns for cleaner presentation (channel-specific)
+                            base_drop_cols = [
+                                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity',
+                                'sku_revenue', 'sku_cogs', 'impressions', 'clicks', '_landing_page_view'
+                            ]
+                            # Channel specific removals
+                            if channel_key == 'meta_ads':
+                                # Remove be_roas per requirements
+                                base_drop_cols.extend([c for c in ['be_roas'] if c in channel_df_rounded.columns])
+                            if channel_key == 'google_ads':
+                                # Remove bounce_rate, ATC, IC, be_roas per requirements (keep ctr)
+                                base_drop_cols.extend([c for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'be_roas'] if c in channel_df_rounded.columns])
+                            drop_cols = [c for c in base_drop_cols if c in channel_df_rounded.columns]
+                            if drop_cols:
+                                channel_df_rounded = channel_df_rounded.drop(columns=drop_cols)
+                        
+                        # Write to Excel
+                        channel_df_rounded.to_excel(writer, sheet_name=sheet_name, index=False)
+                        
+                        # Apply formatting
                         try:
-                            last_row = len(channel_df_rounded)
-                            worksheet.set_row(last_row, None, total_fmt)
-                        except Exception:
-                            pass
-                        
-                        # Conditional formatting for profit column
-                        if 'net_profit' in channel_df_rounded.columns:
-                            profit_col = channel_df_rounded.columns.get_loc('net_profit')
-                            green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                            red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                            worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
-                                'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-                            })
-                            worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
-                                'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                            })
-                        
-                        # Conditional formatting for Net ROAS < 1
-                        if 'net_roas' in channel_df_rounded.columns:
-                            net_roas_col = channel_df_rounded.columns.get_loc('net_roas')
-                            red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                            worksheet.conditional_format(1, net_roas_col, len(channel_df_rounded), net_roas_col, {
-                                'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                            })
-                        
-                        # Heatmap for CTR (skipped automatically for Google if removed)
-                        if 'ctr' in channel_df_rounded.columns:
-                            ctr_col = channel_df_rounded.columns.get_loc('ctr')
-                            worksheet.conditional_format(1, ctr_col, len(channel_df_rounded), ctr_col, {
-                                'type': '2_color_scale',
-                                'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                                'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                            })
-                        
-                        # Heatmap for Spend
-                        if 'spend' in channel_df_rounded.columns:
-                            spend_col = channel_df_rounded.columns.get_loc('spend')
-                            spend_values = pd.to_numeric(channel_df_rounded['spend'], errors='coerce').fillna(0)
-                            max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                            worksheet.conditional_format(1, spend_col, len(channel_df_rounded), spend_col, {
-                                'type': '2_color_scale',
-                                'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                                'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                            })
-                        
-                        # Merge repeating values for better visual grouping (channel-specific)
-                        merge_cols = []
-                        # Always include hierarchy columns when present
-                        for c in ['channel', 'campaign_name', 'adset_name', 'ad_name']:
-                            if c in channel_df_rounded.columns:
-                                merge_cols.append(c)
-                        # Common campaign-level metrics to merge when present
-                        common_merge_metrics = ['spend', 'revenue', 'cogs', 'net_roas', 'net_profit']
-                        for c in common_merge_metrics:
-                            if c in channel_df_rounded.columns:
-                                merge_cols.append(c)
-                        if channel_key == 'meta_ads':
-                            # Group Bounce rate, ATC, IC, conversion rate; be_roas intentionally excluded
-                            for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'conversion_rate', 'orders']:
-                                if c in channel_df_rounded.columns:
-                                    merge_cols.append(c)
-                            # Keep CTR if present (not explicitly required, but harmless)
+                            workbook = writer.book
+                            center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
+                            header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
+                            total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
+                            
+                            worksheet = writer.sheets[sheet_name]
+                            worksheet.set_column(0, len(channel_df_rounded.columns)-1, None, center_fmt)
+                            worksheet.freeze_panes(1, 0)
+                            worksheet.set_row(0, None, header_fmt)
+                            
+                            # Color Grand Total row (last row)
+                            try:
+                                last_row = len(channel_df_rounded)
+                                worksheet.set_row(last_row, None, total_fmt)
+                            except Exception:
+                                pass
+                            
+                            # Conditional formatting for profit column
+                            if 'net_profit' in channel_df_rounded.columns:
+                                profit_col = channel_df_rounded.columns.get_loc('net_profit')
+                                green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
+                                red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
+                                worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
+                                    'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
+                                })
+                                worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
+                                    'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
+                                })
+                            
+                            # Conditional formatting for Net ROAS < 1
+                            if 'net_roas' in channel_df_rounded.columns:
+                                net_roas_col = channel_df_rounded.columns.get_loc('net_roas')
+                                red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
+                                worksheet.conditional_format(1, net_roas_col, len(channel_df_rounded), net_roas_col, {
+                                    'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
+                                })
+                            
+                            # Heatmap for CTR (skipped automatically for Google if removed)
                             if 'ctr' in channel_df_rounded.columns:
-                                merge_cols.append('ctr')
-                        elif channel_key == 'google_ads':
-                            # Group orders, conversion_rate, and ctr (bounce/ATC/IC/be_roas already dropped)
-                            for c in ['orders', 'conversion_rate', 'ctr']:
+                                ctr_col = channel_df_rounded.columns.get_loc('ctr')
+                                worksheet.conditional_format(1, ctr_col, len(channel_df_rounded), ctr_col, {
+                                    'type': '2_color_scale',
+                                    'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
+                                    'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
+                                })
+                            
+                            # Heatmap for Spend
+                            if 'spend' in channel_df_rounded.columns:
+                                spend_col = channel_df_rounded.columns.get_loc('spend')
+                                spend_values = pd.to_numeric(channel_df_rounded['spend'], errors='coerce').fillna(0)
+                                max_spend = spend_values.max() if len(spend_values) > 0 else 1000
+                                worksheet.conditional_format(1, spend_col, len(channel_df_rounded), spend_col, {
+                                    'type': '2_color_scale',
+                                    'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
+                                    'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
+                                })
+                            
+                            # Merge repeating values for better visual grouping (channel-specific)
+                            merge_cols = []
+                            # Always include hierarchy columns when present
+                            for c in ['channel', 'campaign_name', 'adset_name', 'ad_name']:
                                 if c in channel_df_rounded.columns:
                                     merge_cols.append(c)
-                        
-                        _merge_repeating_values_in_sheet(
-                            writer,
-                            channel_df_rounded,
-                            sheet_name,
-                            merge_cols,
-                            scope_columns=[c for c in ['channel'] if c in channel_df_rounded.columns],
-                            sum_columns=[]  # No summing needed since we're showing unit prices per SKU
-                        )
-                        #
-                    except Exception as e:
-                        print(f"[{label}] Error applying formatting to {sheet_name}: {e}")
-                
-                else:
-                    print(f"[{label}] No {channel_key} data found, creating empty sheet")
-                    pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                    # Add empty summary for this channel (if not already added)
-                    if channel_key not in summary_data[timeframe_key]['channels']:
-                        summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
-            
+                            # Common campaign-level metrics to merge when present
+                            common_merge_metrics = ['spend', 'revenue', 'cogs', 'net_roas', 'net_profit']
+                            for c in common_merge_metrics:
+                                if c in channel_df_rounded.columns:
+                                    merge_cols.append(c)
+                            if channel_key == 'meta_ads':
+                                # Group Bounce rate, ATC, IC, conversion rate; be_roas intentionally excluded
+                                for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'conversion_rate', 'orders']:
+                                    if c in channel_df_rounded.columns:
+                                        merge_cols.append(c)
+                                # Keep CTR if present (not explicitly required, but harmless)
+                                if 'ctr' in channel_df_rounded.columns:
+                                    merge_cols.append('ctr')
+                            elif channel_key == 'google_ads':
+                                # Group orders, conversion_rate, and ctr (bounce/ATC/IC/be_roas already dropped)
+                                for c in ['orders', 'conversion_rate', 'ctr']:
+                                    if c in channel_df_rounded.columns:
+                                        merge_cols.append(c)
+                            
+                            _merge_repeating_values_in_sheet(
+                                writer,
+                                channel_df_rounded,
+                                sheet_name,
+                                merge_cols,
+                                scope_columns=[c for c in ['channel'] if c in channel_df_rounded.columns],
+                                sum_columns=[]  # No summing needed since we're showing unit prices per SKU
+                            )
+                        except Exception as e:
+                            print(f"[{label}] Error applying formatting to {sheet_name}: {e}")
+                    
+                    else:
+                        print(f"[{label}] No {channel_key} data found, creating empty sheet")
+                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+                        if channel_key not in summary_data[timeframe_key]['channels']:
+                            summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
+             
             # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
             print(f"\n[{label}] Processing Amazon data (ClickHouse)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
@@ -1697,15 +1710,13 @@ def run_product_profitability_report(for_date: str = None, out_dir: str = None) 
     return xlsx_path
 
 
-def extract_daily_efficiency_metrics(daily_file_path: str) -> dict:
+def extract_daily_efficiency_metrics(daily_file_path: str, report_date: str = None) -> dict:
     """
-    Extract efficiency metrics from daily Excel report.
-    
-    Args:
-        daily_file_path: Path to daily Excel report file
-    
-    Returns:
-        dict: Daily efficiency metrics
+    Extract efficiency metrics for a single day.
+
+    Primary source: GET /v1/historical/dashboard (aligned with daily PDF KPIs).
+    Falls back to parsing the daily entity Excel Grand Total rows when the API
+    returns nothing.
     """
     metrics = {
         'revenue': 0.0,
@@ -1716,13 +1727,48 @@ def extract_daily_efficiency_metrics(daily_file_path: str) -> dict:
         'cost_per_unit': 0.0,
         'avg_order_value': 0.0
     }
-    
+
+    date_str = report_date
+    if not date_str and daily_file_path:
+        import re
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(daily_file_path))
+        if m:
+            date_str = m.group(1)
+
+    if date_str:
+        try:
+            from api_data_fetcher import fetch_wtd_mtd_dashboard_snapshot
+            snap = fetch_wtd_mtd_dashboard_snapshot(date_str, date_str)
+            total = snap.get('dashboard_total') or snap.get('total') or {}
+            canonical = snap.get('canonical_totals') or {}
+            revenue = float(canonical.get('revenue', total.get('sales', 0)) or 0)
+            spend = float(canonical.get('ad_spend', total.get('ad_spend', 0)) or 0)
+            orders = int(total.get('order_count', canonical.get('orders', 0)) or 0)
+            quantity = int(total.get('units', orders) or 0)
+            if revenue or spend or orders:
+                metrics.update({
+                    'revenue': revenue,
+                    'spend': spend,
+                    'orders': orders,
+                    'quantity': quantity,
+                    'cost_per_order': spend / orders if orders > 0 else 0.0,
+                    'cost_per_unit': spend / quantity if quantity > 0 else 0.0,
+                    'avg_order_value': revenue / orders if orders > 0 else 0.0,
+                })
+                logger.info(
+                    "Daily efficiency from dashboard API (%s): CPO=₹%.2f, CPU=₹%.2f, AOV=₹%.2f",
+                    date_str, metrics['cost_per_order'], metrics['cost_per_unit'], metrics['avg_order_value'],
+                )
+                return metrics
+        except Exception as e:
+            logger.warning("Dashboard daily efficiency failed for %s: %s; falling back to Excel", date_str, e)
+
     if not daily_file_path or not os.path.exists(daily_file_path):
         logger.warning("Daily file path not provided or file does not exist")
         return metrics
     
     try:
-        # Strategy: Read the Grand Total row from each sheet (already calculated correctly)
+        # Legacy fallback: Grand Total rows from attribution-based entity Excel sheets
         total_revenue = 0.0
         total_spend = 0.0
         total_orders = 0
@@ -1884,23 +1930,21 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
     wtd_channels = wtd_data.get('channels', {})
     mtd_channels = mtd_data.get('channels', {})
     
-    # WTD totals
-    wtd_revenue = sum(ch.get('revenue', 0) for ch in wtd_channels.values())
-    wtd_spend = sum(ch.get('spend', 0) for ch in wtd_channels.values())
-    wtd_orders = sum(ch.get('orders', 0) for ch in wtd_channels.values())
-    wtd_quantity = sum(ch.get('quantity', 0) for ch in wtd_channels.values())
-    wtd_cpo = wtd_spend / wtd_orders if wtd_orders > 0 else 0.0
-    wtd_cpu = wtd_spend / wtd_quantity if wtd_quantity > 0 else 0.0
-    wtd_aov = wtd_revenue / wtd_orders if wtd_orders > 0 else 0.0
-    
-    # MTD totals
-    mtd_revenue = sum(ch.get('revenue', 0) for ch in mtd_channels.values())
-    mtd_spend = sum(ch.get('spend', 0) for ch in mtd_channels.values())
-    mtd_orders = sum(ch.get('orders', 0) for ch in mtd_channels.values())
-    mtd_quantity = sum(ch.get('quantity', 0) for ch in mtd_channels.values())
-    mtd_cpo = mtd_spend / mtd_orders if mtd_orders > 0 else 0.0
-    mtd_cpu = mtd_spend / mtd_quantity if mtd_quantity > 0 else 0.0
-    mtd_aov = mtd_revenue / mtd_orders if mtd_orders > 0 else 0.0
+    def _efficiency_from_timeframe(tf_data: dict) -> tuple[float, float, float, float, float, int, int]:
+        dashboard_total = tf_data.get('dashboard_total') or {}
+        canonical = tf_data.get('canonical_totals') or {}
+        channels = tf_data.get('channels', {})
+        revenue = canonical.get('revenue', dashboard_total.get('sales', sum(ch.get('revenue', 0) for ch in channels.values())))
+        spend = canonical.get('ad_spend', dashboard_total.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values())))
+        orders = dashboard_total.get('order_count', sum(ch.get('orders', 0) for ch in channels.values()))
+        quantity = dashboard_total.get('units', orders)
+        cpo = spend / orders if orders > 0 else 0.0
+        cpu = spend / quantity if quantity > 0 else 0.0
+        aov = revenue / orders if orders > 0 else 0.0
+        return revenue, spend, orders, quantity, cpo, cpu, aov
+
+    wtd_revenue, wtd_spend, wtd_orders, wtd_quantity, wtd_cpo, wtd_cpu, wtd_aov = _efficiency_from_timeframe(wtd_data)
+    mtd_revenue, mtd_spend, mtd_orders, mtd_quantity, mtd_cpo, mtd_cpu, mtd_aov = _efficiency_from_timeframe(mtd_data)
     
     # Add Efficiency Metrics Comparison Table (WTD vs MTD only)
     html_parts.append("""
@@ -1991,18 +2035,18 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         if not channels:
             continue
         
-        # Calculate overall totals across all channels
-        total_orders = sum(ch.get('orders', 0) for ch in channels.values())
-        total_quantity = sum(ch.get('quantity', 0) for ch in channels.values())
-        # Company-level revenue/COGS/spend/net profit come from the canonical
-        # /historical/time-patterns totals (same as the daily report) when available,
-        # so the totals row agrees with daily. Falls back to channel sums otherwise.
+        # Company-level revenue/COGS/spend/net profit from dashboard canonical totals;
+        # TOTAL row metrics (orders/units/efficiency) from dashboard_total when present.
         canonical = timeframe_data.get('canonical_totals') or {}
-        total_revenue = canonical.get('revenue', sum(ch.get('revenue', 0) for ch in channels.values()))
-        total_cogs = canonical.get('cogs', sum(ch.get('cogs', 0) for ch in channels.values()))
-        total_spend = canonical.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values()))
-        total_net_profit = canonical.get('net_profit', sum(ch.get('net_profit', 0) for ch in channels.values()))
-        total_net_roas = (total_revenue - total_cogs) / total_spend if total_spend > 0 else 0.0
+        dashboard_total = timeframe_data.get('dashboard_total') or {}
+        total_revenue = canonical.get('revenue', dashboard_total.get('sales', sum(ch.get('revenue', 0) for ch in channels.values())))
+        total_cogs = canonical.get('cogs', dashboard_total.get('cogs', sum(ch.get('cogs', 0) for ch in channels.values())))
+        total_spend = canonical.get('ad_spend', dashboard_total.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values())))
+        total_net_profit = canonical.get('net_profit', dashboard_total.get('net_profit', sum(ch.get('net_profit', 0) for ch in channels.values())))
+        total_net_roas = dashboard_total.get('net_roas', (total_revenue - total_cogs) / total_spend if total_spend > 0 else 0.0)
+        
+        total_orders = dashboard_total.get('order_count', sum(ch.get('orders', 0) for ch in channels.values()))
+        total_quantity = dashboard_total.get('units', total_orders)
         
         # Calculate overall efficiency metrics
         total_cost_per_order = total_spend / total_orders if total_orders > 0 else 0.0
@@ -2548,55 +2592,51 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
         daily_metrics = None
         if daily_file_path:
             try:
-                daily_metrics = extract_daily_efficiency_metrics(daily_file_path)
+                daily_metrics = extract_daily_efficiency_metrics(daily_file_path, report_date=yesterday_str)
                 logger.info(f"Extracted daily metrics: CPO=₹{daily_metrics['cost_per_order']:.2f}, CPU=₹{daily_metrics['cost_per_unit']:.2f}, AOV=₹{daily_metrics['avg_order_value']:.2f}")
             except Exception as e:
                 logger.warning(f"Could not extract daily efficiency metrics: {e}")
         
-        # Amazon WTD/MTD email metrics: same date windows as Meta/Google/Organic.
+        # Amazon WTD/MTD email metrics: use dashboard-aligned channel data from summary_data.
         amazon_wtd = None
         amazon_mtd = None
         try:
+            def _amazon_from_dashboard_channels(channels: dict) -> dict:
+                ch = (channels or {}).get('amazon') or {}
+                if not ch or (ch.get('revenue', 0) == 0 and ch.get('spend', 0) == 0):
+                    return {'available': False}
+                return {
+                    'revenue': ch.get('revenue', 0),
+                    'spend': ch.get('spend', 0),
+                    'orders': ch.get('orders', 0),
+                    'cogs': ch.get('cogs', 0),
+                    'units': ch.get('quantity', ch.get('orders', 0)),
+                    'net_profit': ch.get('net_profit', 0),
+                    'net_roas': ch.get('net_roas', 0),
+                    'pnl_available': True,
+                    'available': True,
+                }
+
             wtd_timeframe = summary_data.get('wtd', {})
             mtd_timeframe = summary_data.get('mtd', {})
-
-            def _tf_start(tf: dict) -> datetime:
-                return datetime.strptime(tf['start_date'], '%Y-%m-%d').replace(
-                    hour=0, minute=0, second=0, microsecond=0
+            amazon_wtd = _amazon_from_dashboard_channels(wtd_timeframe.get('channels', {}))
+            amazon_mtd = _amazon_from_dashboard_channels(mtd_timeframe.get('channels', {}))
+            if amazon_wtd.get('available'):
+                logger.info(
+                    "Amazon WTD (dashboard): Revenue=₹%.2f, Spend=₹%.2f, Orders=%s",
+                    amazon_wtd.get('revenue', 0),
+                    amazon_wtd.get('spend', 0),
+                    amazon_wtd.get('orders', 0),
                 )
-
-            def _tf_end(tf: dict) -> datetime:
-                return datetime.strptime(tf['end_date'], '%Y-%m-%d').replace(
-                    hour=23, minute=59, second=59, microsecond=0
+            if amazon_mtd.get('available'):
+                logger.info(
+                    "Amazon MTD (dashboard): Revenue=₹%.2f, Spend=₹%.2f, Orders=%s",
+                    amazon_mtd.get('revenue', 0),
+                    amazon_mtd.get('spend', 0),
+                    amazon_mtd.get('orders', 0),
                 )
-
-            if wtd_timeframe.get('start_date') and wtd_timeframe.get('end_date'):
-                amazon_wtd = get_amazon_summary_metrics(
-                    _tf_start(wtd_timeframe), _tf_end(wtd_timeframe)
-                )
-                if amazon_wtd.get('available', False):
-                    logger.info(
-                        f"Extracted Amazon WTD metrics: Revenue=₹{amazon_wtd['revenue']:.2f}, "
-                        f"Spend=₹{amazon_wtd['spend']:.2f}, Orders={amazon_wtd['orders']}, "
-                        f"Range={amazon_wtd['date_range']}"
-                    )
-                else:
-                    logger.warning("No Amazon data available for WTD")
-
-            if mtd_timeframe.get('start_date') and mtd_timeframe.get('end_date'):
-                amazon_mtd = get_amazon_summary_metrics(
-                    _tf_start(mtd_timeframe), _tf_end(mtd_timeframe)
-                )
-                if amazon_mtd.get('available', False):
-                    logger.info(
-                        f"Extracted Amazon MTD metrics: Revenue=₹{amazon_mtd['revenue']:.2f}, "
-                        f"Spend=₹{amazon_mtd['spend']:.2f}, Orders={amazon_mtd['orders']}, "
-                        f"Range={amazon_mtd['date_range']}"
-                    )
-                else:
-                    logger.warning("No Amazon data available for MTD")
         except Exception as e:
-            logger.warning(f"Could not extract Amazon metrics: {e}")
+            logger.warning(f"Could not load dashboard Amazon metrics for email: {e}")
         
         # Format summary data for email (includes efficiency comparison table and Amazon data)
         summary_html = format_summary_for_email(summary_data, amazon_wtd, amazon_mtd, daily_metrics)
@@ -2691,9 +2731,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                     rows.append(('Amazon', amz))
                 return rows
 
-            wtd_channels_ctx = _build_channels(wtd_ch_data, amazon_wtd)
-            mtd_channels_ctx = _build_channels(mtd_ch_data, amazon_mtd)
-
             def _total_row(channel_rows):
                 rev = sum(r['sales'] for _, r in channel_rows)
                 cogs = sum(r['cogs'] for _, r in channel_rows)
@@ -2708,8 +2745,14 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                     'units': sum(r['units'] for _, r in channel_rows),
                 }
 
-            wtd_total_ctx = _total_row(wtd_channels_ctx)
-            mtd_total_ctx = _total_row(mtd_channels_ctx)
+            wtd_channels_ctx = summary_data.get('wtd', {}).get('dashboard_channel_rows')
+            mtd_channels_ctx = summary_data.get('mtd', {}).get('dashboard_channel_rows')
+            if not wtd_channels_ctx or not mtd_channels_ctx:
+                wtd_channels_ctx = wtd_channels_ctx or _build_channels(wtd_ch_data, amazon_wtd)
+                mtd_channels_ctx = mtd_channels_ctx or _build_channels(mtd_ch_data, amazon_mtd)
+
+            wtd_total_ctx = summary_data.get('wtd', {}).get('dashboard_total') or _total_row(wtd_channels_ctx)
+            mtd_total_ctx = summary_data.get('mtd', {}).get('dashboard_total') or _total_row(mtd_channels_ctx)
 
             # Performance efficiency comparison (CPO / CPU / AOV), WTD vs MTD, computed from
             # the channel totals (incl. Amazon) shown above.
@@ -2748,21 +2791,28 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 _eff_row('Average Order Value (AOV)', 'aov', False),
             ]
 
-            # Headline company totals come from the canonical /historical/time-patterns
-            # figures (same as the daily report) when available, so WTD/MTD agrees with
-            # daily. Per-channel rows below remain channel-contribution detail. Falls back
-            # to channel sums if the canonical API call returned nothing.
-            def _headline_totals(ch_data, canonical):
+            # Headline company totals come from GET /v1/historical/dashboard (same as channel
+            # table TOTAL row and Selenic dashboard).
+            def _headline_totals(ch_data, canonical, dashboard_total):
                 canonical = canonical or {}
+                dashboard_total = dashboard_total or {}
                 return {
-                    'total_revenue': canonical.get('revenue', sum(v.get('revenue', 0) for v in ch_data.values())),
-                    'net_profit': canonical.get('net_profit', sum(v.get('net_profit', 0) for v in ch_data.values())),
-                    'ad_spend': canonical.get('ad_spend', sum(v.get('spend', 0) for v in ch_data.values())),
-                    'order_count': sum(v.get('orders', 0) for v in ch_data.values()),
+                    'total_revenue': canonical.get('revenue', dashboard_total.get('sales', sum(v.get('revenue', 0) for v in ch_data.values()))),
+                    'net_profit': canonical.get('net_profit', dashboard_total.get('net_profit', sum(v.get('net_profit', 0) for v in ch_data.values()))),
+                    'ad_spend': canonical.get('ad_spend', dashboard_total.get('ad_spend', sum(v.get('spend', 0) for v in ch_data.values()))),
+                    'order_count': dashboard_total.get('order_count', sum(v.get('orders', 0) for v in ch_data.values())),
                 }
 
-            wtd_totals = _headline_totals(wtd_ch_data, summary_data.get('wtd', {}).get('canonical_totals'))
-            mtd_totals = _headline_totals(mtd_ch_data, summary_data.get('mtd', {}).get('canonical_totals'))
+            wtd_totals = _headline_totals(
+                wtd_ch_data,
+                summary_data.get('wtd', {}).get('canonical_totals'),
+                summary_data.get('wtd', {}).get('dashboard_total'),
+            )
+            mtd_totals = _headline_totals(
+                mtd_ch_data,
+                summary_data.get('mtd', {}).get('canonical_totals'),
+                summary_data.get('mtd', {}).get('dashboard_total'),
+            )
 
             email_ctx = {
                 'report_date': today_str,

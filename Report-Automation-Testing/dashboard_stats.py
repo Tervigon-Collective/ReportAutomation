@@ -54,25 +54,9 @@ def _to_date_str(value: str | date | datetime) -> str:
 def _fetch_from_api(brand_id: int, company_id: int, start: str, end: str) -> Optional[dict]:
     """Return the raw `data` object from the historical dashboard endpoint, or None."""
     try:
-        from api_data_fetcher import BASE_URL, make_authenticated_request
+        from api_data_fetcher import fetch_historical_dashboard_cached
+        return fetch_historical_dashboard_cached(start, end)
     except ImportError:
-        return None
-    try:
-        url = f"{BASE_URL}/v1/historical/dashboard"
-        resp = make_authenticated_request(
-            "GET", url,
-            params={"brand_id": brand_id, "company_id": company_id,
-                    "start_date": start, "end_date": end},
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            logger.warning("[dashboard] API %s -> %s; falling back to ClickHouse",
-                           url, resp.status_code)
-            return None
-        payload = resp.json()
-        return payload.get("data", payload)
-    except Exception as e:
-        logger.warning("[dashboard] API call failed (%s); falling back to ClickHouse", e)
         return None
 
 

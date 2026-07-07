@@ -19,7 +19,6 @@ from timeframe_config import get_timeframe_config
 from api_data_fetcher import (
     fetch_marketing_hourly, fetch_google_spend, fetch_amazon_data,
     fetch_product_profitability, fetch_canonical_pnl_totals,
-    fetch_customer_mix, fetch_channel_funnel,
     fetch_wtd_mtd_dashboard_snapshot, clear_marketing_cache,
 )
 from global_config import get_global_config, get_temp_dir, get_report_dir
@@ -40,8 +39,6 @@ from excel_generation import generate_pdf_report, get_google_funnel_metrics
 # Amazon (ClickHouse gold) sheets for the WTD/MTD report
 from amazon_entity_report import add_amazon_sheets_for_timeframe, get_amazon_clickhouse_summary
 from channel_performance import plot_channel_performance_last_7_days
-from metric_calculators import compute_business_overview
-
 # Set up logging
 _temp_dir = get_temp_dir()
 logging.basicConfig(
@@ -97,23 +94,33 @@ def get_wtd_mtd_timeframes():
     Calculate Week-to-Date (WTD) and Month-to-Date (MTD) timeframes.
     Returns dict with 'wtd' and 'mtd' keys, each containing start_date and end_date.
 
-    WTD: Monday of the current week to today.
-    MTD: 1st of the current month to today.
+    WTD: Monday of the week containing yesterday through yesterday.
+    MTD: 1st of the current month through yesterday (prior month if run on the 1st).
     Daily: Previous day only (yesterday).
+
+    Today is excluded so morning runs use settled prior-day figures only.
     """
     now = _report_now()
 
-    # Week-to-Date: Monday of the current week to today
-    wtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
-    wtd_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_end = yesterday.replace(hour=23, minute=59, second=59, microsecond=0)
 
-    # Month-to-Date: 1st of current month to today
-    mtd_end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    # Week-to-Date: Monday of the week containing yesterday through yesterday
+    wtd_start = (yesterday - timedelta(days=yesterday.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    wtd_end = yesterday_end
+
+    # Month-to-Date: 1st of current month through yesterday
     mtd_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    
+    mtd_end = yesterday_end
+    if mtd_end < mtd_start:
+        # Report runs on the 1st — no settled days in the new month yet
+        mtd_start = yesterday.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     # Daily: Previous day only (for daily entity report sheet)
-    daily_date = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    daily_end = daily_date.replace(hour=23, minute=59, second=59, microsecond=0)
+    daily_date = yesterday
+    daily_end = yesterday_end
     
     return {
         'wtd': {
@@ -1394,52 +1401,6 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                         if channel_key not in summary_data[timeframe_key]['channels']:
                             summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
              
-            # --- Business Overview: fetch customer mix + per-channel funnels ---
-            # Company-wide customer mix (new vs returning, unique customers)
-            customer_mix = fetch_customer_mix(start_date_str, end_date_str)
-            
-            # Per-channel funnel data for Meta and Google (organic has no ad-delivery funnel)
-            funnels = {}
-            for ch_key in ['meta_ads', 'google_ads']:
-                if ch_key in rollups:
-                    try:
-                        api_channel = 'meta' if ch_key == 'meta_ads' else 'google'
-                        funnel_raw = fetch_channel_funnel(start_date_str, end_date_str, channel=api_channel)
-                        if funnel_raw:
-                            from metric_calculators import channel_funnel_from_api
-                            funnels[ch_key] = channel_funnel_from_api(funnel_raw)
-                    except Exception as e:
-                        logger.warning(f"[{label}] Failed to fetch {ch_key} funnel: {e}")
-            
-            # Aggregate period totals from dashboard canonical P&L for LTV/CAC
-            canonical = summary_data[timeframe_key].get('canonical_totals') or {}
-            dashboard_total = summary_data[timeframe_key].get('dashboard_total') or {}
-            total_revenue = canonical.get('revenue', dashboard_total.get('sales', 0))
-            total_cogs = canonical.get('cogs', dashboard_total.get('cogs', 0))
-            total_ad_spend = canonical.get('ad_spend', dashboard_total.get('ad_spend', 0))
-            
-            # Orders/units from dashboard TOTAL row (matches headline cards)
-            total_orders = dashboard_total.get('order_count', canonical.get('orders', 0))
-            total_units = dashboard_total.get('units', total_orders)
-            
-            # Compute Business Overview
-            business_overview = compute_business_overview(
-                revenue=total_revenue,
-                cogs=total_cogs,
-                ad_spend=total_ad_spend,
-                orders=total_orders,
-                units=total_units,
-                unique_customers=customer_mix.get('unique_customers', 0),
-                new_customers=customer_mix.get('new_customers', 0),
-                returning_customers=customer_mix.get('returning_customers', 0),
-                channels=summary_data[timeframe_key]['channels'],
-                funnels=funnels,
-            )
-            
-            summary_data[timeframe_key]['business_overview'] = business_overview
-            summary_data[timeframe_key]['customer_mix'] = customer_mix
-            summary_data[timeframe_key]['funnels'] = funnels
-            
             # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
             print(f"\n[{label}] Processing Amazon data (ClickHouse)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
@@ -2853,9 +2814,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 summary_data.get('mtd', {}).get('dashboard_total'),
             )
 
-            wtd_business_overview = summary_data.get('wtd', {}).get('business_overview', {})
-            mtd_business_overview = summary_data.get('mtd', {}).get('business_overview', {})
-
             email_ctx = {
                 'report_date': today_str,
                 'weekday': weekday,
@@ -2869,8 +2827,6 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 'mtd_total': mtd_total_ctx,
                 'efficiency': efficiency_ctx,
                 'wtd_campaigns': [],
-                'wtd_business_overview': wtd_business_overview,
-                'mtd_business_overview': mtd_business_overview,
             }
             email_body = render_email_wtd_mtd(email_ctx)
         except Exception as _tmpl_err:

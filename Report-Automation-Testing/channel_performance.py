@@ -329,7 +329,7 @@ def fetch_channel_performance(
 
     if _USE_API_ONLY or _USE_API_FALLBACK:
         try:
-            use_attribution = os.getenv("CHANNEL_FROM_ATTRIBUTION", "true").lower() in ("1", "true", "yes")
+            use_attribution = os.getenv("CHANNEL_FROM_ATTRIBUTION", "false").lower() in ("1", "true", "yes")
             df = pd.DataFrame()
             if use_attribution:
                 df = _fetch_channel_performance_from_attribution(start_str, end_str)

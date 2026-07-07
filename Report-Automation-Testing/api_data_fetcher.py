@@ -965,6 +965,92 @@ def fetch_shopify_sales_orders_detail(start_date: str, end_date: str) -> pd.Data
         )
 
 
+def fetch_customer_mix(start_date: str, end_date: str) -> dict:
+    """Company-wide customer mix for the inclusive date range (IST, GST-adjusted revenue).
+
+    New vs returning customer classification uses ``public.customer_details_th.email``
+    joined to ``public.shopify_orders`` on ``order_id``. A customer is "new" if their
+    earliest non-cancelled processed order falls within [start_date, end_date]; otherwise
+    "returning". Cancels follow the codebase convention ``cancelled_at_ist IS NULL`` and
+    revenue uses ``apply_net_revenue_column`` (GST-excluded) like the other shopify queries.
+
+    Returns a dict with: unique_customers, new_customers, returning_customers,
+    repeat_orders, orders, revenue (net of GST). On any failure returns a zeroed dict
+    so callers can render the Business Snapshot section without raising.
+    """
+    empty = {
+        "unique_customers": 0,
+        "new_customers": 0,
+        "returning_customers": 0,
+        "repeat_orders": 0,
+        "orders": 0,
+        "revenue": 0.0,
+    }
+    try:
+        engine = get_db_engine()
+        query = text("""
+            WITH period_orders AS (
+                SELECT
+                    o.order_id,
+                    DATE(o.processed_at_ist) AS sale_date,
+                    o.total_price_amount,
+                    COALESCE(NULLIF(TRIM(c.email), ''), NULL) AS email
+                FROM public.shopify_orders o
+                LEFT JOIN public.customer_details_th c ON c.order_id = o.order_id
+                WHERE o.cancelled_at_ist IS NULL
+                  AND DATE(o.processed_at_ist) BETWEEN :start_date AND :end_date
+            ),
+            period_customers AS (
+                SELECT email, COUNT(*) AS period_orders, SUM(total_price_amount) AS period_revenue
+                FROM period_orders
+                WHERE email IS NOT NULL
+                GROUP BY email
+            ),
+            first_order_dates AS (
+                SELECT
+                    c.email,
+                    MIN(DATE(o.processed_at_ist)) AS first_order_date
+                FROM public.shopify_orders o
+                LEFT JOIN public.customer_details_th c ON c.order_id = o.order_id
+                WHERE o.cancelled_at_ist IS NULL
+                  AND c.email IS NOT NULL AND TRIM(c.email) <> ''
+                GROUP BY c.email
+            )
+            SELECT
+                COUNT(DISTINCT pc.email)                        AS unique_customers,
+                COUNT(DISTINCT f.email)
+                    FILTER (WHERE f.first_order_date >= :start_date
+                              AND f.first_order_date <= :end_date) AS new_customers,
+                COUNT(DISTINCT f.email)
+                    FILTER (WHERE f.first_order_date < :start_date)   AS returning_customers,
+                COALESCE(SUM(pc.period_orders)
+                    FILTER (WHERE f.first_order_date < :start_date), 0) AS repeat_orders,
+                COUNT(*)                                       AS orders,
+                COALESCE(SUM(pc.period_revenue), 0)             AS revenue
+            FROM period_customers pc
+            LEFT JOIN first_order_dates f ON f.email = pc.email
+        """)
+        with engine.connect() as conn:
+            row = conn.execute(
+                query, params={"start_date": start_date, "end_date": end_date}
+            ).fetchone()
+        if row is None:
+            return empty
+        revenue = float(row.revenue or 0.0)
+        revenue = float(apply_net_revenue_column(pd.Series([revenue])).iloc[0])
+        return {
+            "unique_customers": int(row.unique_customers or 0),
+            "new_customers": int(row.new_customers or 0),
+            "returning_customers": int(row.returning_customers or 0),
+            "repeat_orders": int(row.repeat_orders or 0),
+            "orders": int(row.orders or 0),
+            "revenue": revenue,
+        }
+    except Exception as e:
+        logger.warning("fetch_customer_mix failed (%s -> %s): %s", start_date, end_date, e)
+        return empty
+
+
 def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataFrame:
     """Daily net profit series from GET /v1/historical/time-patterns."""
     from api_response_transformers import time_patterns_daily_df
@@ -975,11 +1061,25 @@ def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataF
 
 
 def fetch_canonical_pnl_totals(start_date: str, end_date: str) -> dict:
-    """Canonical company P&L totals for a date window from GET /v1/historical/time-patterns.
+    """Canonical company P&L totals for a date window.
 
-    Same source as the daily net-profit graph (net_sales - net_cogs - total_ad_spend),
-    so WTD/MTD headline figures agree with the daily report. Returns {} on failure.
+    Primary source: GET /v1/historical/dashboard (same as Selenic dashboard + WTD/MTD
+    email KPIs). Fallback: GET /v1/historical/time-patterns daily series sum.
     """
+    try:
+        from metric_calculators import canonical_totals_from_historical_dashboard
+
+        data = fetch_historical_dashboard_cached(start_date, end_date)
+        if data:
+            totals = canonical_totals_from_historical_dashboard(data)
+            if totals:
+                return totals
+    except Exception as e:
+        logger.warning(
+            "fetch_canonical_pnl_totals dashboard failed (%s -> %s): %s",
+            start_date, end_date, e,
+        )
+
     try:
         df = fetch_net_profit_series_from_api(start_date, end_date)
         if df is None or df.empty:
@@ -1051,11 +1151,13 @@ def fetch_shopify_sales_by_state(start_date: str, end_date: str) -> pd.DataFrame
 # Live "today" data is still being attributed, so independent fetches minutes
 # apart would otherwise return different numbers and fail to reconcile.
 _MARKETING_HOURLY_CACHE: dict = {}
+_HISTORICAL_DASHBOARD_CACHE: dict = {}
 
 
 def clear_marketing_cache() -> None:
     """Drop the run-scoped marketing snapshot cache (e.g. between report runs)."""
     _MARKETING_HOURLY_CACHE.clear()
+    _HISTORICAL_DASHBOARD_CACHE.clear()
 
 
 def fetch_marketing_hourly(start_date: str, end_date: str) -> pd.DataFrame:
@@ -1299,6 +1401,22 @@ def fetch_historical_dashboard(start_date: str, end_date: str) -> Optional[dict]
     })
 
 
+def fetch_historical_dashboard_cached(start_date: str, end_date: str) -> Optional[dict]:
+    """Memoized historical/dashboard for a date window (shared across report sections)."""
+    cache_key = (_to_date_only(start_date), _to_date_only(end_date))
+    if cache_key not in _HISTORICAL_DASHBOARD_CACHE:
+        _HISTORICAL_DASHBOARD_CACHE[cache_key] = fetch_historical_dashboard(start_date, end_date)
+    return _HISTORICAL_DASHBOARD_CACHE[cache_key]
+
+
+def fetch_wtd_mtd_dashboard_snapshot(start_date: str, end_date: str) -> dict:
+    """WTD/MTD email + headline figures from GET /v1/historical/dashboard."""
+    from metric_calculators import wtd_mtd_snapshot_from_historical_dashboard
+
+    data = fetch_historical_dashboard_cached(start_date, end_date)
+    return wtd_mtd_snapshot_from_historical_dashboard(data or {})
+
+
 def fetch_historical_time_patterns(start_date: str, end_date: str) -> Optional[dict]:
     return fetch_v1("historical/time-patterns", {
         "start_date": _to_date_only(start_date),
@@ -1478,10 +1596,10 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
         start_str = start_str[:10]
         end_str = end_str[:10]
 
-    data = fetch_historical_dashboard(start_str, end_str)
+    data = fetch_historical_dashboard_cached(start_str, end_str)
     if data:
         result = channel_metrics_from_historical_dashboard(data)
-        return {k: result[k] for k in ("meta", "google", "organic", "total") if k in result}
+        return {k: result[k] for k in ("meta", "google", "organic", "amazon", "total") if k in result}
 
     if USE_API_ONLY:
         logger.error("[PDF metrics] API-only mode: historical/dashboard returned no data")

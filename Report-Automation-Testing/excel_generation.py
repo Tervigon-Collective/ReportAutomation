@@ -804,13 +804,10 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
     if api_metrics is None:
         api_metrics = get_organized_metrics_for_pdf(timeframe_start, timeframe_end)
 
-    # Reconcile the channel-performance rows (meta/google/organic) to the SAME
-    # attribution snapshot the entity report is built from, so the email/PDF
-    # Channel Performance rows match meta_ads_rollup / google_campaigns /
-    # organic_campaigns exactly. The run-scoped marketing cache guarantees both
-    # read one snapshot even mid-day. The all-up P&L 'total' and 'amazon' rows are
-    # left unchanged (headline includes Amazon + event-date returns/cancels).
-    if os.getenv("CHANNEL_FROM_ATTRIBUTION", "true").lower() in ("1", "true", "yes") and isinstance(api_metrics, dict):
+    # Channel KPI rows: GET /v1/historical/dashboard (same as Selenic dashboard).
+    # Entity Excel sheets still use fetch_marketing_hourly for campaign/SKU drill-down.
+    # Set CHANNEL_FROM_ATTRIBUTION=true only for legacy reconciliation with attribution rollups.
+    if os.getenv("CHANNEL_FROM_ATTRIBUTION", "false").lower() in ("1", "true", "yes") and isinstance(api_metrics, dict):
         try:
             from timeframe_config import get_timeframe_config
             from api_data_fetcher import fetch_marketing_hourly
@@ -822,7 +819,7 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             for _ch in ("meta", "google", "organic"):
                 if _ch in _attr_ch:
                     api_metrics[_ch] = _attr_ch[_ch]
-            logger.info("Channel Performance rows reconciled to attribution snapshot (entity-report basis)")
+            logger.info("Channel Performance rows overridden from attribution snapshot (CHANNEL_FROM_ATTRIBUTION=true)")
         except Exception as _cae:
             logger.warning("Channel-from-attribution reconcile skipped: %s", _cae)
 

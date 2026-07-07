@@ -873,16 +873,11 @@ def _fetch_meta_funnel_by_ad(start_date: str, end_date: str) -> tuple[dict, dict
 
 
 def build_channel_summary_from_marketing_df(df: pd.DataFrame) -> dict:
-    """Channel-performance buckets (meta/google/organic) derived from the SAME
-    attribution DataFrame the entity-report sheets are built from.
+    """Channel-performance buckets (meta/google/organic) from attribution hourly data.
 
-    This lets the email Channel Performance rows reconcile with the entity report
-    by construction: identical source, identical aggregation. Revenue is the
-    attributed order revenue (net of returns/cancels; on days with none it equals
-    gross). Returns {channel: enrich_channel_bucket(...)} matching the
-    get_dashboard_pdf_metrics channel contract. The all-up P&L 'total' and
-    'amazon' rows are intentionally left to the caller (they include Amazon and
-    event-date returns and are not the sum of these channels).
+    Used for entity-report Excel rollups and optional legacy PDF overlay when
+    CHANNEL_FROM_ATTRIBUTION=true. The daily/WTD/MTD PDF and email KPI tables
+    use GET /v1/historical/dashboard instead (see get_organized_metrics_for_pdf).
     """
     from metric_calculators import enrich_channel_bucket
 
@@ -2151,6 +2146,12 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
         from global_config import get_report_dir
         out_dir = get_report_dir()
     os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        from api_data_fetcher import clear_marketing_cache
+        clear_marketing_cache()
+    except Exception:
+        pass
 
     # Always resolve timeframe via timeframe_config to honor globals/env and persist
     tf = get_timeframe_config(start_date, end_date)

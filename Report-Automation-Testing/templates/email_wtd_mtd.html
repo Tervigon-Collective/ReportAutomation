@@ -75,6 +75,197 @@
   </tr>
   {% endif %}
 
+  <!-- BUSINESS SNAPSHOT (Unit Economics, Acquisition, Customer Mix, Channel Funnel) -->
+  {% if wtd_business_overview or mtd_business_overview %}
+  <tr>
+    <td style="background:#ffffff;padding:24px 32px 0 32px;">
+      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Business Snapshot</div>
+      <div style="font-size:11px;color:#94a3b8;margin-bottom:12px;">Unit economics, acquisition, customer mix & funnel by channel — WTD vs MTD</div>
+
+      <!-- Unit Economics -->
+      {% if wtd_business_overview.unit_economics or mtd_business_overview.unit_economics %}
+      <div style="font-size:11px;font-weight:700;color:#1a1a2e;margin-bottom:8px;margin-top:16px;">Unit Economics</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Metric</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Week-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Month-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:center;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Change</th>
+        </tr>
+        {% set ue = [
+          ('AOV (₹)', wtd_business_overview.unit_economics.aov if wtd_business_overview else 0, mtd_business_overview.unit_economics.aov if mtd_business_overview else 0, false),
+          ('Purchase Freq.', wtd_business_overview.unit_economics.pf if wtd_business_overview else 0, mtd_business_overview.unit_economics.pf if mtd_business_overview else 0, false),
+          ('LTV (₹)', wtd_business_overview.unit_economics.ltv if wtd_business_overview else 0, mtd_business_overview.unit_economics.ltv if mtd_business_overview else 0, false),
+          ('Contribution Margin %', wtd_business_overview.unit_economics.contribution_margin_pct if wtd_business_overview else 0, mtd_business_overview.unit_economics.contribution_margin_pct if mtd_business_overview else 0, false),
+          ('Blended ROAS', wtd_business_overview.unit_economics.blended_roas if wtd_business_overview else 0, mtd_business_overview.unit_economics.blended_roas if mtd_business_overview else 0, false),
+          ('Gross ROAS', wtd_business_overview.unit_economics.gross_roas if wtd_business_overview else 0, mtd_business_overview.unit_economics.gross_roas if mtd_business_overview else 0, false),
+          ('Net ROAS', wtd_business_overview.unit_economics.net_roas if wtd_business_overview else 0, mtd_business_overview.unit_economics.net_roas if mtd_business_overview else 0, false),
+        ] %}
+        {% for label, wtd_val, mtd_val, is_cost in ue %}
+        {% set change = ((wtd_val - mtd_val) / mtd_val * 100) if mtd_val else 0 %}
+        {% set change_text = '—' if change == 0 else (('↑ ' if change > 0 else '↓ ') ~ change|abs|round(1) ~ '%') %}
+        {% set change_bg = '' %}
+        {% if change != 0 %}
+          {% if is_cost %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change < 0 else 'background-color: #ffebee;' %}
+          {% else %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change > 0 else 'background-color: #ffebee;' %}
+          {% endif %}
+        {% endif %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;color:#1e293b;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ label }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ '₹' ~ wtd_val|round(2) if '₹' in label else (wtd_val|round(2) if 'ROAS' in label else wtd_val|round(2)) }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ '₹' ~ mtd_val|round(2) if '₹' in label else (mtd_val|round(2) if 'ROAS' in label else mtd_val|round(2)) }}</td>
+          <td style="font-size:12px;font-weight:600;color:#334155;text-align:center;padding:8px 8px;border-bottom:1px solid #f1f5f9;{{ change_bg }}">{{ change_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+
+      <!-- Acquisition Economics -->
+      {% if wtd_business_overview.acquisition or mtd_business_overview.acquisition %}
+      <div style="font-size:11px;font-weight:700;color:#1a1a2e;margin-bottom:8px;margin-top:16px;">Acquisition Economics</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Metric</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Week-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Month-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:center;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Change</th>
+        </tr>
+        {% set acq = [
+          ('CPO (₹)', wtd_business_overview.acquisition.cpo if wtd_business_overview else 0, mtd_business_overview.acquisition.cpo if mtd_business_overview else 0, true),
+          ('CPU (₹)', wtd_business_overview.acquisition.cpu if wtd_business_overview else 0, mtd_business_overview.acquisition.cpu if mtd_business_overview else 0, true),
+          ('CAC (₹)', wtd_business_overview.acquisition.cac if wtd_business_overview else 0, mtd_business_overview.acquisition.cac if mtd_business_overview else 0, true),
+          ('LTV:CAC Ratio', wtd_business_overview.acquisition.ltv_cac_ratio if wtd_business_overview else 0, mtd_business_overview.acquisition.ltv_cac_ratio if mtd_business_overview else 0, false),
+          ('New Customers', wtd_business_overview.acquisition.new_customers if wtd_business_overview else 0, mtd_business_overview.acquisition.new_customers if mtd_business_overview else 0, false),
+          ('Returning Customers', wtd_business_overview.acquisition.returning_customers if wtd_business_overview else 0, mtd_business_overview.acquisition.returning_customers if mtd_business_overview else 0, false),
+        ] %}
+        {% for label, wtd_val, mtd_val, is_cost in acq %}
+        {% set change = ((wtd_val - mtd_val) / mtd_val * 100) if mtd_val else 0 %}
+        {% set change_text = '—' if change == 0 else (('↑ ' if change > 0 else '↓ ') ~ change|abs|round(1) ~ '%') %}
+        {% set change_bg = '' %}
+        {% if change != 0 %}
+          {% if is_cost %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change < 0 else 'background-color: #ffebee;' %}
+          {% else %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change > 0 else 'background-color: #ffebee;' %}
+          {% endif %}
+        {% endif %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;color:#1e293b;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ label }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ '₹' ~ wtd_val|round(2) if '₹' in label else wtd_val|round(2) if 'Ratio' in label else wtd_val|int }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ '₹' ~ mtd_val|round(2) if '₹' in label else mtd_val|round(2) if 'Ratio' in label else mtd_val|int }}</td>
+          <td style="font-size:12px;font-weight:600;color:#334155;text-align:center;padding:8px 8px;border-bottom:1px solid #f1f5f9;{{ change_bg }}">{{ change_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+
+      <!-- Customer Mix -->
+      {% if wtd_business_overview.customer_mix or mtd_business_overview.customer_mix %}
+      <div style="font-size:11px;font-weight:700;color:#1a1a2e;margin-bottom:8px;margin-top:16px;">Customer Mix</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Metric</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Week-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Month-to-Date</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:center;padding:7px 8px;border-bottom:2px solid #e2e8f0;">Change</th>
+        </tr>
+        {% set cm = [
+          ('New %', wtd_business_overview.customer_mix.new_pct if wtd_business_overview else 0, mtd_business_overview.customer_mix.new_pct if mtd_business_overview else 0, false),
+          ('Returning %', wtd_business_overview.customer_mix.returning_pct if wtd_business_overview else 0, mtd_business_overview.customer_mix.returning_pct if mtd_business_overview else 0, false),
+          ('Repeat Order Rate %', wtd_business_overview.customer_mix.repeat_order_rate if wtd_business_overview else 0, mtd_business_overview.customer_mix.repeat_order_rate if mtd_business_overview else 0, false),
+          ('Unique Customers', wtd_business_overview.customer_mix.unique_customers if wtd_business_overview else 0, mtd_business_overview.customer_mix.unique_customers if mtd_business_overview else 0, false),
+        ] %}
+        {% for label, wtd_val, mtd_val, is_cost in cm %}
+        {% set change = ((wtd_val - mtd_val) / mtd_val * 100) if mtd_val else 0 %}
+        {% set change_text = '—' if change == 0 else (('↑ ' if change > 0 else '↓ ') ~ change|abs|round(1) ~ '%') %}
+        {% set change_bg = '' %}
+        {% if change != 0 %}
+          {% if is_cost %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change < 0 else 'background-color: #ffebee;' %}
+          {% else %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change > 0 else 'background-color: #ffebee;' %}
+          {% endif %}
+        {% endif %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:12px;color:#1e293b;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ label }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ wtd_val|round(1) if 'Unique' not in label else wtd_val|int }}</td>
+          <td style="font-size:12px;color:#334155;text-align:right;padding:8px 8px;border-bottom:1px solid #f1f5f9;">{{ mtd_val|round(1) if 'Unique' not in label else mtd_val|int }}</td>
+          <td style="font-size:12px;font-weight:600;color:#334155;text-align:center;padding:8px 8px;border-bottom:1px solid #f1f5f9;{{ change_bg }}">{{ change_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+
+      <!-- Channel Funnel -->
+      {% if wtd_business_overview.channel_funnel or mtd_business_overview.channel_funnel %}
+      <div style="font-size:11px;font-weight:700;color:#1a1a2e;margin-bottom:8px;margin-top:16px;">Channel Funnel (Meta & Google)</div>
+      {% for ch_name, ch_funnel in wtd_business_overview.channel_funnel.items() %}
+      <div style="font-size:10px;font-weight:700;color:#1a1a2e;margin-bottom:4px;margin-top:12px;">{{ ch_name|replace('_ads', ' Ads')|title }}</div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:12px;">
+        <tr style="background:#f8fafc;">
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:left;padding:6px 8px;border-bottom:2px solid #e2e8f0;">Stage</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:6px 8px;border-bottom:2px solid #e2e8f0;">WTD</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:right;padding:6px 8px;border-bottom:2px solid #e2e8f0;">MTD</th>
+          <th style="font-size:10px;color:#64748b;font-weight:600;text-align:center;padding:6px 8px;border-bottom:2px solid #e2e8f0;">Change</th>
+        </tr>
+        {% set stages = [
+          ('Impressions', 'impressions', ch_funnel.get('impressions', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('impressions', 0), false),
+          ('Clicks', 'clicks', ch_funnel.get('clicks', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('clicks', 0), false),
+          ('CTR %', 'ctr', ch_funnel.get('ctr', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('ctr', 0), false),
+          ('LP Views', 'landing_page_views', ch_funnel.get('landing_page_views', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('landing_page_views', 0), false),
+          ('Add to Cart', 'add_to_cart', ch_funnel.get('add_to_cart', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('add_to_cart', 0), false),
+          ('Checkout', 'checkout', ch_funnel.get('checkout', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('checkout', 0), false),
+          ('Orders', 'orders', ch_funnel.get('orders', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('orders', 0), false),
+        ] %}
+        {% for label, key, wtd_val, mtd_val, is_cost in stages %}
+        {% set change = ((wtd_val - mtd_val) / mtd_val * 100) if mtd_val else 0 %}
+        {% set change_text = '—' if change == 0 else (('↑ ' if change > 0 else '↓ ') ~ change|abs|round(1) ~ '%') %}
+        {% set change_bg = '' %}
+        {% if change != 0 %}
+          {% if is_cost %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change < 0 else 'background-color: #ffebee;' %}
+          {% else %}
+            {% set change_bg = 'background-color: #e8f5e9;' if change > 0 else 'background-color: #ffebee;' %}
+          {% endif %}
+        {% endif %}
+        <tr style="{{ 'background:#f8fafc;' if loop.index % 2 == 0 else '' }}">
+          <td style="font-size:11px;color:#1e293b;padding:6px 8px;border-bottom:1px solid #f1f5f9;">{{ label }}</td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">{{ wtd_val|round(2) if key in ['ctr'] else wtd_val|int }}</td>
+          <td style="font-size:11px;color:#334155;text-align:right;padding:6px 8px;border-bottom:1px solid #f1f5f9;">{{ mtd_val|round(2) if key in ['ctr'] else mtd_val|int }}</td>
+          <td style="font-size:11px;font-weight:600;color:#334155;text-align:center;padding:6px 8px;border-bottom:1px solid #f1f5f9;{{ change_bg }}">{{ change_text }}</td>
+        </tr>
+        {% endfor %}
+        <!-- Drop-off rates -->
+        <tr style="background:#fef3c7;">
+          <td style="font-size:10px;color:#92400e;font-weight:600;padding:6px 8px;border-bottom:1px solid #fde68a;" colspan="4">Drop-off Rates</td>
+        </tr>
+        {% set dropoffs = [
+          ('Impr→Click %', 'drop_off_impressions_to_clicks', ch_funnel.get('drop_off_impressions_to_clicks', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('drop_off_impressions_to_clicks', 0)),
+          ('Click→LP %', 'drop_off_clicks_to_landing', ch_funnel.get('drop_off_clicks_to_landing', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('drop_off_clicks_to_landing', 0)),
+          ('LP→Cart %', 'drop_off_landing_to_cart', ch_funnel.get('drop_off_landing_to_cart', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('drop_off_landing_to_cart', 0)),
+          ('Cart→Checkout %', 'drop_off_cart_to_checkout', ch_funnel.get('drop_off_cart_to_checkout', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('drop_off_cart_to_checkout', 0)),
+          ('Checkout→Order %', 'drop_off_checkout_to_orders', ch_funnel.get('drop_off_checkout_to_orders', 0), (mtd_business_overview.channel_funnel.get(ch_name, {}) or {}).get('drop_off_checkout_to_orders', 0)),
+        ] %}
+        {% for label, key, wtd_val, mtd_val in dropoffs %}
+        {% set change = ((wtd_val - mtd_val) / mtd_val * 100) if mtd_val else 0 %}
+        {% set change_text = '—' if change == 0 else (('↑ ' if change > 0 else '↓ ') ~ change|abs|round(1) ~ '%') %}
+        <tr style="{{ 'background:#fef9e7;' if loop.index % 2 == 0 else 'background:#fef3c7;' }}">
+          <td style="font-size:10px;color:#92400e;padding:5px 8px;border-bottom:1px solid #fde68a;">{{ label }}</td>
+          <td style="font-size:10px;color:#92400e;text-align:right;padding:5px 8px;border-bottom:1px solid #fde68a;">{{ wtd_val|round(2) }}%</td>
+          <td style="font-size:10px;color:#92400e;text-align:right;padding:5px 8px;border-bottom:1px solid #fde68a;">{{ mtd_val|round(2) }}%</td>
+          <td style="font-size:10px;color:#92400e;text-align:center;padding:5px 8px;border-bottom:1px solid #fde68a;">{{ change_text }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endfor %}
+      {% endif %}
+
+    </td>
+  </tr>
+  {% endif %}
+
   <!-- WTD CHANNEL TABLE -->
   <tr>
     <td style="background:#ffffff;padding:24px 32px 0 32px;">
@@ -160,7 +351,7 @@
         </tr>
         {% endif %}
       </table>
-      <div style="font-size:10px;color:#94a3b8;margin-top:8px;">Channel rows are contribution-level (revenue − attributed COGS − channel spend); the headline Net Profit above is the company total from the daily P&amp;L source.</div>
+      <div style="font-size:10px;color:#94a3b8;margin-top:8px;">All KPIs above use GET /v1/historical/dashboard (same source as the Selenic dashboard). Channel rows are per-channel breakdowns; the TOTAL row and headline cards use company-level dashboard totals.</div>
     </td>
   </tr>
 

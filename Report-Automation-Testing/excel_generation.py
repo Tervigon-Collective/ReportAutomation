@@ -2070,7 +2070,7 @@ def main():
                     _daily_email_context["weather_report_time"] = weather_bundle.get("report_time", "")
                     _daily_email_context["weather_fetched_at"] = weather_bundle.get("weather_fetched_at", "")
                 logger.info("Added weather report to email: %s", weather_bundle["csv_path"])
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             logger.warning("Weather report email section skipped: %s", e)
 
         # Send the email with attachments

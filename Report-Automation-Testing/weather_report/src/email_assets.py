@@ -80,7 +80,7 @@ def _run_live_pipeline(
         skip_classify=False,
         plots=False,
         top=top,
-        continue_on_error=False,
+        continue_on_error=True,
         combined_path=combined_path,
         csv_path=csv_path,
     )

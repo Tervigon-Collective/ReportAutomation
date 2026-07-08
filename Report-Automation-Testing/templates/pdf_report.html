@@ -128,10 +128,12 @@
   }
   .total-row td:first-child { color: #0f172a; }
   .adjustment-row td {
-    background: #fff8ef; color: #b45309; font-style: italic;
-    border-top: 1px solid #fbe6c8; border-bottom: 1px solid #fbe6c8;
+    background: transparent; color: #94a3b8; font-weight: 400; font-style: normal;
+    border-bottom: 1px solid #f1f4f8;
   }
-  .adjustment-row td:first-child { color: #b45309; }
+  .adjustment-row td:first-child { color: #94a3b8; font-weight: 500; }
+  .adjustment-row td.pos,
+  .adjustment-row td.neg { color: #94a3b8; font-weight: 400; }
 
   /* ---------- BARS ---------- */
   .fill-green { background: #16a34a; } .fill-amber { background: #d97706; } .fill-red { background: #dc2626; }
@@ -231,7 +233,7 @@
     <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">After COGS &amp; ad spend</div></td>
   </tr>
   <tr>
-    <td class="kpi-card"><div class="kpi-label">Blended ROAS</div><div class="kpi-value">{{ total.gross_roas | fmt_roas }}</div><div class="kpi-sub">Revenue / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Blended ROAS</div><div class="kpi-value">{{ total.gross_roas | fmt_roas }}</div><div class="kpi-sub">Net revenue / ad spend</div></td>
     <td class="kpi-card"><div class="kpi-label">Net ROAS</div><div class="kpi-value">{{ total.net_roas | fmt_roas }}</div><div class="kpi-sub">Contribution / ad spend</div></td>
     <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Net of returns / cancels</div></td>
     <td class="kpi-card"><div class="kpi-label">Cost per Order</div><div class="kpi-value">{{ total.cpp | fmt_inr }}</div><div class="kpi-sub">Ad spend / order</div></td>
@@ -262,7 +264,7 @@
           <td>{{ ch.sales | fmt_inr_compact }}</td>
           <td>{{ ch.ad_spend | fmt_inr_compact }}</td>
           <td class="muted">{{ ch.cogs | fmt_inr_compact }}</td>
-          <td class="{{ 'pos' if (ch.sales - ch.cogs) >= 0 else 'neg' }}">{{ (ch.sales - ch.cogs) | fmt_inr_compact }}</td>
+          <td class="{{ 'pos' if ch.gross_profit >= 0 else 'neg' }}">{{ ch.gross_profit | fmt_inr_compact }}</td>
           <td class="{{ 'pos' if ch.net_profit >= 0 else 'neg' }}">{{ ch.net_profit | fmt_inr_compact }}</td>
           <td>{{ ch.gross_roas | fmt_roas }}</td>
           <td class="{{ ch.net_roas | roas_grad }}">{{ ch.net_roas | fmt_roas }}</td>
@@ -272,11 +274,26 @@
         {% endfor %}
         {% if returns_row and returns_row.show %}
         <tr class="adjustment-row">
-          <td class="wrap">Returned / Cancelled{% if returns_row.cancelled_orders or returns_row.returned_orders %} <span style="font-size:5.8pt;font-weight:400;">({{ returns_row.cancelled_orders }} cancel{% if returns_row.cancelled_orders != 1 %}s{% endif %}{% if returns_row.returned_orders %}, {{ returns_row.returned_orders }} return{% if returns_row.returned_orders != 1 %}s{% endif %}{% endif %})</span>{% endif %}</td>
-          <td>{{ returns_row.total_amount | fmt_inr_compact }}</td>
-          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td>Rtrn/cncl</td>
+          <td>{{ returns_row.sales | fmt_inr_compact }}</td>
+          <td class="muted">&mdash;</td>
+          <td class="muted">&mdash;</td>
+          <td>{{ returns_row.gross_profit | fmt_inr_compact }}</td>
+          <td>{{ returns_row.net_profit | fmt_inr_compact }}</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
           <td>{{ returns_row.order_count }}</td><td class="muted">&mdash;</td>
+        </tr>
+        {% endif %}
+        {% if residual_row and residual_row.show %}
+        <tr class="adjustment-row">
+          <td>Others</td>
+          <td>{{ residual_row.sales | fmt_inr_compact }}</td>
+          <td>{% if residual_row.ad_spend %}{{ residual_row.ad_spend | fmt_inr_compact }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+          <td>{% if residual_row.cogs %}{{ residual_row.cogs | fmt_inr_compact }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+          <td>{{ residual_row.gross_profit | fmt_inr_compact }}</td>
+          <td>{{ residual_row.net_profit | fmt_inr_compact }}</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
         </tr>
         {% endif %}
         <tr class="total-row">
@@ -284,7 +301,7 @@
           <td>{{ total.sales | fmt_inr_compact }}</td>
           <td>{{ total.ad_spend | fmt_inr_compact }}</td>
           <td>{{ total.cogs | fmt_inr_compact }}</td>
-          <td>{{ (total.sales - total.cogs) | fmt_inr_compact }}</td>
+          <td>{{ total.gross_profit | fmt_inr_compact }}</td>
           <td class="{{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr_compact }}</td>
           <td>{{ total.gross_roas | fmt_roas }}</td>
           <td class="{{ total.net_roas | roas_grad }}">{{ total.net_roas | fmt_roas }}</td>

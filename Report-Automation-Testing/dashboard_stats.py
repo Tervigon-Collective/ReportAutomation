@@ -301,12 +301,16 @@ def fetch_general_statistics(
 
 def build_pdf_api_metrics(stats: dict) -> dict:
     """
-    Convert fetch_general_statistics() output into the {meta, google, organic, total}
+    Convert fetch_general_statistics() output into the {meta, google, organic, amazon, total}
     structure that report_renderer.build_daily_pdf_context() expects.
 
-    Channel rows are the attributed Shopify split (Meta/Google/Organic). The Total row
-    is the all-up dashboard headline (includes Amazon and event-date returns/cancels),
-    so channel rows are not expected to sum exactly to Total.
+    Channel rows are the attributed split (Meta/Google/Organic + Amazon marketplace).
+    Total is the all-up General Statistics headline (same cards as the dashboard).
+
+    Channel money columns will not equal Total on their own — build_daily_pdf_context
+    adds a Returned/Cancelled deduction and an Other/Timing residual so:
+
+        Meta + Google + Organic + Amazon + Returns + Residual  ==  Total
     """
     def _sd(n, d):
         return (n / d) if d else 0.0
@@ -332,13 +336,19 @@ def build_pdf_api_metrics(stats: dict) -> dict:
         "cogs": round(t.get("amazon_net_cogs", 0.0), 2),
         "order_count": int(t.get("amazon_orders", 0)),
     })
+    # All-up Total matches General Statistics cards:
+    #   Net Profit = net_sales - total_cogs - total_ad_spend
+    #   Blended ROAS (reported as gross_roas key for template) = net_sales / ad_spend
+    #   Net ROAS = (net_sales - cogs) / ad_spend
+    # Dashboard "Gross ROAS" (gross_sales / ad_spend) is kept as dashboard_gross_roas.
     total = {
         "sales": round(t["net_sales"], 2),
         "gross_sales": round(t.get("gross_sales", 0.0), 2),
         "ad_spend": round(t["total_ad_spend"], 2),
         "cogs": round(t["total_cogs"], 2),
         "net_profit": round(t["net_profit"], 2),
-        "gross_roas": round(_sd(t["gross_sales"], t["total_ad_spend"]), 2),
+        "gross_roas": round(_sd(t["net_sales"], t["total_ad_spend"]), 2),
+        "dashboard_gross_roas": round(_sd(t.get("gross_sales", 0.0), t["total_ad_spend"]), 2),
         "net_roas": round(_sd(t["net_sales"] - t["total_cogs"], t["total_ad_spend"]), 2),
         "be_roas": round(_sd(t["total_cogs"] + t["total_ad_spend"], t["total_ad_spend"]), 2),
         "order_count": int(t["total_orders"]),

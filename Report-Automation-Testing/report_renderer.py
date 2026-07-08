@@ -616,22 +616,36 @@ def build_returns_cancels_summary(total: dict) -> dict:
     }
 
 
+def _f_metric(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def build_returns_row(total: dict, channels: list[dict] | None = None, returns_cancels_count: int = 0) -> dict:
     """
-    Channel Performance "Returned / Cancelled" row — mirrors the General Statistics
-    dashboard returns/cancels counts and ex-GST amounts (event-date axis).
+    Channel Performance "Returned / Cancelled" bridge row.
 
-    ``channels`` is accepted for backward compatibility but no longer used; the Total
-    row remains the dashboard headline and is not derived from summing channel rows.
+    Revenue and net profit are shown as *deductions* (negative) so that:
+
+        channel_rows + returns_row + residual_row  ==  Total (dashboard)
+
+    Order counts on this row are informational (event-date returns/cancels) and are
+    not part of the orders sum — Total.orders already equals attributed channel orders.
     """
-    _ = channels  # unused; kept for call-site compatibility
+    _ = channels  # residual uses channels; returns amounts come from Total
     summary = build_returns_cancels_summary(total)
-    amount = summary["total_amount"]
+    amount = round(summary["total_amount"], 2)
     row = {
-        "sales": amount,
+        # Deduction so channel + returns (+ residual) reconciles to dashboard Total.
+        "sales": round(-amount, 2),
         "ad_spend": 0.0,
         "cogs": 0.0,
-        "net_profit": amount,
+        "net_profit": round(-amount, 2),
+        "gross_profit": round(-amount, 2),
         "order_count": summary["total_count"],
         "cancelled_orders": summary["cancelled_orders"],
         "returned_orders": summary["returned_orders"],
@@ -639,11 +653,58 @@ def build_returns_row(total: dict, channels: list[dict] | None = None, returns_c
         "returned_amount": summary["returned_amount"],
         "total_amount": amount,
         "show": summary["show"],
+        "is_deduction": True,
     }
     if not row["show"] and int(returns_cancels_count or 0) > 0:
         row["show"] = True
     return row
 
+
+def build_channel_residual_row(
+    total: dict,
+    channels: list[dict],
+    returns_row: dict | None = None,
+) -> dict:
+    """
+    Close the gap between attributed channel rows (+ returns deduction) and the
+    all-channel General Statistics Total.
+
+    Attributed Meta/Google/Organic/Amazon figures are order-date attribution;
+    dashboard Total uses the all-up net P&L (incl. event-date returns/cancels and
+    net-COGS rules). The residual line makes every money column add up.
+    """
+    ch_sales = sum(_f_metric(c.get("sales")) for c in channels)
+    ch_cogs = sum(_f_metric(c.get("cogs")) for c in channels)
+    ch_spend = sum(_f_metric(c.get("ad_spend")) for c in channels)
+    ch_np = sum(_f_metric(c.get("net_profit")) for c in channels)
+
+    ret_sales = _f_metric((returns_row or {}).get("sales")) if (returns_row or {}).get("show") else 0.0
+    ret_cogs = _f_metric((returns_row or {}).get("cogs")) if (returns_row or {}).get("show") else 0.0
+    ret_spend = _f_metric((returns_row or {}).get("ad_spend")) if (returns_row or {}).get("show") else 0.0
+    ret_np = _f_metric((returns_row or {}).get("net_profit")) if (returns_row or {}).get("show") else 0.0
+
+    sales = round(_f_metric(total.get("sales")) - ch_sales - ret_sales, 2)
+    cogs = round(_f_metric(total.get("cogs")) - ch_cogs - ret_cogs, 2)
+    ad_spend = round(_f_metric(total.get("ad_spend")) - ch_spend - ret_spend, 2)
+    net_profit = round(_f_metric(total.get("net_profit")) - ch_np - ret_np, 2)
+    # Prefer identity residual_np == sales - cogs - ad_spend; use the NP residual
+    # when it differs slightly due to prior rounding on channel rows.
+    identity_np = round(sales - cogs - ad_spend, 2)
+    if abs(identity_np - net_profit) <= 1.0:
+        net_profit = identity_np
+
+    # Hide near-zero residual noise (< Rs.1 on all money columns).
+    show = any(abs(v) >= 1.0 for v in (sales, cogs, ad_spend, net_profit))
+    return {
+        "sales": sales,
+        "ad_spend": ad_spend,
+        "cogs": cogs,
+        "net_profit": net_profit,
+        "gross_profit": round(sales - cogs, 2),
+        "order_count": 0,
+        "show": show,
+        "is_adjustment": True,
+    }
 
 def _pct(n, d) -> int:
     """Integer percentage (0..100) used for bar-cell widths."""
@@ -913,6 +974,10 @@ def build_daily_pdf_context(
     if amazon:
         channels.append(("Amazon", _norm_channel(amazon)))
 
+    # Ensure every channel row exposes gross_profit for the template.
+    for _, ch in channels:
+        ch["gross_profit"] = round(_f_metric(ch.get("sales")) - _f_metric(ch.get("cogs")), 2)
+
     campaigns = []
     campaign_segments = []
     campaign_total = None
@@ -943,12 +1008,15 @@ def build_daily_pdf_context(
         campaign_segments, campaign_total = build_campaign_roas_segments(campaign_rows)
         campaigns = campaign_rows
 
-    # Reconciling "Returned / Cancelled" row so the channel rows + this row sum to Total.
+    # Returned / Cancelled deduction + residual bridge so channel columns reconcile
+    # to the all-channel General Statistics Total row.
+    channel_dicts = [c for _, c in channels]
     returns_row = build_returns_row(
         total,
-        [c for _, c in channels],
+        channel_dicts,
         returns_cancels_count=int(total.get("returns_cancels") or 0),
     )
+    residual_row = build_channel_residual_row(total, channel_dicts, returns_row)
 
     meta_funnel_rows = _augment_funnel_rows(
         _visible_funnel_rows(build_meta_funnel_rows(funnel_metrics))
@@ -957,13 +1025,27 @@ def build_daily_pdf_context(
         _visible_funnel_rows(build_google_funnel_rows(google_funnel))
     )
 
-    # Gross profit convenience field + zero-defaults so KPI cards never hit Undefined.
+    # Gross profit + zero-defaults so KPI cards never hit Undefined.
+    # Blended ROAS for the executive summary = Revenue (net sales) / ad spend.
     total = dict(total)
     for k in ("sales", "ad_spend", "cogs", "net_profit", "gross_roas",
               "net_roas", "be_roas", "order_count", "cpp"):
         if total.get(k) is None:
             total[k] = 0
-    total["gross_profit"] = float(total.get("sales") or 0) - float(total.get("cogs") or 0)
+    total["gross_profit"] = round(_f_metric(total.get("sales")) - _f_metric(total.get("cogs")), 2)
+    # Prefer dashboard Net Profit when present; otherwise recompute from identity.
+    if total.get("net_profit") is None:
+        total["net_profit"] = round(
+            _f_metric(total.get("sales")) - _f_metric(total.get("cogs")) - _f_metric(total.get("ad_spend")),
+            2,
+        )
+    spend = _f_metric(total.get("ad_spend"))
+    if spend > 0:
+        # Blended = net revenue / spend (matches "Revenue / ad spend" caption).
+        total["gross_roas"] = round(_f_metric(total.get("sales")) / spend, 2)
+        total["net_roas"] = round(
+            (_f_metric(total.get("sales")) - _f_metric(total.get("cogs"))) / spend, 2
+        )
 
     # Best channel (by net profit) for subtle row highlighting in the channel table.
     best_channel_name = None
@@ -979,6 +1061,7 @@ def build_daily_pdf_context(
         "channels": channels,
         "best_channel_name": best_channel_name,
         "returns_row": returns_row,
+        "residual_row": residual_row,
         "funnel": _normalize_funnel(funnel_metrics),
         "google_funnel": _normalize_google_funnel(google_funnel),
         "meta_funnel_rows": meta_funnel_rows,

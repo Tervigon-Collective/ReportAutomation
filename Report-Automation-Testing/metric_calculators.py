@@ -147,17 +147,23 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
         order_count=int(_f(amazon.get("orders"))),
     )
 
+    # Total KPIs match General Statistics (all channels).
+    # Blended ROAS in the PDF = net_sales / ad_spend (Revenue / ad spend).
+    # dashboard_gross_roas keeps gross_sales / ad_spend for the dashboard Gross ROAS card.
     totals = enrich_channel_bucket(
         sales=_f(data.get("net_sales")),
         ad_spend=_f(data.get("total_ad_spend")),
         cogs=_f(data.get("total_cogs")),
         order_count=int(_f(data.get("total_orders"))),
         net_profit=_f(data.get("net_profit")),
-        gross_roas=compute_gross_roas(_f(data.get("gross_sales")), _f(data.get("total_ad_spend"))),
+        gross_roas=compute_gross_roas(_f(data.get("net_sales")), _f(data.get("total_ad_spend"))),
         net_roas=compute_net_roas(
             _f(data.get("net_sales")), _f(data.get("total_cogs")), _f(data.get("total_ad_spend"))
         ),
         be_roas=compute_be_roas(_f(data.get("total_cogs")), _f(data.get("total_ad_spend"))),
+    )
+    totals["dashboard_gross_roas"] = round(
+        compute_gross_roas(_f(data.get("gross_sales")), _f(data.get("total_ad_spend"))), 2
     )
     rc = data.get("returns_cancels") or {}
     totals.update({

@@ -233,10 +233,10 @@
     <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">After COGS &amp; ad spend</div></td>
   </tr>
   <tr>
-    <td class="kpi-card"><div class="kpi-label">Blended ROAS</div><div class="kpi-value">{{ total.gross_roas | fmt_roas }}</div><div class="kpi-sub">Net revenue / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross ROAS</div><div class="kpi-value">{{ (total.dashboard_gross_roas or total.gross_roas) | fmt_roas }}</div><div class="kpi-sub">Gross sales / ad spend</div></td>
     <td class="kpi-card"><div class="kpi-label">Net ROAS</div><div class="kpi-value">{{ total.net_roas | fmt_roas }}</div><div class="kpi-sub">Contribution / ad spend</div></td>
-    <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Net of returns / cancels</div></td>
-    <td class="kpi-card"><div class="kpi-label">Cost per Order</div><div class="kpi-value">{{ total.cpp | fmt_inr }}</div><div class="kpi-sub">Ad spend / order</div></td>
+    <td class="kpi-card"><div class="kpi-label">BE ROAS</div><div class="kpi-value">{{ total.be_roas | fmt_roas }}</div><div class="kpi-sub">Net sales / contribution</div></td>
+    <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Placement period</div></td>
   </tr>
 </table>
 
@@ -274,12 +274,12 @@
         {% endfor %}
         {% if returns_row and returns_row.show %}
         <tr class="adjustment-row">
-          <td>Rtrn/cncl</td>
-          <td>{{ returns_row.sales | fmt_inr_compact }}</td>
+          <td>Rtrn/cncl <span class="muted">(info)</span></td>
+          <td>{{ returns_row.total_amount | fmt_inr_compact }}</td>
           <td class="muted">&mdash;</td>
           <td class="muted">&mdash;</td>
-          <td>{{ returns_row.gross_profit | fmt_inr_compact }}</td>
-          <td>{{ returns_row.net_profit | fmt_inr_compact }}</td>
+          <td class="muted">&mdash;</td>
+          <td class="muted">&mdash;</td>
           <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
           <td>{{ returns_row.order_count }}</td><td class="muted">&mdash;</td>
         </tr>

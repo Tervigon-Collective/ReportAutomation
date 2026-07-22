@@ -153,7 +153,7 @@ Azure timer schedule (in `function_app/function.json`): `25 * * * *` (run at min
 | `Checkout CR` | initiate_checkout / landing_page_view × 100 |
 | `Gross ROAS` | shopify_revenue / spend |
 | `Net ROAS` | (shopify_revenue − shopify_cogs) / spend |
-| `BE ROAS` | (shopify_cogs + spend) / spend |
+| `BE ROAS` | shopify_revenue / (shopify_revenue - shopify_cogs) |
 | `Conversion Rate` | purchases / clicks × 100 |
 
 Note: Monetary and rate columns are rounded to 2 decimals in outputs [[memory:8262560]].

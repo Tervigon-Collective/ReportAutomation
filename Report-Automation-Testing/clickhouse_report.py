@@ -448,7 +448,8 @@ def get_campaign_data_ch(start_date=None, end_date=None, brand_id: Optional[int]
     df["net_profit"] = df["shopify_revenue"] - df["cogs"] - df["spend"]
     df["gross_roas"] = (df["shopify_revenue"] / df["spend"]).replace([float("inf"), float("-inf")], 0).fillna(0)
     df["net_roas"] = ((df["shopify_revenue"] - df["cogs"]) / df["spend"]).replace([float("inf"), float("-inf")], 0).fillna(0)
-    df["be_roas"] = ((df["cogs"] + df["spend"]) / df["spend"]).replace([float("inf"), float("-inf")], 0).fillna(0)
+    _margin = df["shopify_revenue"] - df["cogs"]
+    df["be_roas"] = (df["shopify_revenue"] / _margin).where(_margin > 0, 0.0).replace([float("inf"), float("-inf")], 0).fillna(0)
     df["ctr"] = (df["clicks"] / df["impressions"] * 100.0).replace([float("inf"), float("-inf")], 0).fillna(0)
     df["bounce_rate"] = ((df["clicks"] - df["lpv"]) / df["clicks"] * 100.0).replace([float("inf"), float("-inf")], 0).fillna(0).clip(lower=0, upper=100)
     df["conversion_rate"] = (df["purchases"] / df["clicks"] * 100.0).replace([float("inf"), float("-inf")], 0).fillna(0)

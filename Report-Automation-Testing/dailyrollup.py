@@ -1346,11 +1346,16 @@ def build_meta_campaigns_rollup(df: pd.DataFrame) -> pd.DataFrame:
             ) / pd.to_numeric(summed['spend'], errors='coerce')
         summed['net_roas'] = pd.to_numeric(n, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
         with np.errstate(divide='ignore', invalid='ignore'):
-            b = (
-                pd.to_numeric(summed['shopify_cogs'], errors='coerce')
-                + pd.to_numeric(summed['spend'], errors='coerce')
-            ) / pd.to_numeric(summed['spend'], errors='coerce')
-        summed['be_roas'] = pd.to_numeric(b, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+            _rev = pd.to_numeric(summed['shopify_revenue'], errors='coerce')
+            _cogs = pd.to_numeric(summed['shopify_cogs'], errors='coerce')
+            _margin = _rev - _cogs
+            b = _rev / _margin
+        summed['be_roas'] = (
+            pd.to_numeric(b, errors='coerce')
+            .where(_margin > 0, 0)
+            .replace([np.inf, -np.inf], 0)
+            .fillna(0)
+        )
         summed['net_profit'] = (
             pd.to_numeric(summed['shopify_revenue'], errors='coerce')
             - pd.to_numeric(summed['shopify_cogs'], errors='coerce')
@@ -1583,8 +1588,16 @@ def build_google_campaigns_rollup(df: pd.DataFrame) -> pd.DataFrame:
             n = (pd.to_numeric(summed['shopify_revenue'], errors='coerce') - pd.to_numeric(summed['shopify_cogs'], errors='coerce')) / pd.to_numeric(summed['spend'], errors='coerce')
         summed['net_roas'] = pd.to_numeric(n, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
         with np.errstate(divide='ignore', invalid='ignore'):
-            b = (pd.to_numeric(summed['shopify_cogs'], errors='coerce') + pd.to_numeric(summed['spend'], errors='coerce')) / pd.to_numeric(summed['spend'], errors='coerce')
-        summed['be_roas'] = pd.to_numeric(b, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+            _rev = pd.to_numeric(summed['shopify_revenue'], errors='coerce')
+            _cogs = pd.to_numeric(summed['shopify_cogs'], errors='coerce')
+            _margin = _rev - _cogs
+            b = _rev / _margin
+        summed['be_roas'] = (
+            pd.to_numeric(b, errors='coerce')
+            .where(_margin > 0, 0)
+            .replace([np.inf, -np.inf], 0)
+            .fillna(0)
+        )
         # Calculate net profit: revenue - cogs - spend
         summed['net_profit'] = (pd.to_numeric(summed['shopify_revenue'], errors='coerce') - 
                                pd.to_numeric(summed['shopify_cogs'], errors='coerce') - 
@@ -1718,8 +1731,14 @@ def get_campaign_data(start_date: str | None = None, end_date: str | None = None
         
         if {'shopify_cogs','spend'}.issubset(out.columns) and 'be_roas' not in out.columns:
             with np.errstate(divide='ignore', invalid='ignore'):
-                out['be_roas'] = (pd.to_numeric(out['shopify_cogs'], errors='coerce') + pd.to_numeric(out['spend'], errors='coerce')) / pd.to_numeric(out['spend'], errors='coerce')
-            out['be_roas'] = out['be_roas'].replace([np.inf, -np.inf], 0).fillna(0)
+                out['be_roas'] = (
+                    pd.to_numeric(out['shopify_revenue'], errors='coerce')
+                    / (pd.to_numeric(out['shopify_revenue'], errors='coerce') - pd.to_numeric(out['shopify_cogs'], errors='coerce'))
+                )
+            out['be_roas'] = out['be_roas'].where(
+                (pd.to_numeric(out['shopify_revenue'], errors='coerce') - pd.to_numeric(out['shopify_cogs'], errors='coerce')) > 0,
+                0,
+            ).replace([np.inf, -np.inf], 0).fillna(0)
 
         # Rename for PDF extras - ensure 'sales' column exists for excel_generation.py compatibility
         rename_map = {
@@ -2021,7 +2040,7 @@ def get_campaign_grand_total_for_pdf(start_date: str | None = None, end_date: st
         checkout_cr = (ic / lpv * 100.0) if lpv > 0 else 0.0
         gross_roas = (revenue / spend) if spend > 0 else 0.0
         net_roas = ((revenue - cogs) / spend) if spend > 0 else 0.0
-        be_roas = ((cogs + spend) / spend) if spend > 0 else 0.0
+        be_roas = (revenue / (revenue - cogs)) if (revenue - cogs) > 0 else 0.0
         # Net profit calculation: revenue - cogs - spend
         net_profit = revenue - cogs - spend
         # Conversion Rate consistent with ad rollup reporting: purchases / clicks * 100
@@ -2512,9 +2531,10 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                         total_map['net_profit'] = 0.0
                         total_map['profit_margin'] = 0.0
 
-                    # Calculate be_roas (breakeven ROAS)
-                    if 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['be_roas'] = (total_map['shopify_cogs'] + total_map['spend']) / total_map['spend']
+                    # Calculate be_roas (breakeven ROAS) — dashboard: revenue / (revenue - cogs)
+                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map:
+                        _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
+                        total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
                     else:
                         total_map['be_roas'] = 0.0
                     
@@ -2707,9 +2727,10 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
                         total_map['net_profit'] = 0.0
                         total_map['profit_margin'] = 0.0
 
-                    # BE ROAS
-                    if 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['be_roas'] = (total_map['shopify_cogs'] + total_map['spend']) / total_map['spend']
+                    # BE ROAS — dashboard: revenue / (revenue - cogs)
+                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map:
+                        _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
+                        total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
                     else:
                         total_map['be_roas'] = 0.0
                     

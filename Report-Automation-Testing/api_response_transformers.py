@@ -644,10 +644,10 @@ def meta_campaign_pdf_df(data: dict) -> pd.DataFrame:
             "impressions": impressions,
             "gross_roas": revenue / spend if spend else 0.0,
             "net_roas": (revenue - cogs) / spend if spend else 0.0,
-            "be_roas": (cogs + spend) / spend if spend else 0.0,
+            "be_roas": (revenue / (revenue - cogs)) if (revenue - cogs) > 0 else 0.0,
             "net_profit": revenue - cogs - spend,
             "roas": revenue / spend if spend else 0.0,
-            "breakeven_roas": (cogs + spend) / spend if spend else 0.0,
+            "breakeven_roas": (revenue / (revenue - cogs)) if (revenue - cogs) > 0 else 0.0,
             "conversion_rate": (orders / clicks * 100) if clicks else 0.0,
             "ctr": (clicks / impressions * 100) if impressions else 0.0,
         })

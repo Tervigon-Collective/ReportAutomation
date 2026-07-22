@@ -142,11 +142,13 @@ def _derive_row_metrics(rollup: pd.DataFrame, *, include_spend_metrics: bool) ->
             rollup["gross_roas"] = [compute_roas(r, s) for r, s in zip(rev, spend)]
         if rev is not None and cogs is not None:
             rollup["net_roas"] = [compute_net_roas(r, c, s) for r, c, s in zip(rev, cogs, spend)]
-            rollup["be_roas"] = [compute_be_roas(c, s) for c, s in zip(cogs, spend)]
+            rollup["be_roas"] = [compute_be_roas(r, c) for r, c in zip(rev, cogs)]
             rollup["net_profit"] = [compute_net_profit(r, c, s) for r, c, s in zip(rev, cogs, spend)]
     elif rev is not None and cogs is not None:
         # Organic: no ad spend, so "profit" is revenue net of COGS only.
+        # BE ROAS still uses contribution-margin form (dashboard-aligned).
         rollup["net_profit"] = [float(r) - float(c) for r, c in zip(rev, cogs)]
+        rollup["be_roas"] = [compute_be_roas(r, c) for r, c in zip(rev, cogs)]
     return rollup
 
 
@@ -183,7 +185,7 @@ def _append_grand_total(
         if "net_roas" in rollup.columns:
             total["net_roas"] = compute_net_roas(rev, cogs, spd)
         if "be_roas" in rollup.columns:
-            total["be_roas"] = compute_be_roas(cogs, spd)
+            total["be_roas"] = compute_be_roas(rev, cogs)
         if "net_profit" in rollup.columns:
             total["net_profit"] = compute_net_profit(rev, cogs, spd)
     elif "net_profit" in rollup.columns:

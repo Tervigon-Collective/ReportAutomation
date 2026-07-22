@@ -28,8 +28,8 @@
             ('Revenue', total.sales | fmt_inr, total.sales_delta),
             ('Ad Spend', total.ad_spend | fmt_inr, None),
             ('Net Profit', total.net_profit | fmt_inr, total.profit_delta),
-            ('Blended ROAS', total.gross_roas | fmt_roas, None),
-            ('Net ROAS', total.net_roas | fmt_roas, None),
+            ('Gross ROAS', (total.dashboard_gross_roas or total.gross_roas) | fmt_roas, None),
+            ('BE ROAS', total.be_roas | fmt_roas, None),
           ] %}
           {% for label, value, delta in kpis %}
           <td width="20%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">

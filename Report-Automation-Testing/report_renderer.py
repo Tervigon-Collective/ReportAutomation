@@ -627,25 +627,26 @@ def _f_metric(value, default: float = 0.0) -> float:
 
 def build_returns_row(total: dict, channels: list[dict] | None = None, returns_cancels_count: int = 0) -> dict:
     """
-    Channel Performance "Returned / Cancelled" bridge row.
+    Channel Performance "Returned / Cancelled" info row (dashboard Returns & Cancels card).
 
-    Revenue and net profit are shown as *deductions* (negative) so that:
+    Event-date return/cancel amounts are informational — they must NOT participate in
+    channel→Total money reconciliation. Dashboard ``net_sales`` and channel breakdowns
+    already use placement-lifecycle netting; deducting returns again forced a canceling
+    residual and misstated the table.
 
-        channel_rows + returns_row + residual_row  ==  Total (dashboard)
-
-    Order counts on this row are informational (event-date returns/cancels) and are
-    not part of the orders sum — Total.orders already equals attributed channel orders.
+    Display shows cancelled/returned revenue as negative for readability; residual math
+    ignores this row (``include_in_recon=False``).
     """
-    _ = channels  # residual uses channels; returns amounts come from Total
+    _ = channels
     summary = build_returns_cancels_summary(total)
     amount = round(summary["total_amount"], 2)
     row = {
-        # Deduction so channel + returns (+ residual) reconciles to dashboard Total.
-        "sales": round(-amount, 2),
+        # Display-only deduction; excluded from residual via include_in_recon=False.
+        "sales": round(-amount, 2) if amount else 0.0,
         "ad_spend": 0.0,
         "cogs": 0.0,
-        "net_profit": round(-amount, 2),
-        "gross_profit": round(-amount, 2),
+        "net_profit": round(-amount, 2) if amount else 0.0,
+        "gross_profit": round(-amount, 2) if amount else 0.0,
         "order_count": summary["total_count"],
         "cancelled_orders": summary["cancelled_orders"],
         "returned_orders": summary["returned_orders"],
@@ -653,7 +654,9 @@ def build_returns_row(total: dict, channels: list[dict] | None = None, returns_c
         "returned_amount": summary["returned_amount"],
         "total_amount": amount,
         "show": summary["show"],
-        "is_deduction": True,
+        "is_deduction": False,
+        "is_info": True,
+        "include_in_recon": False,
     }
     if not row["show"] and int(returns_cancels_count or 0) > 0:
         row["show"] = True
@@ -666,22 +669,22 @@ def build_channel_residual_row(
     returns_row: dict | None = None,
 ) -> dict:
     """
-    Close the gap between attributed channel rows (+ returns deduction) and the
-    all-channel General Statistics Total.
+    Close the gap between attributed channel rows and the all-channel Total.
 
     Attributed Meta/Google/Organic/Amazon figures are order-date attribution;
-    dashboard Total uses the all-up net P&L (incl. event-date returns/cancels and
-    net-COGS rules). The residual line makes every money column add up.
+    dashboard Total may differ slightly on COGS / timing. Residual makes money
+    columns add up. Returns/cancels info rows are excluded from this math.
     """
     ch_sales = sum(_f_metric(c.get("sales")) for c in channels)
     ch_cogs = sum(_f_metric(c.get("cogs")) for c in channels)
     ch_spend = sum(_f_metric(c.get("ad_spend")) for c in channels)
     ch_np = sum(_f_metric(c.get("net_profit")) for c in channels)
 
-    ret_sales = _f_metric((returns_row or {}).get("sales")) if (returns_row or {}).get("show") else 0.0
-    ret_cogs = _f_metric((returns_row or {}).get("cogs")) if (returns_row or {}).get("show") else 0.0
-    ret_spend = _f_metric((returns_row or {}).get("ad_spend")) if (returns_row or {}).get("show") else 0.0
-    ret_np = _f_metric((returns_row or {}).get("net_profit")) if (returns_row or {}).get("show") else 0.0
+    use_ret = bool((returns_row or {}).get("show") and (returns_row or {}).get("include_in_recon", True))
+    ret_sales = _f_metric((returns_row or {}).get("sales")) if use_ret else 0.0
+    ret_cogs = _f_metric((returns_row or {}).get("cogs")) if use_ret else 0.0
+    ret_spend = _f_metric((returns_row or {}).get("ad_spend")) if use_ret else 0.0
+    ret_np = _f_metric((returns_row or {}).get("net_profit")) if use_ret else 0.0
 
     sales = round(_f_metric(total.get("sales")) - ch_sales - ret_sales, 2)
     cogs = round(_f_metric(total.get("cogs")) - ch_cogs - ret_cogs, 2)
@@ -1040,12 +1043,17 @@ def build_daily_pdf_context(
             2,
         )
     spend = _f_metric(total.get("ad_spend"))
+    sales = _f_metric(total.get("sales"))
+    cogs = _f_metric(total.get("cogs"))
     if spend > 0:
         # Blended = net revenue / spend (matches "Revenue / ad spend" caption).
-        total["gross_roas"] = round(_f_metric(total.get("sales")) / spend, 2)
-        total["net_roas"] = round(
-            (_f_metric(total.get("sales")) - _f_metric(total.get("cogs"))) / spend, 2
-        )
+        total["gross_roas"] = round(sales / spend, 2)
+        total["net_roas"] = round((sales - cogs) / spend, 2)
+    # Dashboard BE ROAS = net_sales / (net_sales - net_cogs)
+    margin = sales - cogs
+    total["be_roas"] = round(sales / margin, 2) if margin > 0 else 0.0
+    if total.get("dashboard_gross_roas") is None and spend > 0:
+        total["dashboard_gross_roas"] = round(_f_metric(total.get("gross_sales")) / spend, 2)
 
     # Best channel (by net profit) for subtle row highlighting in the channel table.
     best_channel_name = None

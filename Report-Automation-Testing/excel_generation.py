@@ -1706,17 +1706,17 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
 
             meta_gross_roas = safe_div(meta_sales, meta_ad_spend)
             meta_net_roas = safe_div(meta_sales - meta_cogs, meta_ad_spend)
-            meta_be_roas = safe_div(meta_cogs + meta_ad_spend, meta_ad_spend)
+            meta_be_roas = safe_div(meta_sales, meta_sales - meta_cogs) if (meta_sales - meta_cogs) > 0 else 0.0
             meta_cpp = safe_div(meta_ad_spend, meta_orders)
 
             google_gross_roas = safe_div(google_sales, google_ad_spend)
             google_net_roas = safe_div(google_sales - google_cogs, google_ad_spend)
-            google_be_roas = safe_div(google_cogs + google_ad_spend, google_ad_spend)
+            google_be_roas = safe_div(google_sales, google_sales - google_cogs) if (google_sales - google_cogs) > 0 else 0.0
             google_cpp = safe_div(google_ad_spend, google_orders)
 
             total_gross_roas = safe_div(total_sales, total_ad_spent)
             total_net_roas = safe_div(total_sales - total_cogs, total_ad_spent)
-            total_be_roas = safe_div(total_cogs + total_ad_spent, total_ad_spent)
+            total_be_roas = safe_div(total_sales, total_sales - total_cogs) if (total_sales - total_cogs) > 0 else 0.0
             total_cpp = safe_div(total_ad_spent, total_orders)
 
             return {
@@ -1862,18 +1862,18 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
         # Calculate ROAS metrics
         meta_gross_roas = meta_sales / meta_ad_spend if meta_ad_spend > 0 else 0
         meta_net_roas = (meta_sales - meta_cogs) / meta_ad_spend if meta_ad_spend > 0 else 0
-        meta_be_roas = (meta_cogs + meta_ad_spend) / meta_ad_spend if meta_ad_spend > 0 else 0
+        meta_be_roas = (meta_sales / (meta_sales - meta_cogs)) if (meta_sales - meta_cogs) > 0 else 0
         meta_cpp = meta_ad_spend / meta_orders if meta_orders > 0 else 0
         
         # Google ROAS calculations using actual Google data
         google_gross_roas = google_sales / google_ad_spend if google_ad_spend > 0 else 0
         google_net_roas = (google_sales - google_cogs) / google_ad_spend if google_ad_spend > 0 else 0
-        google_be_roas = (google_cogs + google_ad_spend) / google_ad_spend if google_ad_spend > 0 else 0
+        google_be_roas = (google_sales / (google_sales - google_cogs)) if (google_sales - google_cogs) > 0 else 0
         google_cpp = google_ad_spend / google_orders if google_orders > 0 else 0
         
         total_gross_roas = total_sales / total_ad_spent if total_ad_spent > 0 else 0
         total_net_roas = (total_sales - total_cogs) / total_ad_spent if total_ad_spent > 0 else 0
-        total_be_roas = (total_cogs + total_ad_spent) / total_ad_spent if total_ad_spent > 0 else 0
+        total_be_roas = (total_sales / (total_sales - total_cogs)) if (total_sales - total_cogs) > 0 else 0
         total_cpp = total_ad_spent / total_orders if total_orders > 0 else 0
         
         # Log the final organized metrics for debugging

@@ -20,7 +20,7 @@ Maps each report module to Node-Backend `/api/v1` routes and dashboard-aligned f
 | Net profit | same | `net_sales - cogs - ad_spend` per channel |
 | Gross ROAS | computed | `gross_sales / ad_spend` |
 | Net ROAS | computed | `(net_sales - cogs) / ad_spend` |
-| BE ROAS | computed | `(cogs + ad_spend) / ad_spend` |
+| BE ROAS | computed | `net_sales / (net_sales - net_cogs)` (0 when margin ≤ 0) |
 
 Implementation: `metric_calculators.channel_metrics_from_historical_dashboard()`
 

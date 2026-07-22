@@ -278,9 +278,17 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
             n = (pd.to_numeric(metrics_agg['shopify_revenue'], errors='coerce') - pd.to_numeric(metrics_agg['shopify_cogs'], errors='coerce')) / pd.to_numeric(metrics_agg['spend'], errors='coerce')
             metrics_agg['net_roas'] = pd.to_numeric(n, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
             
-            # Breakeven ROAS: (cogs + spend) / spend
-            b = (pd.to_numeric(metrics_agg['shopify_cogs'], errors='coerce') + pd.to_numeric(metrics_agg['spend'], errors='coerce')) / pd.to_numeric(metrics_agg['spend'], errors='coerce')
-            metrics_agg['be_roas'] = pd.to_numeric(b, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+            # Breakeven ROAS: revenue / (revenue - cogs) — dashboard-aligned
+            _rev = pd.to_numeric(metrics_agg['shopify_revenue'], errors='coerce')
+            _cogs = pd.to_numeric(metrics_agg['shopify_cogs'], errors='coerce')
+            _margin = _rev - _cogs
+            b = _rev / _margin
+            metrics_agg['be_roas'] = (
+                pd.to_numeric(b, errors='coerce')
+                .where(_margin > 0, 0)
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
             
             # Net profit: revenue - cogs - spend
             metrics_agg['net_profit'] = (pd.to_numeric(metrics_agg['shopify_revenue'], errors='coerce') - 
@@ -392,9 +400,15 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
                 net = (merged['shopify_revenue'] - merged['shopify_cogs']) / merged['spend']
             merged['net_roas'] = pd.to_numeric(net, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
             
-            # Compute Breakeven ROAS
-            be = (merged['shopify_cogs'] + merged['spend']) / merged['spend']
-            merged['be_roas'] = pd.to_numeric(be, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
+            # Compute Breakeven ROAS — dashboard: revenue / (revenue - cogs)
+            _margin = merged['shopify_revenue'] - merged['shopify_cogs']
+            be = merged['shopify_revenue'] / _margin
+            merged['be_roas'] = (
+                pd.to_numeric(be, errors='coerce')
+                .where(_margin > 0, 0)
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
             
             # Compute Net Profit - use SKU-level revenue/COGS if available, otherwise use ad-level
             # Distribute ad spend proportionally based on SKU revenue contribution
@@ -650,12 +664,12 @@ def build_organic_total_rollup(df: pd.DataFrame, timeframe_label: str) -> pd.Dat
         if 'shopify_revenue' in total_metrics and 'shopify_cogs' in total_metrics and 'spend' in total_metrics:
             # Calculate net profit (even if spend is 0, for organic campaigns)
             total_metrics['net_profit'] = total_metrics['shopify_revenue'] - total_metrics['shopify_cogs'] - total_metrics['spend']
+            _margin = total_metrics['shopify_revenue'] - total_metrics['shopify_cogs']
+            total_metrics['be_roas'] = (total_metrics['shopify_revenue'] / _margin) if _margin > 0 else 0.0
             if total_metrics['spend'] > 0:
                 total_metrics['net_roas'] = (total_metrics['shopify_revenue'] - total_metrics['shopify_cogs']) / total_metrics['spend']
-                total_metrics['be_roas'] = (total_metrics['shopify_cogs'] + total_metrics['spend']) / total_metrics['spend']
             else:
                 total_metrics['net_roas'] = 0.0
-                total_metrics['be_roas'] = 0.0
         else:
             total_metrics['net_roas'] = 0.0
             total_metrics['be_roas'] = 0.0
@@ -921,8 +935,14 @@ def add_grand_total_row(df: pd.DataFrame, timeframe_label: str) -> pd.DataFrame:
             
             if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
                 total_map['net_roas'] = (total_map['shopify_revenue'] - total_map['shopify_cogs']) / total_map['spend']
-                total_map['be_roas'] = (total_map['shopify_cogs'] + total_map['spend']) / total_map['spend']
+                _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
+                total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
                 total_map['net_profit'] = total_map['shopify_revenue'] - total_map['shopify_cogs'] - total_map['spend']
+            elif 'shopify_revenue' in total_map and 'shopify_cogs' in total_map:
+                _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
+                total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
+                total_map['net_roas'] = 0.0
+                total_map['net_profit'] = total_map['shopify_revenue'] - total_map['shopify_cogs'] - total_map.get('spend', 0)
             else:
                 total_map['net_roas'] = 0.0
                 total_map['be_roas'] = 0.0

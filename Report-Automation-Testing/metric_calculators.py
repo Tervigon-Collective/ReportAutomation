@@ -38,9 +38,16 @@ def compute_net_roas(net_sales: float, cogs: float, ad_spend: float) -> float:
     return safe_div(net_sales - cogs, ad_spend)
 
 
-def compute_be_roas(cogs: float, ad_spend: float) -> float:
-    """Break-even ROAS = (cogs + ad_spend) / ad_spend (main dashboard definition)."""
-    return safe_div(cogs + ad_spend, ad_spend)
+def compute_be_roas(net_sales: float, cogs: float) -> float:
+    """Break-even ROAS = net_sales / (net_sales − net_cogs).
+
+    Matches dashboard / attribution FORMULA_REFERENCE (contribution-margin form).
+    Returns 0 when contribution margin ≤ 0.
+    """
+    margin = _f(net_sales) - _f(cogs)
+    if margin <= 0:
+        return 0.0
+    return safe_div(_f(net_sales), margin)
 
 
 def compute_net_profit(net_sales: float, cogs: float, ad_spend: float) -> float:
@@ -105,7 +112,7 @@ def enrich_channel_bucket(
         "net_profit": round(np, 2),
         "gross_roas": round(_f(gross_roas) if gross_roas is not None else compute_gross_roas(s, ad), 2),
         "net_roas": round(_f(net_roas) if net_roas is not None else compute_net_roas(s, co, ad), 2),
-        "be_roas": round(_f(be_roas) if be_roas is not None else compute_be_roas(co, ad), 2),
+        "be_roas": round(_f(be_roas) if be_roas is not None else compute_be_roas(s, co), 2),
         "quantity": oc,
         "cpp": round(compute_cpp(ad, oc), 2),
         "order_count": oc,
@@ -150,6 +157,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
     # Total KPIs match General Statistics (all channels).
     # Blended ROAS in the PDF = net_sales / ad_spend (Revenue / ad spend).
     # dashboard_gross_roas keeps gross_sales / ad_spend for the dashboard Gross ROAS card.
+    # BE ROAS = net_sales / (net_sales - net_cogs) — same as buildDashboardStats.js.
     totals = enrich_channel_bucket(
         sales=_f(data.get("net_sales")),
         ad_spend=_f(data.get("total_ad_spend")),
@@ -160,7 +168,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
         net_roas=compute_net_roas(
             _f(data.get("net_sales")), _f(data.get("total_cogs")), _f(data.get("total_ad_spend"))
         ),
-        be_roas=compute_be_roas(_f(data.get("total_cogs")), _f(data.get("total_ad_spend"))),
+        be_roas=compute_be_roas(_f(data.get("net_sales")), _f(data.get("total_cogs"))),
     )
     totals["dashboard_gross_roas"] = round(
         compute_gross_roas(_f(data.get("gross_sales")), _f(data.get("total_ad_spend"))), 2

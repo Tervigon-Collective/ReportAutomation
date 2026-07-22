@@ -307,22 +307,27 @@ def build_pdf_api_metrics(stats: dict) -> dict:
     Channel rows are the attributed split (Meta/Google/Organic + Amazon marketplace).
     Total is the all-up General Statistics headline (same cards as the dashboard).
 
-    Channel money columns will not equal Total on their own — build_daily_pdf_context
-    adds a Returned/Cancelled deduction and an Other/Timing residual so:
+    Channel money columns will not always equal Total on their own — build_daily_pdf_context
+    adds an Other/Timing residual when needed so:
 
-        Meta + Google + Organic + Amazon + Returns + Residual  ==  Total
+        Meta + Google + Organic + Amazon + Residual  ==  Total
+
+    Event-date returns/cancels are shown as an informational row (not in the money sum);
+    dashboard net_sales / channel breakdowns already use placement-lifecycle netting.
     """
     def _sd(n, d):
         return (n / d) if d else 0.0
 
     def _enrich(ch):
         s, ad, co, oc = ch["sales"], ch["ad_spend"], ch["cogs"], ch["order_count"]
+        margin = s - co
         return {
             **ch,
             "net_profit": round(s - co - ad, 2),
             "gross_roas": round(_sd(s, ad), 2),
             "net_roas": round(_sd(s - co, ad), 2),
-            "be_roas": round(_sd(co + ad, ad), 2),
+            # Dashboard BE ROAS = net_sales / (net_sales - net_cogs)
+            "be_roas": round(_sd(s, margin), 2) if margin > 0 else 0.0,
             "cpp": round(_sd(ad, oc), 2),
             "quantity": oc,
         }
@@ -340,7 +345,9 @@ def build_pdf_api_metrics(stats: dict) -> dict:
     #   Net Profit = net_sales - total_cogs - total_ad_spend
     #   Blended ROAS (reported as gross_roas key for template) = net_sales / ad_spend
     #   Net ROAS = (net_sales - cogs) / ad_spend
+    #   BE ROAS = net_sales / (net_sales - cogs)
     # Dashboard "Gross ROAS" (gross_sales / ad_spend) is kept as dashboard_gross_roas.
+    _margin = t["net_sales"] - t["total_cogs"]
     total = {
         "sales": round(t["net_sales"], 2),
         "gross_sales": round(t.get("gross_sales", 0.0), 2),
@@ -350,7 +357,7 @@ def build_pdf_api_metrics(stats: dict) -> dict:
         "gross_roas": round(_sd(t["net_sales"], t["total_ad_spend"]), 2),
         "dashboard_gross_roas": round(_sd(t.get("gross_sales", 0.0), t["total_ad_spend"]), 2),
         "net_roas": round(_sd(t["net_sales"] - t["total_cogs"], t["total_ad_spend"]), 2),
-        "be_roas": round(_sd(t["total_cogs"] + t["total_ad_spend"], t["total_ad_spend"]), 2),
+        "be_roas": round(_sd(t["net_sales"], _margin), 2) if _margin > 0 else 0.0,
         "order_count": int(t["total_orders"]),
         "quantity": int(t["total_orders"]),
         "cpp": round(_sd(t["total_ad_spend"], t["total_orders"]), 2),

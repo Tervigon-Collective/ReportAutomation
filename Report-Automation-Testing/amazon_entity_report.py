@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from revenue_gst import apply_net_revenue_column
+
 load_dotenv()
 
 try:
@@ -448,6 +450,209 @@ def fetch_amazon_sp_order_pnl_gold(
     return pd.DataFrame()
 
 
+def fetch_amazon_returns_by_delivery_gold(
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+    brand_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """Approved Returns Report lines keyed by ``return_delivery_date``.
+
+    Headline Amazon refund axis: Seller Central ``Refunded Amount`` for returns
+    delivered in the window (Approved only; Rejected omitted), converted to
+    **ex-GST** via ``apply_net_revenue_column`` (÷ ``1 + GST_RATE``) so refunds
+    match other report revenue that is reported excluding GST.
+
+    Columns:
+      - ``refunded_amount_incl_gst`` — raw Seller Central amount
+      - ``refunded_amount`` — ex-GST amount used in summary / net sales
+    """
+    start_str = _to_date_str(start_date)
+    end_str = _to_date_str(end_date)
+    brand_id = _resolve_brand_id(brand_id)
+
+    query = f"""
+        SELECT
+            return_delivery_date,
+            amazon_order_id,
+            amazon_rma_id,
+            order_item_id,
+            merchant_sku,
+            asin,
+            item_name,
+            order_date,
+            return_request_date,
+            return_request_status,
+            return_type,
+            resolution,
+            return_reason,
+            return_quantity,
+            order_quantity,
+            round(toFloat64(ifNull(order_amount, 0)), 2) AS order_amount,
+            round(toFloat64(ifNull(label_cost, 0)), 2) AS label_cost,
+            round(toFloat64(ifNull(refunded_amount, 0)), 2) AS refunded_amount_incl_gst,
+            round(toFloat64(ifNull(report_return_label_cost, 0)), 2)
+                AS report_return_label_cost
+        FROM gold.fct_amazon_return_items
+        WHERE return_delivery_date BETWEEN %(start_date)s AND %(end_date)s
+            AND is_return_approved = 1
+            AND is_return_rejected = 0
+            {_brand_filter_clause(brand_id)}
+        ORDER BY return_delivery_date, amazon_order_id, merchant_sku
+    """
+    try:
+        client = get_clickhouse_client()
+        params = _maybe_add_brand_param(
+            {"start_date": start_str, "end_date": end_str}, brand_id
+        )
+        result = client.query(query, parameters=params)
+        df = pd.DataFrame(result.result_rows, columns=result.column_names)
+        if not df.empty:
+            incl = pd.to_numeric(df["refunded_amount_incl_gst"], errors="coerce").fillna(0.0)
+            df["refunded_amount_incl_gst"] = incl.round(2)
+            df["refunded_amount"] = apply_net_revenue_column(incl).round(2)
+        refunded = (
+            float(pd.to_numeric(df["refunded_amount"], errors="coerce").fillna(0).sum())
+            if not df.empty else 0.0
+        )
+        refunded_incl = (
+            float(pd.to_numeric(df["refunded_amount_incl_gst"], errors="coerce").fillna(0).sum())
+            if not df.empty else 0.0
+        )
+        print(
+            f"[ClickHouse Returns@delivery] {len(df)} approved lines for "
+            f"{start_str} to {end_str}"
+            + (f" (brand_id={brand_id})" if brand_id is not None else "")
+            + f", refunded_ex_gst={refunded:.2f} (incl_gst={refunded_incl:.2f})"
+        )
+        return df
+    except Exception as e:
+        print(f"[ClickHouse Returns@delivery] failed ({e})")
+        return pd.DataFrame()
+
+
+def fetch_amazon_refunds_by_settlement_gold(
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+    brand_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """Finance refund lines keyed by settlement ``last_posted_date`` (IST date).
+
+    Ops / recon helper only. Headline refunds use return delivery date via
+    ``fetch_amazon_returns_by_delivery_gold``.
+
+    Amounts are stored negative in gold; we expose positive magnitudes.
+    ``refunded_amount`` = |total_refund_amount| (principal + tax/shipping refunds).
+    """
+    start_str = _to_date_str(start_date)
+    end_str = _to_date_str(end_date)
+    brand_id = _resolve_brand_id(brand_id)
+
+    query = f"""
+        SELECT
+            toDate(last_posted_date) AS settlement_date,
+            amazon_order_id,
+            order_item_id,
+            seller_sku AS merchant_sku,
+            asin,
+            title AS item_name,
+            purchase_date,
+            refund_event_count,
+            round(abs(toFloat64(ifNull(refund_principal, 0))), 2) AS refund_principal,
+            round(abs(toFloat64(ifNull(refund_tax, 0))), 2) AS refund_tax,
+            round(abs(toFloat64(ifNull(refund_shipping, 0))), 2) AS refund_shipping,
+            round(abs(toFloat64(ifNull(total_refund_amount, 0))), 2) AS refunded_amount,
+            round(toFloat64(ifNull(quantity_shipped, 0)), 0) AS return_quantity
+        FROM gold.fct_amazon_sp_finance_items
+        WHERE toDate(last_posted_date) BETWEEN %(start_date)s AND %(end_date)s
+            AND coalesce(total_refund_amount, 0) < -0.01
+            {_brand_filter_clause(brand_id)}
+        ORDER BY settlement_date, amazon_order_id, merchant_sku
+    """
+    try:
+        client = get_clickhouse_client()
+        params = _maybe_add_brand_param(
+            {"start_date": start_str, "end_date": end_str}, brand_id
+        )
+        result = client.query(query, parameters=params)
+        df = pd.DataFrame(result.result_rows, columns=result.column_names)
+        refunded = (
+            float(pd.to_numeric(df["refunded_amount"], errors="coerce").fillna(0).sum())
+            if not df.empty else 0.0
+        )
+        print(
+            f"[ClickHouse Refunds@settlement] {len(df)} settled lines for "
+            f"{start_str} to {end_str}"
+            + (f" (brand_id={brand_id})" if brand_id is not None else "")
+            + f", refunded={refunded:.2f}"
+        )
+        return df
+    except Exception as e:
+        print(f"[ClickHouse Refunds@settlement] failed ({e})")
+        return pd.DataFrame()
+
+
+def summarize_amazon_delivery_refunds(returns_df: pd.DataFrame) -> dict:
+    """Aggregate approved delivery-dated returns (ex-GST ``refunded_amount``)."""
+    empty = {
+        "refunds": 0.0,
+        "refunds_incl_gst": 0.0,
+        "return_lines": 0,
+        "return_orders": 0,
+        "return_units": 0,
+        "return_lines_with_amount": 0,
+    }
+    if returns_df is None or returns_df.empty:
+        return empty
+
+    amt = pd.to_numeric(returns_df.get("refunded_amount"), errors="coerce").fillna(0.0)
+    incl = pd.to_numeric(
+        returns_df.get("refunded_amount_incl_gst", amt), errors="coerce"
+    ).fillna(0.0)
+    qty = pd.to_numeric(returns_df.get("return_quantity"), errors="coerce").fillna(0.0)
+    orders = (
+        int(returns_df["amazon_order_id"].nunique())
+        if "amazon_order_id" in returns_df.columns else 0
+    )
+    return {
+        "refunds": float(amt.sum()),
+        "refunds_incl_gst": float(incl.sum()),
+        "return_lines": int(len(returns_df)),
+        "return_orders": orders,
+        "return_units": int(qty.sum()),
+        "return_lines_with_amount": int((amt > 0.01).sum()),
+    }
+
+
+def summarize_amazon_settlement_refunds(refunds_df: pd.DataFrame) -> dict:
+    """Aggregate finance-posted refunds for summary / reconciliation."""
+    empty = {
+        "refunds": 0.0,
+        "return_lines": 0,
+        "return_orders": 0,
+        "return_units": 0,
+        "return_lines_with_amount": 0,
+        "refund_principal": 0.0,
+    }
+    if refunds_df is None or refunds_df.empty:
+        return empty
+
+    amt = pd.to_numeric(refunds_df.get("refunded_amount"), errors="coerce").fillna(0.0)
+    principal = pd.to_numeric(refunds_df.get("refund_principal"), errors="coerce").fillna(0.0)
+    qty = pd.to_numeric(refunds_df.get("return_quantity"), errors="coerce").fillna(0.0)
+    orders = (
+        int(refunds_df["amazon_order_id"].nunique())
+        if "amazon_order_id" in refunds_df.columns else 0
+    )
+    return {
+        "refunds": float(amt.sum()),
+        "refund_principal": float(principal.sum()),
+        "return_lines": int(len(refunds_df)),
+        "return_orders": orders,
+        "return_units": int(qty.sum()),
+        "return_lines_with_amount": int((amt > 0.01).sum()),
+    }
+
+
 def build_amazon_ads_campaign_rollup(amazon_df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate ads data at DAILY grain (report_date x campaign) with derived
     metrics and a Grand Total row.
@@ -551,17 +756,26 @@ def get_amazon_clickhouse_summary(
     def _empty_summary() -> dict:
         return {
             "revenue": 0.0,
+            "gross_sales": 0.0,
+            "refunds": 0.0,
+            "refund_principal": 0.0,
+            "net_sales": 0.0,
             "spend": 0.0,
             "orders": 0,
+            "order_item_lines": 0,
             "cogs": 0.0,
             "product_cost": 0.0,
             "fees_total": 0.0,
             "units": 0,
+            "return_lines": 0,
+            "return_orders": 0,
+            "return_units": 0,
             "net_profit": 0.0,
             "net_roas": 0.0,
             "gross_profit_after_fees": 0.0,
             "net_payout": 0.0,
             "pnl_available": False,
+            "refunds_axis": "return_delivery_date",
             "start_date": start_display,
             "end_date": end_display,
             "date_range": f"{start_display} to {end_display}",
@@ -580,12 +794,26 @@ def get_amazon_clickhouse_summary(
             print(f"[ClickHouse Amazon] P&L fetch error in summary: {e}")
             pnl_df = pd.DataFrame()
 
+        try:
+            items_df = fetch_amazon_sp_items_gold(
+                start_str, end_str, brand_id=brand_id
+            )
+        except Exception as e:
+            print(f"[ClickHouse Amazon] items fetch error in summary: {e}")
+            items_df = pd.DataFrame()
+
+        returns_df = fetch_amazon_returns_by_delivery_gold(
+            start_str, end_str, brand_id=brand_id
+        )
+        returns_summary = summarize_amazon_delivery_refunds(returns_df)
+
         ads_spend = float(ads_df["spend"].sum()) if not ads_df.empty else 0.0
         ads_sales = float(ads_df["sales"].sum()) if not ads_df.empty else 0.0
         ads_orders = int(ads_df["orders"].sum()) if not ads_df.empty else 0
 
         sp_revenue = float(sp_df["order_total"].sum()) if not sp_df.empty else 0.0
         sp_orders = len(sp_df) if not sp_df.empty else 0
+        order_item_lines = len(items_df) if not items_df.empty else 0
 
         def _col_sum(df: pd.DataFrame, col: str) -> float:
             return float(pd.to_numeric(df[col], errors="coerce").fillna(0).sum()) \
@@ -607,33 +835,64 @@ def get_amazon_clickhouse_summary(
         pnl_units = int(_col_sum(sp_df, "items_shipped"))
         if pnl_units == 0:
             pnl_units = int(_col_sum(pnl_df, "items"))
+        if pnl_units == 0 and not items_df.empty:
+            qty_col = "quantity_shipped" if "quantity_shipped" in items_df.columns else "quantity_ordered"
+            if qty_col in items_df.columns:
+                pnl_units = int(_col_sum(items_df, qty_col))
 
-        revenue = (
+        # Gross = placement-axis SP revenue; refunds = delivery-dated Refunded
+        # Amount converted ex-GST (same GST_RATE divisor as other channels).
+        gross_sales = (
             pnl_gross if pnl_available and pnl_gross > 0
             else (sp_revenue if sp_revenue > 0 else ads_sales)
         )
+        refunds = float(returns_summary["refunds"])
+        refunds_incl = float(returns_summary.get("refunds_incl_gst", refunds) or refunds)
+        net_sales = gross_sales - refunds
         orders = sp_orders if sp_orders > 0 else ads_orders
 
-        net_profit = revenue - pnl_cogs - ads_spend if pnl_available else 0.0
-        net_roas = ((revenue - pnl_cogs) / ads_spend) if pnl_available and ads_spend > 0 else 0.0
+        # Channel net profit uses net_sales (gross − delivery-dated ex-GST refunds).
+        net_profit = net_sales - pnl_cogs - ads_spend if pnl_available else 0.0
+        net_roas = ((net_sales - pnl_cogs) / ads_spend) if pnl_available and ads_spend > 0 else 0.0
 
-        available = not ads_df.empty or not sp_df.empty or pnl_available
+        available = (
+            not ads_df.empty or not sp_df.empty or pnl_available or not returns_df.empty
+        )
+
+        print(
+            f"[Amazon recon] {start_str}→{end_str}: "
+            f"orders={orders} item_lines={order_item_lines} units={pnl_units} | "
+            f"gross={gross_sales:.2f} delivery_refunds_ex_gst={refunds:.2f} "
+            f"(incl_gst={refunds_incl:.2f}) net={net_sales:.2f} | "
+            f"return_lines={returns_summary['return_lines']} "
+            f"return_orders={returns_summary['return_orders']} "
+            f"return_units={returns_summary['return_units']}"
+        )
 
         return {
-            "revenue": revenue,
+            "revenue": net_sales,
+            "gross_sales": gross_sales,
+            "refunds": refunds,
+            "refunds_incl_gst": refunds_incl,
+            "net_sales": net_sales,
             "spend": ads_spend,
             "orders": orders,
+            "order_item_lines": order_item_lines,
             "ads_sales": ads_sales,
             "sp_revenue": sp_revenue,
             "cogs": pnl_cogs,
             "product_cost": pnl_product_cost,
             "fees_total": pnl_fees_total,
             "units": pnl_units,
+            "return_lines": returns_summary["return_lines"],
+            "return_orders": returns_summary["return_orders"],
+            "return_units": returns_summary["return_units"],
             "net_profit": net_profit,
             "net_roas": net_roas,
             "gross_profit_after_fees": pnl_gross_profit,
             "net_payout": pnl_net_payout,
             "pnl_available": pnl_available,
+            "refunds_axis": "return_delivery_date",
             "start_date": start_display,
             "end_date": end_display,
             "date_range": f"{start_display} to {end_display}",
@@ -667,18 +926,30 @@ def get_amazon_clickhouse_summary(
             net_payout, product_cost, ads_spend, amazon_fees=amazon_fees
         )
         pnl_available = net_payout > 0 or product_cost > 0
+        delivery_refunds = float(
+            summary_src.get("delivery_refunds", 0)
+            or abs(float(summary_src.get("total_refunds", 0) or 0))
+        )
+        net_sales = revenue - delivery_refunds
         return {
-            "revenue": revenue,
+            "revenue": net_sales,
+            "gross_sales": revenue,
+            "refunds": delivery_refunds,
+            "net_sales": net_sales,
             "spend": ads_spend,
             "orders": orders,
+            "order_item_lines": orders,
             "ads_sales": float(summary_src.get("attributed_sales", 0) or 0),
             "sp_revenue": revenue,
             "cogs": pnl_cogs,
             "product_cost": product_cost,
             "fees_total": amazon_fees,
             "units": orders,
-            "net_profit": net_profit if pnl_available else 0.0,
-            "net_roas": ((revenue - pnl_cogs) / ads_spend) if pnl_available and ads_spend > 0 else 0.0,
+            "return_lines": 0,
+            "return_orders": 0,
+            "return_units": 0,
+            "net_profit": (net_sales - pnl_cogs - ads_spend) if pnl_available else 0.0,
+            "net_roas": ((net_sales - pnl_cogs) / ads_spend) if pnl_available and ads_spend > 0 else 0.0,
             "gross_profit_after_fees": net_payout - product_cost if pnl_available else 0.0,
             "net_payout": net_payout,
             "pnl_available": pnl_available,
@@ -768,10 +1039,12 @@ def _apply_amazon_ads_formatting(writer, sheet_name: str, campaign_rollup: pd.Da
         })
 
 
-# Order-level P&L money columns that are allocated down to line items
-# proportionally to each line's share of the order's item revenue.
+# Order-level P&L money columns allocated to line items.
+# Finance settlement refunds on the SP sheet stay as ``finance_refunds``
+# (purchase-date order P&L). Headline refunds use return delivery date via
+# ``fetch_amazon_returns_by_delivery_gold`` — a separate sheet/axis.
 _PNL_MONEY_COLS = (
-    "gross", "refunds", "commission", "closing", "shipping",
+    "gross", "finance_refunds", "commission", "closing", "shipping",
     "tax_withheld", "net_payout", "cogs", "gross_profit",
 )
 
@@ -799,6 +1072,10 @@ def _allocate_pnl_to_line_items(
         return items_df
 
     items = items_df.copy()
+    pnl = pnl_df.copy()
+    # Map finance settlement refunds off the ambiguous ``refunds`` name.
+    if "refunds" in pnl.columns and "finance_refunds" not in pnl.columns:
+        pnl = pnl.rename(columns={"refunds": "finance_refunds"})
 
     order_line_rev = (
         items.groupby("amazon_order_id")["item_price_amount"]
@@ -821,10 +1098,10 @@ def _allocate_pnl_to_line_items(
             "amazon_order_id", "pnl_status", "payout_basis",
             "order_total", *_PNL_MONEY_COLS,
         )
-        if c in pnl_df.columns
+        if c in pnl.columns
     ]
     items = items.merge(
-        pnl_df[pnl_cols].drop_duplicates(subset=["amazon_order_id"]),
+        pnl[pnl_cols].drop_duplicates(subset=["amazon_order_id"]),
         on="amazon_order_id",
         how="left",
     )
@@ -860,7 +1137,7 @@ _SP_DISPLAY_COLS = [
     "order_status", "pnl_status", "payout_basis",
     "fulfillment_channel", "sku", "asin", "title",
     "quantity_ordered", "quantity_shipped",
-    "gross", "refunds", "commission", "closing", "shipping",
+    "gross", "finance_refunds", "commission", "closing", "shipping",
     "tax_withheld", "net_payout", "product_cost", "gross_profit",
     "gross_margin_pct",
 ]
@@ -933,12 +1210,16 @@ def _build_orders_without_line_items(
         pnl_cols = [
             c for c in (
                 "amazon_order_id", "pnl_status", "payout_basis",
-                "gross", "refunds", "commission", "closing", "shipping",
+                "gross", "finance_refunds", "commission", "closing", "shipping",
                 "tax_withheld", "net_payout", "cogs", "gross_profit", "gross_margin_pct",
             )
-            if c in sp_pnl_df.columns
+            if c in sp_pnl_df.columns or c == "finance_refunds"
         ]
-        pnl = sp_pnl_df[pnl_cols].drop_duplicates(subset=["amazon_order_id"])
+        pnl = sp_pnl_df.copy()
+        if "refunds" in pnl.columns and "finance_refunds" not in pnl.columns:
+            pnl = pnl.rename(columns={"refunds": "finance_refunds"})
+        pnl_cols = [c for c in pnl_cols if c in pnl.columns]
+        pnl = pnl[pnl_cols].drop_duplicates(subset=["amazon_order_id"])
         rows = rows.merge(pnl, on="amazon_order_id", how="left")
 
     return _format_sp_display_df(rows)
@@ -1127,6 +1408,45 @@ def add_amazon_sheets_for_timeframe(
     else:
         print(f"[{timeframe_key}] No Amazon SP data, creating empty sheet")
         pd.DataFrame().to_excel(writer, sheet_name=sp_sheet_name, index=False)
+
+    # --- Amazon Returns sheet (return_delivery_date, actual Refunded Amount) ---
+    returns_sheet_name = f"{timeframe_key}_amazon_returns ({amazon_date_range_str})"[:31]
+    try:
+        returns_df = fetch_amazon_returns_by_delivery_gold(
+            amazon_start_str, amazon_end_str, brand_id=brand_id
+        )
+    except Exception as e:
+        print(f"[{timeframe_key}] Amazon returns fetch error: {e}")
+        returns_df = pd.DataFrame()
+
+    if not returns_df.empty:
+        returns_out = returns_df.copy()
+        if round_for_output_fn:
+            returns_out = round_for_output_fn(returns_out)
+        totals = summarize_amazon_delivery_refunds(returns_df)
+        total_row = {
+            "return_delivery_date": "",
+            "amazon_order_id": "Grand Total",
+            "merchant_sku": "",
+            "return_quantity": totals["return_units"],
+            "refunded_amount_incl_gst": totals.get("refunds_incl_gst", totals["refunds"]),
+            "refunded_amount": totals["refunds"],
+        }
+        returns_out = pd.concat([returns_out, pd.DataFrame([total_row])], ignore_index=True)
+        print(
+            f"[{timeframe_key}] Writing Amazon Returns sheet '{returns_sheet_name}': "
+            f"{totals['return_lines']} lines / {totals['return_orders']} orders / "
+            f"refunded_ex_gst={totals['refunds']:.2f} "
+            f"(incl_gst={totals.get('refunds_incl_gst', totals['refunds']):.2f})"
+        )
+        returns_out.to_excel(writer, sheet_name=returns_sheet_name, index=False)
+        try:
+            _apply_sp_sheet_formatting(writer, returns_sheet_name, returns_out)
+        except Exception as e:
+            print(f"[{timeframe_key}] Amazon Returns formatting error: {e}")
+    else:
+        print(f"[{timeframe_key}] No Amazon returns, creating empty sheet")
+        pd.DataFrame().to_excel(writer, sheet_name=returns_sheet_name, index=False)
 
 
 def add_amazon_sheets_for_previous_day(writer, days_back: int = 1) -> str:

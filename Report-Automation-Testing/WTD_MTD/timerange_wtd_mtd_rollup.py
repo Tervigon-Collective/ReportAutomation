@@ -1422,6 +1422,7 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                             summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
              
             # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
+            # Refunds = actual Refunded Amount by return_delivery_date (Approved only).
             print(f"\n[{label}] Processing Amazon data (ClickHouse)...")
             logger.info(f"Building ClickHouse Amazon sheets for {label}")
             try:
@@ -1437,6 +1438,44 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     round_for_output_fn=round_for_output,
                     days_lag=0,
                 )
+                amz = get_amazon_clickhouse_summary(
+                    start_date.strftime('%Y-%m-%d'),
+                    end_date.strftime('%Y-%m-%d'),
+                )
+                if amz.get('available'):
+                    summary_data[timeframe_key]['channels']['amazon'] = {
+                        'revenue': amz.get('net_sales', amz.get('revenue', 0)),
+                        'gross_sales': amz.get('gross_sales', 0),
+                        'refunds': amz.get('refunds', 0),
+                        'net_sales': amz.get('net_sales', 0),
+                        'cogs': amz.get('cogs', 0),
+                        'spend': amz.get('spend', 0),
+                        'orders': amz.get('orders', 0),
+                        'quantity': amz.get('units', 0),
+                        'order_item_lines': amz.get('order_item_lines', 0),
+                        'return_lines': amz.get('return_lines', 0),
+                        'return_orders': amz.get('return_orders', 0),
+                        'return_units': amz.get('return_units', 0),
+                        'net_profit': amz.get('net_profit', 0),
+                        'net_roas': amz.get('net_roas', 0),
+                        'cost_per_order': (
+                            amz.get('spend', 0) / amz['orders'] if amz.get('orders') else 0.0
+                        ),
+                        'cost_per_unit': (
+                            amz.get('spend', 0) / amz['units'] if amz.get('units') else 0.0
+                        ),
+                        'avg_order_value': (
+                            amz.get('net_sales', 0) / amz['orders'] if amz.get('orders') else 0.0
+                        ),
+                        'top_campaigns': [],
+                        'bottom_campaigns': [],
+                    }
+                    print(
+                        f"[{label}] Amazon recon: gross=₹{amz.get('gross_sales', 0):,.2f} "
+                        f"delivery_refunds=₹{amz.get('refunds', 0):,.2f} net=₹{amz.get('net_sales', 0):,.2f} "
+                        f"orders={amz.get('orders', 0)} item_lines={amz.get('order_item_lines', 0)} "
+                        f"return_lines={amz.get('return_lines', 0)}"
+                    )
             except Exception as e:
                 print(f"[{label}] Failed to add ClickHouse Amazon sheets: {e}")
                 logger.warning(f"Failed to add ClickHouse Amazon sheets for {label}: {e}")
@@ -2123,7 +2162,8 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         # Add Amazon row if metrics are available for this timeframe
         amazon_metrics = amazon_wtd if timeframe_key == 'wtd' else amazon_mtd
         if amazon_metrics and amazon_metrics.get('available', False):
-            amazon_revenue = amazon_metrics.get('revenue', 0)
+            # Channel Revenue column uses net_sales (gross − delivery refunds).
+            amazon_revenue = amazon_metrics.get('net_sales', amazon_metrics.get('revenue', 0))
             amazon_spend = amazon_metrics.get('spend', 0)
             amazon_orders = amazon_metrics.get('orders', 0)
             amazon_date_range = amazon_metrics.get('date_range', 'N/A')
@@ -2195,6 +2235,27 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
                     {roas_cell}
                     <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">{amazon_orders:,}</td>
                     {units_cell}
+                </tr>
+            """)
+
+            # Gross / delivery-dated refunds / net (actual Refunded Amount)
+            amazon_gross = amazon_metrics.get('gross_sales', amazon_revenue)
+            amazon_refunds = amazon_metrics.get('refunds', 0)
+            amazon_net = amazon_metrics.get('net_sales', amazon_revenue)
+            amazon_item_lines = amazon_metrics.get('order_item_lines', 0)
+            amazon_return_lines = amazon_metrics.get('return_lines', 0)
+            amazon_return_orders = amazon_metrics.get('return_orders', 0)
+            amazon_return_units = amazon_metrics.get('return_units', 0)
+            html_parts.append(f"""
+                <tr style="background-color: #FFFDF5;">
+                    <td colspan="8" style="padding: 6px 8px; border: 1px solid #ddd; font-size: 11px; color: #555;">
+                        Amazon recon ({amazon_date_range}):
+                        Gross ₹{amazon_gross:,.2f}
+                        − Refunds (return delivery date, ex-GST) ₹{amazon_refunds:,.2f}
+                        = Net ₹{amazon_net:,.2f}
+                        · Orders {amazon_orders:,} · Item lines {amazon_item_lines:,} · Units {amazon_units if amazon_units is not None else 0:,}
+                        · Return lines {amazon_return_lines:,} · Return orders {amazon_return_orders:,} · Units {amazon_return_units:,}
+                    </td>
                 </tr>
             """)
         
@@ -2617,46 +2678,48 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
             except Exception as e:
                 logger.warning(f"Could not extract daily efficiency metrics: {e}")
         
-        # Amazon WTD/MTD email metrics: use dashboard-aligned channel data from summary_data.
+        # Amazon WTD/MTD email metrics: ClickHouse gold with delivery-dated refunds.
         amazon_wtd = None
         amazon_mtd = None
         try:
-            def _amazon_from_dashboard_channels(channels: dict) -> dict:
-                ch = (channels or {}).get('amazon') or {}
-                if not ch or (ch.get('revenue', 0) == 0 and ch.get('spend', 0) == 0):
-                    return {'available': False}
-                return {
-                    'revenue': ch.get('revenue', 0),
-                    'spend': ch.get('spend', 0),
-                    'orders': ch.get('orders', 0),
-                    'cogs': ch.get('cogs', 0),
-                    'units': ch.get('quantity', ch.get('orders', 0)),
-                    'net_profit': ch.get('net_profit', 0),
-                    'net_roas': ch.get('net_roas', 0),
-                    'pnl_available': True,
-                    'available': True,
-                }
+            wtd_tf = summary_data.get('wtd', {})
+            mtd_tf = summary_data.get('mtd', {})
+            wtd_start = datetime.strptime(wtd_tf['start_date'], '%Y-%m-%d') if wtd_tf.get('start_date') else None
+            wtd_end = datetime.strptime(wtd_tf['end_date'], '%Y-%m-%d') if wtd_tf.get('end_date') else None
+            mtd_start = datetime.strptime(mtd_tf['start_date'], '%Y-%m-%d') if mtd_tf.get('start_date') else None
+            mtd_end = datetime.strptime(mtd_tf['end_date'], '%Y-%m-%d') if mtd_tf.get('end_date') else None
 
-            wtd_timeframe = summary_data.get('wtd', {})
-            mtd_timeframe = summary_data.get('mtd', {})
-            amazon_wtd = _amazon_from_dashboard_channels(wtd_timeframe.get('channels', {}))
-            amazon_mtd = _amazon_from_dashboard_channels(mtd_timeframe.get('channels', {}))
-            if amazon_wtd.get('available'):
+            if wtd_start and wtd_end:
+                amazon_wtd = get_amazon_summary_metrics(wtd_start, wtd_end)
+            if mtd_start and mtd_end:
+                amazon_mtd = get_amazon_summary_metrics(mtd_start, mtd_end)
+
+            if amazon_wtd and amazon_wtd.get('available'):
                 logger.info(
-                    "Amazon WTD (dashboard): Revenue=₹%.2f, Spend=₹%.2f, Orders=%s",
-                    amazon_wtd.get('revenue', 0),
-                    amazon_wtd.get('spend', 0),
+                    "Amazon WTD (delivery refunds): Gross=₹%.2f Refunds=₹%.2f Net=₹%.2f "
+                    "Orders=%s ItemLines=%s ReturnLines=%s",
+                    amazon_wtd.get('gross_sales', 0),
+                    amazon_wtd.get('refunds', 0),
+                    amazon_wtd.get('net_sales', 0),
                     amazon_wtd.get('orders', 0),
+                    amazon_wtd.get('order_item_lines', 0),
+                    amazon_wtd.get('return_lines', 0),
                 )
-            if amazon_mtd.get('available'):
+            if amazon_mtd and amazon_mtd.get('available'):
                 logger.info(
-                    "Amazon MTD (dashboard): Revenue=₹%.2f, Spend=₹%.2f, Orders=%s",
-                    amazon_mtd.get('revenue', 0),
-                    amazon_mtd.get('spend', 0),
+                    "Amazon MTD (delivery refunds): Gross=₹%.2f Refunds=₹%.2f Net=₹%.2f "
+                    "Orders=%s ItemLines=%s ReturnLines=%s",
+                    amazon_mtd.get('gross_sales', 0),
+                    amazon_mtd.get('refunds', 0),
+                    amazon_mtd.get('net_sales', 0),
                     amazon_mtd.get('orders', 0),
+                    amazon_mtd.get('order_item_lines', 0),
+                    amazon_mtd.get('return_lines', 0),
                 )
         except Exception as e:
-            logger.warning(f"Could not load dashboard Amazon metrics for email: {e}")
+            logger.warning(f"Could not load Amazon delivery-refund metrics for email: {e}")
+            amazon_wtd = amazon_wtd or {'available': False}
+            amazon_mtd = amazon_mtd or {'available': False}
         
         # Format summary data for email (includes efficiency comparison table and Amazon data)
         summary_html = format_summary_for_email(summary_data, amazon_wtd, amazon_mtd, daily_metrics)

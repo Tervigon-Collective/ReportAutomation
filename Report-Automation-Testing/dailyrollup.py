@@ -2089,6 +2089,9 @@ def _write_amazon_sp_sheet(writer, start_date_str: str, end_date_str: str, sheet
     to each line. Reuses the proven builders in amazon_entity_report.py. Amazon gold
     tables lag ~1 day, so the window end is shifted back by days_lag; if that makes a
     single-day (today) report invalid, the last complete day is used instead.
+
+    Also writes ``amazon_returns`` (approved returns by
+    ``return_delivery_date``, actual Refunded Amount) for the same window.
     """
     try:
         from datetime import datetime as _dt, timedelta as _td
@@ -2096,6 +2099,8 @@ def _write_amazon_sp_sheet(writer, start_date_str: str, end_date_str: str, sheet
             fetch_amazon_sp_items_gold,
             fetch_amazon_sp_orders_gold,
             fetch_amazon_sp_order_pnl_gold,
+            fetch_amazon_returns_by_delivery_gold,
+            summarize_amazon_delivery_refunds,
             _build_sp_line_items_display,
             _apply_sp_sheet_formatting,
         )
@@ -2122,6 +2127,34 @@ def _write_amazon_sp_sheet(writer, start_date_str: str, end_date_str: str, sheet
         else:
             pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
             print(f"[Amazon SP] No data for {ss} to {ee}; wrote empty sheet")
+
+        returns_df = fetch_amazon_returns_by_delivery_gold(ss, ee)
+        returns_sheet = "amazon_returns"
+        if returns_df is not None and not returns_df.empty:
+            returns_out = round_for_output(returns_df.copy())
+            totals = summarize_amazon_delivery_refunds(returns_df)
+            total_row = {
+                "return_delivery_date": "",
+                "amazon_order_id": "Grand Total",
+                "merchant_sku": "",
+                "return_quantity": totals["return_units"],
+                "refunded_amount_incl_gst": totals.get("refunds_incl_gst", totals["refunds"]),
+                "refunded_amount": totals["refunds"],
+            }
+            returns_out = pd.concat([returns_out, pd.DataFrame([total_row])], ignore_index=True)
+            returns_out.to_excel(writer, sheet_name=returns_sheet, index=False)
+            try:
+                _apply_sp_sheet_formatting(writer, returns_sheet, returns_out)
+            except Exception as fe:
+                print(f"[Amazon Returns] formatting error: {fe}")
+            print(
+                f"[Amazon Returns@delivery] Wrote {totals['return_lines']} lines / "
+                f"{totals['return_orders']} orders / refunded={totals['refunds']:.2f} "
+                f"for {ss} to {ee}"
+            )
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name=returns_sheet, index=False)
+            print(f"[Amazon Returns@delivery] No approved returns for {ss} to {ee}")
     except Exception as ex:
         print(f"[Amazon SP] Error building sheet: {ex}")
         try:

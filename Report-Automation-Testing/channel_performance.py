@@ -931,14 +931,19 @@ def _plot_roas_by_day(
             zorder=3,
         )
         for xi, val in zip(x, y):
-            if np.isnan(val) or val <= 0:
+            if np.isnan(val):
                 continue
+            # Negative ROAS (net sales went negative on refunds/cancellations that day)
+            # is real and should be labelled, not silently dropped — place the label
+            # below the point since the point itself sits below the zero line.
+            below = val <= 0
             ax.annotate(
                 f"{val:.2f}x",
                 (xi, val),
                 textcoords="offset points",
-                xytext=(0, 6),
+                xytext=(0, -12 if below else 6),
                 ha="center",
+                va="top" if below else "bottom",
                 fontsize=6.5,
                 fontweight="600",
                 color=color,
@@ -991,7 +996,15 @@ def _plot_roas_by_day(
     valid = daily["gross_roas"].dropna()
     if not valid.empty:
         ymax = float(valid.max())
-        ax.set_ylim(0, max(ymax * 1.35, 0.5))
+        ymin = float(valid.min())
+        # Net sales (and therefore ROAS) can go negative on days where refunds/
+        # cancellations outweigh new sales for a channel — extend the floor below
+        # zero on those days instead of clipping the line flat against the x-axis,
+        # which otherwise reads as a data glitch rather than a real negative value.
+        lower = min(ymin * 1.15, 0.0) if ymin < 0 else 0.0
+        ax.set_ylim(lower, max(ymax * 1.35, 0.5))
+        if lower < 0:
+            ax.axhline(0, color="#999999", linewidth=0.8, zorder=1)
     if show_legend and len(plot_platforms) > 1:
         legend_kwargs = dict(
             frameon=True,

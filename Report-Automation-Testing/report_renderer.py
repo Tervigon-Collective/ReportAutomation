@@ -558,12 +558,13 @@ def build_campaign_roas_segments(campaign_rows: list[dict]) -> tuple[list[dict],
 
     segment_defs = [
         # (internal label, tier, display label, sub, predicate, sort_ascending)
+        # All tiers sort by Net ROAS descending (best first within the segment)
         ("Net ROAS > 1", "high", "High Performing", "Net ROAS > 1.0x",
          lambda nr: nr > 1, False),
         ("0.8 < Net ROAS <= 1", "average", "Average Performance", "Net ROAS 0.8x – 1.0x",
          lambda nr: 0.8 < nr <= 1, False),
         ("Net ROAS <= 0.8", "low", "Underperforming", "Net ROAS < 0.8x",
-         lambda nr: nr <= 0.8, True),
+         lambda nr: nr <= 0.8, False),
     ]
 
     grand = _aggregate_campaign_rows(campaign_rows)

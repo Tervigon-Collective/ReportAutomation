@@ -351,12 +351,13 @@ def reconcile_entity_report(
     """
     rows: list[dict] = []
 
-    def add(metric: str, report_val: float, source_val, source_label: str, *, assertable: bool = True):
+    def add(metric: str, report_val: float, source_val, source_label: str, *, assertable: bool = True, tol: float | None = None):
         diff = None
         status = "info"
         if assertable and source_val is not None:
             diff = round(float(report_val) - float(source_val), 4)
-            status = "OK" if abs(diff) <= tolerance else "MISMATCH"
+            use_tol = tolerance if tol is None else tol
+            status = "OK" if abs(diff) <= use_tol else "MISMATCH"
         rows.append({
             "metric": metric,
             "entity_report": round(float(report_val), 4),
@@ -387,19 +388,30 @@ def reconcile_entity_report(
         pnl = fetch_pnl_summary(start_date, end_date) or {}
         meta_spend_rep = _grand_total_value(rollups.get("meta"), "spend")
         google_spend_rep = _grand_total_value(rollups.get("google"), "spend")
-        add("Meta ad spend", meta_spend_rep, pnl.get("meta_ads_cost"), "pnl/summary.meta_ads_cost")
-        add("Google ad spend", google_spend_rep, pnl.get("google_ads_cost"), "pnl/summary.google_ads_cost")
-        # Context-only: attributed revenue != KPI gross revenue by design (§1b).
+        # pnl/summary returns camelCase keys (metaAdsCost/googleAdsCost/netSalesExclTax).
+        # Cross-source ad spend compares the ad-LEVEL attribution cohort (campaigns present
+        # in the attribution join) to the canonical channel spend (fct_{meta,google}_ads_daily).
+        # These are the same source but different cohorts: a campaign with spend but no
+        # attributed order, or paisa-level accumulation across many campaigns, can leave a
+        # small residual (same species as the Meta campaign-cohort split). Use a small
+        # relative tolerance here, NOT the exact tolerance used for internal Σ-row identity.
+        def _xsrc_tol(source_val) -> float:
+            return max(50.0, abs(float(source_val or 0)) * 0.0005)  # floor Rs.50 or 0.05%
+        add("Meta ad spend", meta_spend_rep, pnl.get("metaAdsCost"), "pnl/summary.metaAdsCost",
+            tol=_xsrc_tol(pnl.get("metaAdsCost")))
+        add("Google ad spend", google_spend_rep, pnl.get("googleAdsCost"), "pnl/summary.googleAdsCost",
+            tol=_xsrc_tol(pnl.get("googleAdsCost")))
+        # Context-only: attributed revenue != KPI net sales by design (§1b).
         attributed_rev = (
             _grand_total_value(rollups.get("meta"), "shopify_revenue")
             + _grand_total_value(rollups.get("google"), "shopify_revenue")
             + _grand_total_value(rollups.get("organic"), "shopify_revenue")
         )
         add(
-            "Attributed revenue (context; != KPI gross revenue by design)",
+            "Attributed revenue (context; != KPI net sales by design)",
             attributed_rev,
-            pnl.get("total_sales"),
-            "pnl/summary.total_sales",
+            pnl.get("netSalesExclTax"),
+            "pnl/summary.netSalesExclTax",
             assertable=False,
         )
     except Exception as exc:

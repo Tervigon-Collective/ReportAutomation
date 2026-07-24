@@ -213,7 +213,10 @@ def get_meta_funnel_metrics_ch(start_date=None, end_date=None, brand_id: Optiona
         or 0
     )
 
-    net_profit = revenue - cogs - spend
+    # Match the backend/frontend funnel definition: total_profit = revenue - cogs
+    # (metaFunnel/analytics.js, FunnelAdsTable.jsx). Ad spend is shown separately and
+    # is NOT netted against the funnel's ad-level revenue cohort.
+    net_profit = revenue - cogs
     return {
         'impressions': int(round(impressions)),
         'clicks': int(round(clicks)),

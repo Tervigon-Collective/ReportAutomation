@@ -331,7 +331,17 @@ def meta_funnel_from_api(summary: Mapping[str, Any]) -> dict:
     revenue = _f(summary.get("total_revenue"))
     cogs = _f(summary.get("total_cogs"))
     spend = _f(summary.get("total_spend"))
-    net_profit = revenue - cogs - spend
+    # Funnel profit MUST match the backend/frontend definition. The backend
+    # (metaFunnel/analytics.js) reports `total_profit = revenue - cogs` and the
+    # frontend funnel card (FunnelAdsTable.jsx) renders exactly that. Do NOT
+    # subtract the whole channel's ad spend from the funnel's ad-level revenue
+    # cohort — that produced a nonsensical figure that matched nothing on the
+    # dashboard. Prefer the backend-provided field; fall back to revenue - cogs.
+    net_profit = (
+        _f(summary.get("total_profit"))
+        if summary.get("total_profit") is not None
+        else revenue - cogs
+    )
 
     def rate(n, d):
         return round(safe_div(n, d) * 100.0, 2)

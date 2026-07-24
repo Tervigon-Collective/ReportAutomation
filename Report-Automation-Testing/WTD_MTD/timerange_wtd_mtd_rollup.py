@@ -2159,106 +2159,72 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
                     </tr>
                 """)
         
-        # Add Amazon row if metrics are available for this timeframe
+        # Amazon channel row — CANONICAL dashboard Amazon channel (GET /v1/historical/
+        # dashboard), rendered exactly like Meta/Google/Organic so it ties to the rupee
+        # and SUMS into the TOTAL net_profit below. The settlement/net-payout view
+        # (amazon_wtd/amazon_mtd) is NOT used for the channel row — it uses a different
+        # revenue axis (order_total − delivery refunds) and a bundled Amazon COGS that
+        # diverged materially from the dashboard (₹6k–14k, sometimes sign-flipped). It is
+        # retained below only as a clearly-labelled settlement context line.
+        amazon_ch = channels.get('amazon')
         amazon_metrics = amazon_wtd if timeframe_key == 'wtd' else amazon_mtd
-        if amazon_metrics and amazon_metrics.get('available', False):
-            # Channel Revenue column uses net_sales (gross − delivery refunds).
-            amazon_revenue = amazon_metrics.get('net_sales', amazon_metrics.get('revenue', 0))
-            amazon_spend = amazon_metrics.get('spend', 0)
-            amazon_orders = amazon_metrics.get('orders', 0)
-            amazon_date_range = amazon_metrics.get('date_range', 'N/A')
-
-            # P&L-derived fields (only populated when gold.fct_amazon_sp_order_pnl
-            # has data for this range). Net Profit / Net ROAS use the same
-            # formula as the other channels for an apples-to-apples comparison:
-            #   net_profit = revenue - cogs - spend
-            #   net_roas   = (revenue - cogs) / spend
-            pnl_available = amazon_metrics.get('pnl_available', False)
-            amazon_cogs = amazon_metrics.get('cogs', 0) if pnl_available else None
-            amazon_net_profit = amazon_metrics.get('net_profit', 0) if pnl_available else None
-            amazon_net_roas = amazon_metrics.get('net_roas', 0) if pnl_available else None
-            amazon_units = amazon_metrics.get('units', 0) if pnl_available else None
-
-            # Cell formatting: green/red tint on profit & ROAS, grey "N/A" when
-            # the P&L view is not populated (preserves the previous look for
-            # ranges with no settlement data).
-            na_cell = (
-                '<td style="padding: 7px; text-align: right; border: 1px solid #ddd; '
-                'font-size: 12px; color: #999;">N/A</td>'
-            )
-
-            if amazon_cogs is not None:
-                cogs_cell = (
-                    f'<td style="padding: 7px; text-align: right; border: 1px solid #ddd; '
-                    f'font-size: 12px;">₹{amazon_cogs:,.2f}</td>'
-                )
-            else:
-                cogs_cell = na_cell
-
-            if amazon_net_profit is not None:
-                profit_bg = (
-                    "background-color: #e8f5e9;" if amazon_net_profit > 0
-                    else ("background-color: #ffebee;" if amazon_net_profit < 0 else "")
-                )
-                profit_cell = (
-                    f'<td style="padding: 7px; text-align: right; border: 1px solid #ddd; '
-                    f'font-size: 12px; {profit_bg}">₹{amazon_net_profit:,.2f}</td>'
-                )
-            else:
-                profit_cell = na_cell
-
-            if amazon_net_roas is not None and amazon_spend > 0:
-                roas_bg = (
-                    "background-color: #e8f5e9;" if amazon_net_roas >= 1
-                    else "background-color: #ffebee;"
-                )
-                roas_cell = (
-                    f'<td style="padding: 7px; text-align: right; border: 1px solid #ddd; '
-                    f'font-size: 12px; {roas_bg}">{amazon_net_roas:.2f}</td>'
-                )
-            else:
-                roas_cell = na_cell
-
-            units_cell = (
-                f'<td style="padding: 7px; text-align: right; border: 1px solid #ddd; '
-                f'font-size: 12px;">{amazon_units:,}</td>'
-                if amazon_units is not None else na_cell
-            )
-
+        if amazon_ch:
+            a_profit = amazon_ch.get('net_profit', 0)
+            a_profit_bg = "background-color: #e8f5e9;" if a_profit > 0 else ("background-color: #ffebee;" if a_profit < 0 else "")
+            a_net_roas = amazon_ch.get('net_roas', 0)
+            a_roas_bg = "background-color: #e8f5e9;" if a_net_roas >= 1 else "background-color: #ffebee;"
             html_parts.append(f"""
                 <tr style="background-color: #FFF9E6;">
                     <td style="padding: 7px; border: 1px solid #ddd; font-size: 12px;">Amazon</td>
-                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_revenue:,.2f}</td>
-                    {cogs_cell}
-                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_spend:,.2f}</td>
-                    {profit_cell}
-                    {roas_cell}
-                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">{amazon_orders:,}</td>
-                    {units_cell}
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_ch.get('revenue', 0):,.2f}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_ch.get('cogs', 0):,.2f}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{amazon_ch.get('spend', 0):,.2f}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px; {a_profit_bg}">₹{a_profit:,.2f}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px; {a_roas_bg}">{a_net_roas:.2f}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">{amazon_ch.get('orders', 0):,}</td>
+                    <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">{amazon_ch.get('quantity', 0):,}</td>
                 </tr>
             """)
 
-            # Gross / delivery-dated refunds / net (actual Refunded Amount)
-            amazon_gross = amazon_metrics.get('gross_sales', amazon_revenue)
-            amazon_refunds = amazon_metrics.get('refunds', 0)
-            amazon_net = amazon_metrics.get('net_sales', amazon_revenue)
-            amazon_item_lines = amazon_metrics.get('order_item_lines', 0)
-            amazon_return_lines = amazon_metrics.get('return_lines', 0)
-            amazon_return_orders = amazon_metrics.get('return_orders', 0)
-            amazon_return_units = amazon_metrics.get('return_units', 0)
-            html_parts.append(f"""
-                <tr style="background-color: #FFFDF5;">
-                    <td colspan="8" style="padding: 6px 8px; border: 1px solid #ddd; font-size: 11px; color: #555;">
-                        Amazon recon ({amazon_date_range}):
-                        Gross ₹{amazon_gross:,.2f}
-                        − Refunds (return delivery date, ex-GST) ₹{amazon_refunds:,.2f}
-                        = Net ₹{amazon_net:,.2f}
-                        · Orders {amazon_orders:,} · Item lines {amazon_item_lines:,} · Units {amazon_units if amazon_units is not None else 0:,}
-                        · Return lines {amazon_return_lines:,} · Return orders {amazon_return_orders:,} · Units {amazon_return_units:,}
-                    </td>
-                </tr>
-            """)
+            # Settlement context only (net-payout basis) — NOT the channel P&L above.
+            if amazon_metrics and amazon_metrics.get('available', False):
+                amazon_date_range = amazon_metrics.get('date_range', 'N/A')
+                amazon_gross = amazon_metrics.get('gross_sales', 0)
+                amazon_refunds = amazon_metrics.get('refunds', 0)
+                amazon_net = amazon_metrics.get('net_sales', 0)
+                amazon_settle_np = amazon_metrics.get('net_profit', 0) if amazon_metrics.get('pnl_available') else None
+                settle_np_txt = f" · Settlement net profit ₹{amazon_settle_np:,.2f}" if amazon_settle_np is not None else ""
+                html_parts.append(f"""
+                    <tr style="background-color: #FFFDF5;">
+                        <td colspan="8" style="padding: 6px 8px; border: 1px solid #ddd; font-size: 11px; color: #888;">
+                            Amazon settlement context ({amazon_date_range}, net-payout basis — not the channel P&L above):
+                            Gross ₹{amazon_gross:,.2f} − Refunds (delivery date, ex-GST) ₹{amazon_refunds:,.2f} = Net ₹{amazon_net:,.2f}{settle_np_txt}
+                        </td>
+                    </tr>
+                """)
         
+        # Residual ("Other — unattributed") row so the channel rows reconcile to the
+        # canonical TOTAL. The dashboard carries an unattributed bucket (orders/COGS not
+        # tied to a channel); without showing it, the four channel rows would not sum to
+        # the TOTAL. residual = canonical total − Σ(displayed channels).
+        _res_rev = total_revenue - sum(ch.get('revenue', 0) for ch in channels.values())
+        _res_cogs = total_cogs - sum(ch.get('cogs', 0) for ch in channels.values())
+        _res_spend = total_spend - sum(ch.get('spend', 0) for ch in channels.values())
+        _res_np = total_net_profit - sum(ch.get('net_profit', 0) for ch in channels.values())
+        if abs(_res_rev) >= 1.0 or abs(_res_cogs) >= 1.0 or abs(_res_np) >= 1.0:
+            html_parts.append(f"""
+                    <tr style="background-color: #fafafa; color: #666;">
+                        <td style="padding: 7px; border: 1px solid #ddd; font-size: 12px; font-style: italic;">Other (unattributed)</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{_res_rev:,.2f}</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{_res_cogs:,.2f}</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{_res_spend:,.2f}</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">₹{_res_np:,.2f}</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">—</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">—</td>
+                        <td style="padding: 7px; text-align: right; border: 1px solid #ddd; font-size: 12px;">—</td>
+                    </tr>
+            """)
+
         # Add total row
         html_parts.append(f"""
                     <tr style="border-top: 2px solid #333;">

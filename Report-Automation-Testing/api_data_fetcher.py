@@ -1409,6 +1409,60 @@ def fetch_historical_dashboard_cached(start_date: str, end_date: str) -> Optiona
     return _HISTORICAL_DASHBOARD_CACHE[cache_key]
 
 
+# --------------------------------------------------------------------------- #
+# Real-time "Reports Analytics" sources.
+#
+# Unlike historical/dashboard (which reads the ClickHouse warehouse), these two
+# endpoints back the live "Reports Analytic" page and query the SOURCE PLATFORMS
+# directly — Shopify Admin API, Meta Graph API, Google Ads API — so they keep
+# working even when the warehouse / ClickHouse is down. Amazon figures still come
+# from the warehouse inside the bundle, but Shopify + Meta + Google are live.
+#   * shopify/analytics/live-dashboard-bundle -> revenue, live ad spend, Amazon SP, returns
+#   * shopify/analytics/cogs                  -> live Shopify COGS (+ per-channel breakdown)
+# --------------------------------------------------------------------------- #
+_LIVE_BUNDLE_CACHE: dict = {}
+_SHOPIFY_COGS_CACHE: dict = {}
+
+
+def fetch_live_dashboard_bundle(start_date: str, end_date: str,
+                                include_previous: bool = False) -> Optional[dict]:
+    """Real-time Reports Analytics bundle (Shopify dashboard + live Meta/Google spend +
+    Amazon SP sales + returns/cancels). Queries source platforms directly, so it survives
+    a warehouse/ClickHouse outage. Returns the inner `data` object or None."""
+    return fetch_v1("shopify/analytics/live-dashboard-bundle", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+        "include_current_dashboard": "true",
+        "include_previous_dashboard": "true" if include_previous else "false",
+    })
+
+
+def fetch_live_dashboard_bundle_cached(start_date: str, end_date: str) -> Optional[dict]:
+    """Memoized live-dashboard-bundle for a date window (shared across report sections)."""
+    key = (_to_date_only(start_date), _to_date_only(end_date))
+    if key not in _LIVE_BUNDLE_CACHE:
+        _LIVE_BUNDLE_CACHE[key] = fetch_live_dashboard_bundle(start_date, end_date)
+    return _LIVE_BUNDLE_CACHE[key]
+
+
+def fetch_shopify_cogs(start_date: str, end_date: str) -> Optional[dict]:
+    """Real-time Shopify COGS from /shopify/analytics/cogs (custom.product_cost_ex_gst
+    metafields, mirrors the warehouse net_cogs), incl. per-channel cogs_breakdown
+    {meta, google, organic}. Returns the inner `data` object or None."""
+    return fetch_v1("shopify/analytics/cogs", {
+        "start_date": _to_date_only(start_date),
+        "end_date": _to_date_only(end_date),
+    })
+
+
+def fetch_shopify_cogs_cached(start_date: str, end_date: str) -> Optional[dict]:
+    """Memoized real-time Shopify COGS for a date window."""
+    key = (_to_date_only(start_date), _to_date_only(end_date))
+    if key not in _SHOPIFY_COGS_CACHE:
+        _SHOPIFY_COGS_CACHE[key] = fetch_shopify_cogs(start_date, end_date)
+    return _SHOPIFY_COGS_CACHE[key]
+
+
 def fetch_wtd_mtd_dashboard_snapshot(start_date: str, end_date: str) -> dict:
     """WTD/MTD email + headline figures from GET /v1/historical/dashboard."""
     from metric_calculators import wtd_mtd_snapshot_from_historical_dashboard

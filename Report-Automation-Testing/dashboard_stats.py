@@ -206,6 +206,33 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         totals["net_sales"] - totals["total_cogs"] - totals["total_ad_spend"], 2
     )
 
+    # --- Amazon net-sales reconciliation override ---------------------------------
+    # dashboard_master.sql derives Amazon net revenue by prorating the ORDER-level
+    # effective_gross_revenue across items, which overstates net sales vs the
+    # dashboard (e.g. 07-26: 50,862 vs 43,323). The backend/dashboard source Amazon
+    # net sales at the ITEM level (cancelled orders zeroed, joined on order
+    # purchase_date). Reuse the already-reconciled item fetcher and fold the delta
+    # back through net_sales / gross_sales / net_profit. COGS is left untouched
+    # because the master query's Amazon net COGS already matches the dashboard.
+    try:
+        from amazon_entity_report import fetch_amazon_sp_items_gold
+        items_df = fetch_amazon_sp_items_gold(start, end, brand_id=brand_id)
+        if not items_df.empty and "item_price_amount" in items_df.columns:
+            amz_item_rev = float(
+                pd.to_numeric(items_df["item_price_amount"], errors="coerce").fillna(0).sum()
+            )
+            delta = totals["amazon_net_revenue"] - amz_item_rev
+            if abs(delta) > 0.01:
+                totals["amazon_net_revenue"] = round(amz_item_rev, 2)
+                totals["net_sales"] = round(totals["net_sales"] - delta, 2)
+                totals["gross_sales"] = round(totals["gross_sales"] - delta, 2)
+                totals["net_profit"] = round(
+                    totals["net_sales"] - totals["total_cogs"] - totals["total_ad_spend"], 2
+                )
+                logger.info("[dashboard] Amazon item-level net-sales override: delta=%.2f", delta)
+    except Exception as ex:
+        logger.warning("[dashboard] Amazon item-level override failed (%s); keeping master value", ex)
+
     # --- channel split: net sales + orders (per-order attribution, canonical rule) ---
     bp = {"b": brand_id, "s": start, "e": end}
     ns_sql = f"""
@@ -276,27 +303,164 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
     return {"totals": totals, "channels": channels, "source": "clickhouse"}
 
 
+# ------------------------------------------------------------ real-time (live) source
+
+def _realtime_stats(brand_id: int, company_id: int, start: str, end: str) -> dict:
+    """
+    General Statistics computed from the REAL-TIME "Reports Analytics" APIs, which query
+    the source platforms directly (Shopify Admin / Meta Graph / Google Ads) and therefore
+    survive a warehouse/ClickHouse outage. Combines:
+        * /shopify/analytics/live-dashboard-bundle  (Shopify revenue + live Meta/Google
+          spend + Amazon SP sales + returns/cancels)
+        * /shopify/analytics/cogs                   (live Shopify COGS + per-channel split)
+
+    Totals (net sales, gross sales, COGS, ad spend, orders, net profit, returns/cancels)
+    are fully real-time. Per-channel net sales / order counts are NOT exposed by the live
+    platform APIs (they need warehouse order-attribution), so channel rows carry real-time
+    ad spend + COGS only; the PDF residual row reconciles the channel sum back to totals.
+    Raises on missing data so the caller can fall through to the next source.
+    """
+    from api_data_fetcher import (
+        fetch_live_dashboard_bundle_cached,
+        fetch_shopify_cogs_cached,
+    )
+
+    def _f(x) -> float:
+        try:
+            return float(x or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    bundle = fetch_live_dashboard_bundle_cached(start, end)
+    cur = (bundle or {}).get("current") or {}
+    dash = cur.get("dashboard") or {}
+    if not dash:
+        raise RuntimeError("live-dashboard-bundle returned no dashboard data")
+
+    sm = ((dash.get("revenue") or {}).get("sales_metrics")) or {}
+    stat = dash.get("statistics") or {}
+    amazon = cur.get("amazonSales") or {}
+    adspend = cur.get("adSpend") or {}
+    ad_bd = adspend.get("breakdown") or {}
+    rc = (bundle.get("returnsCancels") or {}).get("current") or {}
+
+    cogs_data = fetch_shopify_cogs_cached(start, end) or {}
+    shop_cogs = _f(cogs_data.get("cost_of_goods_sold"))
+    cogs_bd = cogs_data.get("cogs_breakdown") or {}
+
+    shop_net, shop_gross = _f(sm.get("net_sales")), _f(sm.get("gross_sales"))
+    shop_orders = int(_f(stat.get("total_orders")))
+    amz_net, amz_gross = _f(amazon.get("net_sales")), _f(amazon.get("gross_sales"))
+    amz_cogs, amz_orders = _f(amazon.get("cogs")), int(_f(amazon.get("orders")))
+
+    def _amz_spend(v):
+        return _f(v.get("total")) if isinstance(v, dict) else _f(v)
+
+    meta_spend, google_spend = _f(ad_bd.get("meta")), _f(ad_bd.get("google"))
+    amz_spend = _amz_spend(ad_bd.get("amazon"))
+    total_ad = _f(adspend.get("total")) or (meta_spend + google_spend + amz_spend)
+
+    net_sales = round(shop_net + amz_net, 2)
+    gross_sales = round(shop_gross + amz_gross, 2)
+    total_cogs = round(shop_cogs + amz_cogs, 2)
+    total_orders = shop_orders + amz_orders
+
+    totals = {
+        "net_sales": net_sales,
+        "gross_sales": gross_sales,
+        "total_cogs": total_cogs,
+        "total_ad_spend": round(total_ad, 2),
+        "total_orders": total_orders,
+        "net_profit": round(net_sales - total_cogs - total_ad, 2),
+        "returns_cancels": int(_f(rc.get("total_count"))),
+        "cancelled_orders": int(_f(rc.get("cancelled_count"))),
+        "returned_orders": int(_f(rc.get("returned_count"))),
+        "cancelled_amount": _f(rc.get("cancelled_amount")),
+        "returned_amount": _f(rc.get("returned_amount")),
+        "returns_cancels_amount": _f(rc.get("total_amount")),
+        "amazon_net_revenue": round(amz_net, 2),
+        "amazon_net_cogs": round(amz_cogs, 2),
+        "amazon_spend": round(amz_spend, 2),
+        "amazon_orders": amz_orders,
+    }
+
+    # Per-channel: real-time ad spend + COGS; net sales / order counts unavailable live.
+    channels = {}
+    for ch, spend in (("meta", meta_spend), ("google", google_spend), ("organic", 0.0)):
+        channels[ch] = {
+            "sales": 0.0,
+            "cogs": round(_f(cogs_bd.get(ch)), 2),
+            "ad_spend": round(spend, 2) if ch != "organic" else 0.0,
+            "order_count": 0,
+        }
+    return {"totals": totals, "channels": channels, "source": "realtime"}
+
+
 # --------------------------------------------------------------------------- API
+
+def _source_order() -> list[str]:
+    """
+    Ordered list of data sources to try for the General Statistics payload.
+
+    Override with env DASHBOARD_SOURCE_ORDER (comma-separated, e.g. "clickhouse,realtime").
+    Sources: 'api' = historical/dashboard (warehouse-backed), 'clickhouse' = direct gold
+    query (warehouse), 'realtime' = live source-platform APIs (survive a warehouse outage).
+
+    Default order always ends with 'realtime' so net profit + totals still render when the
+    warehouse ('api' and 'clickhouse') is unavailable — the point of this fallback.
+    """
+    raw = os.getenv("DASHBOARD_SOURCE_ORDER", "").strip()
+    if raw:
+        return [s.strip().lower() for s in raw.split(",") if s.strip()]
+    api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
+    api_fallback = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+    if api_only:
+        return ["api", "realtime"]
+    if api_fallback:
+        return ["api", "clickhouse", "realtime"]
+    return ["clickhouse", "realtime"]
+
+
+def _run_source(name: str, brand_id: int, company_id: int, start: str, end: str) -> Optional[dict]:
+    if name == "api":
+        data = _fetch_from_api(brand_id, company_id, start, end)
+        return _api_to_stats(data) if data is not None else None
+    if name == "clickhouse":
+        return _clickhouse_stats(brand_id, start, end)
+    if name in ("realtime", "live"):
+        return _realtime_stats(brand_id, company_id, start, end)
+    raise ValueError(f"unknown dashboard source: {name}")
+
 
 def fetch_general_statistics(
     brand_id: int,
     company_id: int,
     start_date: str | date | datetime,
     end_date: str | date | datetime,
-    prefer_api: bool = True,
+    prefer_api: bool = True,  # retained for back-compat; ordering now via _source_order()
 ) -> dict:
-    """Return the General Statistics payload, API-first with a ClickHouse fallback."""
+    """
+    Return the General Statistics payload, trying each source in _source_order() until one
+    yields non-empty totals. The chain always ends with the real-time source so net profit
+    and totals still render when the warehouse (API + ClickHouse) is down.
+    """
     start, end = _to_date_str(start_date), _to_date_str(end_date)
-    api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
-    if prefer_api or api_only:
-        data = _fetch_from_api(brand_id, company_id, start, end)
-        if data is not None:
-            return _api_to_stats(data)
-        if api_only:
-            return {"totals": {}, "channels": {}, "source": "api_empty"}
-    if api_only:
-        return {"totals": {}, "channels": {}, "source": "api_only"}
-    return _clickhouse_stats(brand_id, start, end)
+    last_err: Optional[Exception] = None
+    for name in _source_order():
+        try:
+            stats = _run_source(name, brand_id, company_id, start, end)
+        except Exception as ex:
+            last_err = ex
+            logger.warning("[dashboard] source '%s' failed (%s); trying next", name, ex)
+            continue
+        if stats and stats.get("totals"):
+            if name != _source_order()[0]:
+                logger.info("[dashboard] served from fallback source '%s'", name)
+            return stats
+        logger.warning("[dashboard] source '%s' returned no data; trying next", name)
+    if last_err is not None:
+        logger.error("[dashboard] all sources failed; last error: %s", last_err)
+    return {"totals": {}, "channels": {}, "source": "unavailable"}
 
 
 def build_pdf_api_metrics(stats: dict) -> dict:

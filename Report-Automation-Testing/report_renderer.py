@@ -957,9 +957,24 @@ def build_daily_pdf_context(
         """Fill missing numeric keys with 0 so templates never hit Undefined math."""
         c = dict(c or {})
         for k in ("sales", "ad_spend", "cogs", "net_profit", "gross_roas",
-                  "net_roas", "be_roas", "order_count", "cpp"):
+                  "net_roas", "be_roas", "order_count", "cpp",
+                  # order-date cohort gross->net bridge fields
+                  "gross_sales", "returned_amount", "cancelled_amount", "discounts",
+                  "gross_cogs", "active_cogs", "return_cogs", "cancel_cogs",
+                  "retcnl_cost", "cogs_adjustment"):
             if c.get(k) is None:
                 c[k] = 0
+        # Legacy (General Statistics fallback) source lacks the bridge split — degrade
+        # gracefully so the template always has a self-consistent bridge:
+        #   gross_sales == net_sales (no deductions), gross_cogs == net_cogs.
+        if not c.get("gross_sales") and c.get("sales"):
+            c["gross_sales"] = c["sales"]
+        if not c.get("gross_cogs") and c.get("cogs"):
+            c["gross_cogs"] = c["cogs"]
+        if not c.get("active_cogs") and c.get("cogs"):
+            c["active_cogs"] = c["cogs"]
+        c["cogs_adjustment"] = round(_f_metric(c.get("cogs")) - _f_metric(c.get("gross_cogs")), 2)
+        c["retcnl_cost"] = round(_f_metric(c.get("cogs")) - _f_metric(c.get("active_cogs")), 2)
         return c
 
     total = api_metrics.get("total", {})
@@ -978,9 +993,19 @@ def build_daily_pdf_context(
     if amazon:
         channels.append(("Amazon", _norm_channel(amazon)))
 
-    # Ensure every channel row exposes gross_profit for the template.
+    # Ensure every channel row exposes gross_profit + the COGS-bridge fields the
+    # template needs. Gross Profit follows the dashboard definition:
+    #   Gross Profit = Gross Sales - Ad Spend - Gross COGS
     for _, ch in channels:
-        ch["gross_profit"] = round(_f_metric(ch.get("sales")) - _f_metric(ch.get("cogs")), 2)
+        gs = _f_metric(ch.get("gross_sales")) or _f_metric(ch.get("sales"))
+        gco = _f_metric(ch.get("gross_cogs")) or _f_metric(ch.get("cogs"))
+        ad = _f_metric(ch.get("ad_spend"))
+        ch["gross_sales"] = round(gs, 2)
+        ch["gross_cogs"] = round(gco, 2)
+        ch["cogs_adjustment"] = round(_f_metric(ch.get("cogs")) - gco, 2)
+        ch["gross_profit"] = round(gs - ad - gco, 2)
+        if ch.get("net_profit") is None:
+            ch["net_profit"] = round(_f_metric(ch.get("sales")) - ad - _f_metric(ch.get("cogs")), 2)
 
     campaigns = []
     campaign_segments = []
@@ -1012,6 +1037,32 @@ def build_daily_pdf_context(
         campaign_segments, campaign_total = build_campaign_roas_segments(campaign_rows)
         campaigns = campaign_rows
 
+    # Campaign section reconciles to the paid channel rows (Meta + Google only —
+    # campaigns cannot cover Organic or Amazon). A residual "Unattributed paid"
+    # line closes the gap between displayed campaign totals and the Meta+Google
+    # channel figures so: campaigns + residual == Meta + Google.
+    campaign_channel_ref = None
+    campaign_residual = None
+    paid = [c for n, c in channels if n in ("Meta", "Google")]
+    if paid:
+        campaign_channel_ref = {
+            "spend": round(sum(_f_metric(c.get("ad_spend")) for c in paid), 2),
+            "shopify_revenue": round(sum(_f_metric(c.get("sales")) for c in paid), 2),
+            "cogs": round(sum(_f_metric(c.get("cogs")) for c in paid), 2),
+            "net_profit": round(sum(_f_metric(c.get("net_profit")) for c in paid), 2),
+            "shopify_orders": int(sum(_f_metric(c.get("order_count")) for c in paid)),
+        }
+        ct = campaign_total or {}
+        res = {
+            "spend": round(campaign_channel_ref["spend"] - _f_metric(ct.get("spend")), 2),
+            "shopify_revenue": round(campaign_channel_ref["shopify_revenue"] - _f_metric(ct.get("shopify_revenue")), 2),
+            "cogs": round(campaign_channel_ref["cogs"] - _f_metric(ct.get("cogs")), 2),
+            "net_profit": round(campaign_channel_ref["net_profit"] - _f_metric(ct.get("net_profit")), 2),
+            "shopify_orders": int(campaign_channel_ref["shopify_orders"] - int(_f_metric(ct.get("shopify_orders")))),
+        }
+        res["show"] = any(abs(res[k]) >= 1.0 for k in ("spend", "shopify_revenue", "cogs", "net_profit"))
+        campaign_residual = res
+
     # Returned / Cancelled deduction + residual bridge so channel columns reconcile
     # to the all-channel General Statistics Total row.
     channel_dicts = [c for _, c in channels]
@@ -1029,32 +1080,36 @@ def build_daily_pdf_context(
         _visible_funnel_rows(build_google_funnel_rows(google_funnel))
     )
 
-    # Gross profit + zero-defaults so KPI cards never hit Undefined.
-    # Blended ROAS for the executive summary = Revenue (net sales) / ad spend.
+    # Gross/net profit + zero-defaults so KPI cards never hit Undefined.
+    # Dashboard definitions (see attributionSummaryPnL.js):
+    #   Gross Profit = Gross Sales - Ad Spend - Gross COGS
+    #   Net Profit   = Net Sales   - Ad Spend - Net COGS
+    #   Gross ROAS   = Gross Sales / Ad Spend
     total = dict(total)
-    for k in ("sales", "ad_spend", "cogs", "net_profit", "gross_roas",
-              "net_roas", "be_roas", "order_count", "cpp"):
+    for k in ("sales", "gross_sales", "ad_spend", "cogs", "gross_cogs",
+              "net_profit", "gross_roas", "net_roas", "be_roas", "order_count", "cpp"):
         if total.get(k) is None:
             total[k] = 0
-    total["gross_profit"] = round(_f_metric(total.get("sales")) - _f_metric(total.get("cogs")), 2)
-    # Prefer dashboard Net Profit when present; otherwise recompute from identity.
-    if total.get("net_profit") is None:
-        total["net_profit"] = round(
-            _f_metric(total.get("sales")) - _f_metric(total.get("cogs")) - _f_metric(total.get("ad_spend")),
-            2,
-        )
+    # Degrade for the fallback source (no gross split available).
+    if not total.get("gross_sales"):
+        total["gross_sales"] = total.get("sales")
+    if not total.get("gross_cogs"):
+        total["gross_cogs"] = total.get("cogs")
     spend = _f_metric(total.get("ad_spend"))
     sales = _f_metric(total.get("sales"))
     cogs = _f_metric(total.get("cogs"))
+    gross_sales = _f_metric(total.get("gross_sales"))
+    gross_cogs = _f_metric(total.get("gross_cogs"))
+    total["cogs_adjustment"] = round(cogs - gross_cogs, 2)
+    total["gross_profit"] = round(gross_sales - spend - gross_cogs, 2)
+    total["net_profit"] = round(sales - spend - cogs, 2)
     if spend > 0:
-        # Blended = net revenue / spend (matches "Revenue / ad spend" caption).
-        total["gross_roas"] = round(sales / spend, 2)
+        total["gross_roas"] = round(gross_sales / spend, 2)
         total["net_roas"] = round((sales - cogs) / spend, 2)
     # Dashboard BE ROAS = net_sales / (net_sales - net_cogs)
     margin = sales - cogs
     total["be_roas"] = round(sales / margin, 2) if margin > 0 else 0.0
-    if total.get("dashboard_gross_roas") is None and spend > 0:
-        total["dashboard_gross_roas"] = round(_f_metric(total.get("gross_sales")) / spend, 2)
+    total["dashboard_gross_roas"] = round(gross_sales / spend, 2) if spend > 0 else 0.0
 
     # Best channel (by net profit) for subtle row highlighting in the channel table.
     best_channel_name = None
@@ -1078,5 +1133,7 @@ def build_daily_pdf_context(
         "campaigns": campaigns,
         "campaign_segments": campaign_segments,
         "campaign_total": campaign_total,
+        "campaign_channel_ref": campaign_channel_ref,
+        "campaign_residual": campaign_residual,
         "roas_reconciliation": roas_reconciliation,
     }

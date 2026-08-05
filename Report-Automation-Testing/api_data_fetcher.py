@@ -1051,13 +1051,69 @@ def fetch_customer_mix(start_date: str, end_date: str) -> dict:
         return empty
 
 
-def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataFrame:
-    """Daily net profit series from GET /v1/historical/time-patterns."""
+def fetch_net_profit_series_from_dashboard(start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily net profit series from GET /v1/historical/dashboard (one call per day).
+
+    Matches the Historical dashboard Net Sales / COGS / Ad Spend / Net Profit cards.
+    Prefer this over time-patterns for as-is P&L charts — time-patterns can diverge
+    sharply on return/cancel-heavy days.
+    """
+    start = datetime.strptime(_to_date_only(start_date), "%Y-%m-%d").date()
+    end = datetime.strptime(_to_date_only(end_date), "%Y-%m-%d").date()
+    rows = []
+    d = start
+    while d <= end:
+        ds = d.strftime("%Y-%m-%d")
+        try:
+            dash = fetch_historical_dashboard_cached(ds, ds)
+        except Exception as e:
+            logger.warning("dashboard day series failed for %s: %s", ds, e)
+            dash = None
+        if dash:
+            rev = float(dash.get("net_sales") or 0)
+            cogs = float(dash.get("total_cogs") or dash.get("net_cogs") or 0)
+            spend = float(dash.get("total_ad_spend") or 0)
+            np_raw = dash.get("net_profit")
+            np_val = float(np_raw) if np_raw is not None else (rev - cogs - spend)
+            rows.append({
+                "sale_date": ds,
+                "revenue": rev,
+                "cogs": cogs,
+                "total_ad_spend": spend,
+                "net_profit": np_val,
+            })
+        d += timedelta(days=1)
+    if not rows:
+        return pd.DataFrame(columns=["sale_date", "revenue", "cogs", "total_ad_spend", "net_profit"])
+    return pd.DataFrame(rows)
+
+
+def fetch_net_profit_series_order_date_from_api(start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily net profit series from GET /v1/historical/time-patterns (order date)."""
     from api_response_transformers import time_patterns_daily_df
+
     data = fetch_historical_time_patterns(_to_date_only(start_date), _to_date_only(end_date))
     if not data:
         return pd.DataFrame()
     return time_patterns_daily_df(data)
+
+
+def fetch_net_profit_series_from_api(start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily net profit series aligned to Historical dashboard cards.
+
+    Primary: GET /v1/historical/dashboard per day.
+    Fallback: GET /v1/historical/time-patterns (can diverge on heavy return days).
+    """
+    try:
+        df = fetch_net_profit_series_from_dashboard(start_date, end_date)
+        if df is not None and not df.empty:
+            return df
+    except Exception as e:
+        logger.warning(
+            "fetch_net_profit_series_from_dashboard failed (%s -> %s): %s",
+            start_date, end_date, e,
+        )
+    return fetch_net_profit_series_order_date_from_api(start_date, end_date)
 
 
 def fetch_canonical_pnl_totals(start_date: str, end_date: str) -> dict:

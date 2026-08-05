@@ -22,7 +22,13 @@ from api_data_fetcher import (
 )
 from revenue_gst import apply_net_revenue_column
 from global_config import get_global_config, get_facebook_ads_config
-from channel_performance import plot_channel_performance_daily
+from channel_performance import (
+    MIN_SPEND_FOR_ROAS,
+    PLATFORM_COLORS,
+    PLATFORM_LABELS,
+    fetch_channel_performance,
+    plot_channel_performance_daily,
+)
 matplotlib.use('Agg')
 matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 
@@ -41,11 +47,78 @@ PLOT_COLORS = {
 def _compact_rs(val: float) -> str:
     """Compact Rs label for dense daily bar charts."""
     v = float(val)
+    sign = "-" if v < 0 else ""
+    v = abs(v)
     if v >= 100_000:
-        return f"{v / 100_000:.1f}L"
+        return f"{sign}{v / 100_000:.1f}L"
     if v >= 1_000:
-        return f"{v / 1_000:.0f}K"
-    return f"{int(round(v))}"
+        return f"{sign}{v / 1_000:.0f}K"
+    return f"{sign}{int(round(v))}"
+
+
+def _annotate_series_no_overlap(
+    ax,
+    xs,
+    ys,
+    *,
+    color: str,
+    fontsize: float = 6.5,
+    compact: bool = True,
+    step: int = 1,
+    zorder: int = 5,
+):
+    """
+    Point labels with a 4-way stagger (above / below / high-right / low-left)
+    so neighbouring annotations don't stack on top of each other.
+    """
+    # (dx_points, dy_points)
+    slots = (
+        (0, 13),
+        (0, -14),
+        (5, 20),
+        (-5, -20),
+    )
+    vals = list(ys)
+    slot_i = 0
+    for i, (x, y) in enumerate(zip(xs, vals)):
+        if y is None or (isinstance(y, float) and np.isnan(y)):
+            continue
+        if step > 1 and i % step != 0:
+            continue
+        yf = float(y)
+        dx, dy = slots[slot_i % len(slots)]
+        slot_i += 1
+        label = _compact_rs(yf) if compact else f"{yf:,.0f}"
+        ax.annotate(
+            label,
+            (x, yf),
+            textcoords="offset points",
+            xytext=(dx, dy),
+            ha="center",
+            va="bottom" if dy > 0 else "top",
+            fontsize=fontsize,
+            fontweight="700",
+            color=color,
+            zorder=zorder,
+            clip_on=False,
+            annotation_clip=False,
+            bbox=dict(
+                boxstyle="round,pad=0.12",
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.75,
+            ),
+        )
+
+
+# Placement lines on the consolidated NP chart — light accents (not green/red)
+NP_CHANNEL_LINE_COLORS = {
+    "meta": "#93C5FD",      # light blue
+    "google": "#C4B5FD",    # light violet
+    "amazon": "#FCD34D",    # light amber
+}
+NP_CHANNEL_LINE_STYLE = (0, (1.2, 2.8))  # light, spaced dots
+
 
 
 def _apply_light_grid(ax, *, zorder: int = 0) -> None:
@@ -242,7 +315,7 @@ def fetch_historical_hourly_insights_from_api(months, access_token, account_id, 
 # --- Function to Fetch ROAS Data from API ---
 def fetch_roas_data_from_api(start_date, end_date):
     """
-    Fetch daily ROAS-related metrics from GET /v1/historical/time-patterns.
+    Fetch daily ROAS-related metrics from Historical dashboard (per-day).
     """
     from api_data_fetcher import fetch_net_profit_series_from_api
 
@@ -253,7 +326,7 @@ def fetch_roas_data_from_api(start_date, end_date):
         end_date = end_date.strftime('%Y-%m-%d')
 
     try:
-        print(f"Fetching time-patterns from API for date range: {start_date} to {end_date}")
+        print(f"Fetching Historical dashboard daily series for date range: {start_date} to {end_date}")
         df = fetch_net_profit_series_from_api(start_date, end_date)
         if df.empty:
             return None
@@ -276,224 +349,184 @@ def fetch_roas_data_from_api(start_date, end_date):
         return None
 
 # --- Function to Plot Daily Spend, Purchase Value, and ROAS ---
-def plot_daily_amounts(daily_insights_data, save_path=None):
-    """
-    Plots Daily Spend, Purchase Value, and Net ROAS using Seaborn with a secondary y-axis for ROAS.
-    Uses API data for net ROAS, ad spend, and revenue data.
-    Returns None if no valid data is available.
-    """
-    if not daily_insights_data:
-        print("No daily insights data available to plot.")
+def _channel_net_roas(revenue, cogs, spend):
+    """Net ROAS = (revenue − cogs) / spend; None when spend is too low."""
+    if spend < MIN_SPEND_FOR_ROAS:
         return None
+    return round((revenue - cogs) / spend, 2)
 
-    # Get date range from timeframe_config
-    from timeframe_config import get_timeframe_config
-    from datetime import timedelta
-    tf = get_timeframe_config()
-    end_date = tf['end_date']
-    start_date = end_date - timedelta(days=29)  # 30 days total (end_date - 29 days = 30 days)
-    start_date_str = start_date.strftime('%Y-%m-%d')
-    end_date_str = end_date.strftime('%Y-%m-%d')
-    
-    # Fetch net profit data from DB to calculate net ROAS date-wise
-    print("Fetching net profit data from DB to calculate net ROAS...")
-    db_result = fetch_net_profit_from_db(n_days=30)
-    db_df = db_result.get("dailyBreakdown", pd.DataFrame())
 
-    # Create lookup dictionary keyed by date string
-    api_data_lookup = {}
+def _roas_axis_limits(roas_vals: np.ndarray) -> tuple[float, float]:
+    """
+    Sensible Net ROAS y-limits that keep the line + labels inside the panel.
 
-    if not db_df.empty:
-        print(f"Loaded {len(db_df)} days of net profit data from DB")
-        for _, row in db_df.iterrows():
-            date_str = str(row['sale_date'])[:10]
-            revenue  = float(row.get('revenue', 0) or 0)
-            cogs     = float(row.get('cogs', 0) or 0)
-            ad_spend = float(row.get('total_ad_spend', 0) or 0)
-            net_roas = round((revenue - cogs) / ad_spend, 2) if ad_spend > 0 else 0.0
-            api_data_lookup[date_str] = {
-                'revenue':    revenue,
-                'ad_spend':   ad_spend,
-                'cogs':       cogs,
-                'net_roas':   net_roas,
-                'net_profit': float(row.get('net_profit', 0) or 0),
-            }
-        print(f"Processed {len(api_data_lookup)} days of data with calculated net ROAS")
-        sample = next(iter(api_data_lookup.values())) if api_data_lookup else {}
-        if sample:
-            print(f"Sample DB record - revenue: {sample['revenue']}, cogs: {sample['cogs']}, ad_spend: {sample['ad_spend']}, net_roas: {sample['net_roas']}")
-    else:
-        logger.warning("Failed to fetch net profit data from DB. Falling back to gross ROAS fallback.")
+    - Includes negatives when present (returns days).
+    - Caps extreme positive outliers so one spike does not flatten the series.
+    """
+    finite = roas_vals[np.isfinite(roas_vals)]
+    if len(finite) == 0:
+        return 0.0, 2.0
 
-    # Process data for plotting
-    dates = []
-    spend_values = []
-    purchase_values = []
-    roas_values = []
+    rmin = float(np.nanmin(finite))
+    rmax = float(np.nanmax(finite))
 
-    print("Processing API ROAS data for plotting...")
-    
-    # Create a complete date range for the last 30 days
-    from datetime import datetime, timedelta
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=29)  # 30 days total
-    
-    # Generate all dates in the range
-    all_dates = []
-    current_date = start_date
-    while current_date <= end_date:
-        all_dates.append(current_date.strftime('%Y-%m-%d'))
-        current_date += timedelta(days=1)
-    
-    print(f"Generated {len(all_dates)} dates for the range: {all_dates[0]} to {all_dates[-1]}")
-    
-    # Process each date in the range
-    for date_str in all_dates:
-        try:
-            date = pd.to_datetime(date_str)
-            dates.append(date)
-        except ValueError:
-            print(f"Warning: Skipping invalid date format: {date_str}")
-            continue
+    # Soft-cap extremes: keep most of the series readable
+    if rmax > 8:
+        p95 = float(np.nanpercentile(finite, 95))
+        rmax = max(4.0, min(rmax, p95 * 1.35 if p95 > 0 else 4.0), 8.0)
+    if rmin < -2:
+        p5 = float(np.nanpercentile(finite, 5))
+        rmin = max(rmin, min(-0.5, p5 * 1.35))
 
-        # Get data from API lookup (will be empty dict if no data for this date)
-        api_record = api_data_lookup.get(date_str, {})
-        
-        # Get ad spend from API data (0 if no data)
-        spend = api_record.get('ad_spend', 0)
-        spend_values.append(spend)
+    ymin = min(0.0, rmin) - (0.15 if rmin < 0 else 0.0)
+    # Headroom so "x.xx x" annotations stay inside the axes
+    ymax = max(rmax * 1.28, 0.5) if rmax > 0 else 0.5
+    if ymin >= ymax:
+        ymax = ymin + 1.0
+    return ymin, ymax
 
-        # Get revenue from API data (0 if no data)
-        purchase_value = api_record.get('revenue', 0)
-        purchase_values.append(purchase_value)
 
-        # Get net ROAS from API data (calculated from revenue, cogs, and ad_spend)
-        # IMPORTANT: Using net_roas (accounts for COGS and other costs), NOT gross_roas
-        net_roas = api_record.get('net_roas', 0)
-        # If net_roas is 0 or missing, try to calculate it from available data
-        if net_roas == 0 and api_record.get('revenue', 0) > 0 and api_record.get('ad_spend', 0) > 0:
-            revenue = api_record.get('revenue', 0)
-            cogs = api_record.get('cogs', 0)
-            ad_spend = api_record.get('ad_spend', 0)
-            if ad_spend > 0:
-                net_roas = (revenue - cogs) / ad_spend
-        roas_values.append(round(net_roas, 2) if net_roas else 0)
-
-    if not dates or (not any(spend_values) and not any(purchase_values) and not any(roas_values)):
-        print("No valid data points for daily insights after processing.")
-        return None
-
-    print("Data processing complete for daily insights.")
-
-    # Create DataFrame for Seaborn
-    df = pd.DataFrame({
-        'Date': dates,
-        'Spend': spend_values,
-        'Purchase Value': purchase_values,
-        'ROAS': roas_values
-    })
-    df['Date'] = pd.to_datetime(df['Date'])
-
-    n_days = len(df)
-    fig_w = max(12, min(16, 0.35 * n_days + 6))
-    fig, ax1 = plt.subplots(figsize=(fig_w, 7), facecolor="white")
+def _plot_one_channel_spend_revenue_roas(
+    ax1,
+    dates,
+    spend_values,
+    revenue_values,
+    roas_values,
+    *,
+    channel_label: str,
+    n_days: int,
+    revenue_label: str = "Net Sales",
+    show_legend: bool = True,
+):
+    """Single panel: Ad Spend + Net Sales bars + Net ROAS line (right axis)."""
     ax2 = ax1.twinx()
-
-    x = np.arange(n_days)
+    x = np.arange(len(dates))
     bar_width = 0.36
+    df_spend = np.asarray(spend_values, dtype=float)
+    df_rev = np.asarray(revenue_values, dtype=float)
+    roas_vals = np.array(
+        [np.nan if v is None else float(v) for v in roas_values],
+        dtype=float,
+    )
+    # Clip plotted ROAS to axis domain so markers never draw outside the panel
+    roas_ymin, roas_ymax = _roas_axis_limits(roas_vals)
+    roas_plot = roas_vals.copy()
+    # Hide only NaN; keep negatives. Cap extreme positives at display max for the line.
+    over = np.isfinite(roas_plot) & (roas_plot > roas_ymax)
+    under = np.isfinite(roas_plot) & (roas_plot < roas_ymin)
+    roas_plot = np.clip(roas_plot, roas_ymin, roas_ymax)
+
     bars_spend = ax1.bar(
         x - bar_width / 2,
-        df['Spend'],
+        df_spend,
         width=bar_width / 2,
-        label='Ad Spend',
+        label="Ad Spend",
         color=PLOT_COLORS["spend"],
         edgecolor="white",
         linewidth=0.8,
         zorder=2,
+        clip_on=True,
     )
     bars_rev = ax1.bar(
         x + bar_width / 2,
-        df['Purchase Value'],
+        df_rev,
         width=bar_width / 2,
-        label='Revenue',
+        label=revenue_label,
         color=PLOT_COLORS["revenue"],
         edgecolor="white",
         linewidth=0.8,
         zorder=2,
+        clip_on=True,
     )
-
-    roas_vals = df['ROAS'].values.astype(float)
     ax2.plot(
         x,
-        roas_vals,
+        roas_plot,
         color=PLOT_COLORS["roas"],
         marker="o",
-        markersize=4,
-        linewidth=2,
+        markersize=3.5,
+        linewidth=1.8,
         markerfacecolor=PLOT_COLORS["roas"],
         markeredgecolor="white",
-        markeredgewidth=0.8,
-        label='Net ROAS',
+        markeredgewidth=0.6,
+        label="Net ROAS",
         zorder=4,
+        clip_on=True,
     )
 
-    ymax_money = max(float(df['Spend'].max()), float(df['Purchase Value'].max()), 1.0)
-    label_pad = ymax_money * 0.02
+    money_max = max(
+        float(np.nanmax(df_spend) if len(df_spend) else 0),
+        float(np.nanmax(df_rev) if len(df_rev) else 0),
+        1.0,
+    )
+    money_min = min(
+        float(np.nanmin(df_spend) if len(df_spend) else 0),
+        float(np.nanmin(df_rev) if len(df_rev) else 0),
+        0.0,
+    )
+    label_pad = max(abs(money_max), abs(money_min), 1.0) * 0.035
+    # Sparse, readable labels on multi-channel stacked panels
+    step = 3 if n_days > 20 else 2
     for i, bar in enumerate(bars_spend):
-        val = float(df['Spend'].iloc[i])
-        if val > 0:
+        val = float(df_spend[i])
+        if val != 0 and i % step == 0:
             ax1.text(
                 bar.get_x() + bar.get_width() / 2,
-                val + label_pad,
+                val + (label_pad if val > 0 else -label_pad),
                 _compact_rs(val),
                 ha="center",
-                va="bottom",
+                va="bottom" if val > 0 else "top",
                 fontsize=6.5,
-                fontweight="600",
+                fontweight="700",
                 color=PLOT_COLORS["spend"],
+                clip_on=False,
             )
     for i, bar in enumerate(bars_rev):
-        val = float(df['Purchase Value'].iloc[i])
-        if val > 0:
+        val = float(df_rev[i])
+        # Offset revenue labels onto the opposite cadence so they don't collide with spend
+        if val != 0 and (i + step // 2) % step == 0:
             ax1.text(
                 bar.get_x() + bar.get_width() / 2,
-                val + label_pad,
+                val + (label_pad if val > 0 else -label_pad),
                 _compact_rs(val),
                 ha="center",
-                va="bottom",
+                va="bottom" if val > 0 else "top",
                 fontsize=6.5,
-                fontweight="600",
+                fontweight="700",
                 color=PLOT_COLORS["revenue"],
+                clip_on=False,
             )
-
     for i, roas in enumerate(roas_vals):
-        if roas > 0:
-            ax2.annotate(
-                f"{roas:.2f}x",
-                (x[i], roas),
-                textcoords="offset points",
-                xytext=(0, 6),
-                ha="center",
-                fontsize=6.5,
-                fontweight="600",
-                color=PLOT_COLORS["roas"],
-            )
+        if np.isnan(roas):
+            continue
+        if i % step != 0:
+            continue
+        if over[i] or under[i]:
+            continue
+        y = float(roas_plot[i])
+        above = (i // step) % 2 == 0
+        ax2.annotate(
+            f"{roas:.2f}x",
+            (x[i], y),
+            textcoords="offset points",
+            xytext=(0, 8 if above else -10),
+            ha="center",
+            va="bottom" if above else "top",
+            fontsize=6.5,
+            fontweight="700",
+            color=PLOT_COLORS["roas"],
+            clip_on=False,
+            annotation_clip=False,
+        )
 
     ax1.set_xticks(x)
     ax1.set_xticklabels(
-        [d.strftime('%d %b') for d in df['Date']],
+        [d.strftime("%d %b") for d in dates],
         rotation=90,
         ha="center",
-        fontsize=7 if n_days > 20 else 8,
+        fontsize=6 if n_days > 20 else 7,
         color=PLOT_COLORS["text"],
     )
-    ax1.set_xlim(-0.6, n_days - 0.4)
-
-    ax1.set_ylabel('Amount (Rs)', fontsize=10, color=PLOT_COLORS["text"], labelpad=8)
-    ax2.set_ylabel('Net ROAS', fontsize=10, color=PLOT_COLORS["roas"], labelpad=8)
-    ax2.tick_params(axis='y', labelcolor=PLOT_COLORS["roas"])
-    ax1.tick_params(axis='y', colors=PLOT_COLORS["text"])
-
+    ax1.set_xlim(-0.6, len(dates) - 0.4)
     ax1.set_facecolor("#FAFBFC")
     _apply_light_grid(ax1)
     for spine in ("top", "right"):
@@ -503,33 +536,321 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     ax1.spines["bottom"].set_color("#BBBBBB")
     ax2.spines["right"].set_color("#BBBBBB")
 
-    roas_max = float(roas_vals.max()) if len(roas_vals) else 1.0
-    ax2.set_ylim(0, max(roas_max * 1.35, 0.5))
-    ax1.set_ylim(0, ymax_money * 1.18)
+    ax2.set_ylim(roas_ymin, roas_ymax * 1.12 if roas_ymax > 0 else roas_ymax)
+    ax2.axhline(0, color="#CCCCCC", linewidth=0.7, zorder=1)
+    # Money axis: headroom for labels on short stacked panels
+    y_lo = money_min * 1.18 if money_min < 0 else 0.0
+    y_hi = money_max * 1.28 if money_max > 0 else 1.0
+    if y_lo >= y_hi:
+        y_hi = y_lo + 1.0
+    ax1.set_ylim(y_lo, y_hi)
+    ax1.set_title(channel_label, fontsize=10, fontweight="bold", color="#1a1a2e", pad=6)
+    ax1.set_ylabel("Amount (Rs)", fontsize=8, color=PLOT_COLORS["text"], labelpad=4)
+    ax2.set_ylabel("Net ROAS", fontsize=8, color=PLOT_COLORS["roas"], labelpad=4)
+    ax1.tick_params(axis="y", colors=PLOT_COLORS["text"], labelsize=6.5)
+    ax2.tick_params(axis="y", labelcolor=PLOT_COLORS["roas"], labelsize=6.5)
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
+    if show_legend:
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+            loc="upper left",
+            fontsize=6.5,
+            frameon=True,
+            edgecolor="#DDDDDD",
+            facecolor="white",
+            borderpad=0.3,
+            labelspacing=0.25,
+            handlelength=1.2,
+        )
+
+
+def plot_daily_amounts(daily_insights_data, save_path=None):
+    """
+    Channel-split Daily Ad Spend, Net Sales, and Net ROAS (Meta / Google / Amazon).
+
+    Same order-date cohort as the Net Profit charts: for orders placed on day D,
+    net sales = gross − returns − cancels of those orders; ad spend is that day's
+    platform spend; Net ROAS = (net sales − cogs) / spend.
+    """
+    from timeframe_config import get_timeframe_config
+    from datetime import timedelta
+    from dashboard_stats import fetch_order_date_cohort_rows
+
+    tf = get_timeframe_config()
+    end_date = tf["end_date"]
+    start_date = end_date - timedelta(days=29)
+    start_date_str = start_date.strftime("%Y-%m-%d")
+    end_date_str = end_date.strftime("%Y-%m-%d")
+
+    print(
+        f"Building order-date cohort spend/net sales/Net ROAS for "
+        f"{start_date_str} → {end_date_str}..."
+    )
+    try:
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+        channel_df = fetch_order_date_cohort_rows(
+            brand_id, start_date_str, end_date_str
+        )
+    except Exception as e:
+        logger.warning(
+            "Order-date cohort fetch failed (%s); using blended fallback", e
+        )
+        channel_df = pd.DataFrame()
+
+    platforms = ["meta", "google", "amazon"]
+    if channel_df is None or channel_df.empty:
+        return _plot_daily_amounts_blended(daily_insights_data, save_path=save_path)
+
+    channel_df = channel_df.copy()
+    channel_df["report_date"] = pd.to_datetime(channel_df["report_date"])
+    all_dates = pd.date_range(start_date_str, end_date_str, freq="D")
+    n_days = len(all_dates)
+    if n_days == 0:
+        return None
+
+    fig_w = max(12, min(16, 0.35 * n_days + 6))
+    # Short stacked panels — readable numbers without a tall email image
+    fig, axes = plt.subplots(
+        3, 1,
+        figsize=(fig_w, 7.4),
+        facecolor="white",
+        sharex=False,
+    )
+
+    any_plotted = False
+    for idx, (ax, platform) in enumerate(zip(axes, platforms)):
+        plat = channel_df[channel_df["platform"] == platform]
+        by_day = (
+            plat.groupby("report_date", as_index=True)
+            .agg({
+                "ad_spend": "sum",
+                "net_sales": "sum",
+                "net_cogs": "sum",
+            })
+            .reindex(all_dates)
+            .fillna(0.0)
+        )
+        spend_values = by_day["ad_spend"].tolist()
+        revenue_values = by_day["net_sales"].tolist()
+        roas_values = [
+            _channel_net_roas(
+                float(by_day["net_sales"].iloc[i]),
+                float(by_day["net_cogs"].iloc[i]),
+                float(by_day["ad_spend"].iloc[i]),
+            )
+            for i in range(len(by_day))
+        ]
+        if any(spend_values) or any(revenue_values) or any(v is not None for v in roas_values):
+            any_plotted = True
+        _plot_one_channel_spend_revenue_roas(
+            ax,
+            list(all_dates),
+            spend_values,
+            revenue_values,
+            roas_values,
+            channel_label=PLATFORM_LABELS.get(platform, platform.title()),
+            n_days=n_days,
+            revenue_label="Net Sales",
+            show_legend=False,
+        )
+
+    if not any_plotted:
+        plt.close(fig)
+        return _plot_daily_amounts_blended(daily_insights_data, save_path=save_path)
+
+    # Single shared legend (avoid repeating on Meta / Google / Amazon)
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    fig.legend(
+        handles=[
+            Patch(facecolor=PLOT_COLORS["spend"], edgecolor="white", label="Ad Spend"),
+            Patch(facecolor=PLOT_COLORS["revenue"], edgecolor="white", label="Net Sales"),
+            Line2D(
+                [0],
+                [0],
+                color=PLOT_COLORS["roas"],
+                marker="o",
+                markersize=4,
+                linewidth=1.6,
+                label="Net ROAS",
+            ),
+        ],
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.948),
+        ncol=3,
+        fontsize=7.5,
+        frameon=True,
+        edgecolor="#DDDDDD",
+        facecolor="white",
+        borderpad=0.35,
+        columnspacing=1.4,
+        handlelength=1.4,
+    )
+
     fig.suptitle(
-        f'Daily Ad Spend, Revenue, and Net ROAS for Last {n_days} Days',
+        f"Daily Ad Spend, Net Sales, and Net ROAS by Channel — Last {n_days} Days",
+        fontsize=12,
+        fontweight="bold",
+        color="#1a1a2e",
+        y=0.995,
+    )
+    fig.text(
+        0.5,
+        0.962,
+        f"Order-date cohort · Net ROAS = (net sales − cogs) / spend · "
+        f"hidden when spend < Rs{int(MIN_SPEND_FOR_ROAS)} · "
+        "returns/cancels stay with the order day",
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#666666",
+    )
+    plt.tight_layout()
+    # Room for title + subtitle + shared legend, then a clear gap before Meta
+    plt.subplots_adjust(top=0.84, hspace=0.48, bottom=0.07)
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        try:
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            print(f"Channel-wise daily insights plot saved as: {save_path}")
+            plt.close(fig)
+            return save_path
+        except Exception as e:
+            print(f"Error saving channel-wise daily insights plot: {e}")
+            plt.close(fig)
+            return None
+    plt.show()
+    plt.close(fig)
+    return None
+
+
+def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
+    """
+    Legacy blended Daily Spend / Revenue / Net ROAS plot.
+    Used when channel-split data is unavailable. Prefer order-date cohort
+    P&L series; then DB net-profit; daily_insights_data is unused for values.
+    """
+    from timeframe_config import get_timeframe_config
+    from datetime import timedelta
+
+    tf = get_timeframe_config()
+    end_date = tf["end_date"]
+    start_date = end_date - timedelta(days=29)
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+
+    print("Fetching order-date cohort for blended spend/revenue/Net ROAS...")
+    db_df = pd.DataFrame()
+    try:
+        from dashboard_stats import fetch_order_date_cohort_pnl_series
+
+        db_df = fetch_order_date_cohort_pnl_series(brand_id, start_str, end_str)
+    except Exception as e:
+        logger.warning("Order-date cohort blended fetch failed (%s)", e)
+
+    if db_df is None or db_df.empty:
+        print("Falling back to DB net profit series for blended plot...")
+        db_result = fetch_net_profit_from_db(n_days=30)
+        db_df = db_result.get("dailyBreakdown", pd.DataFrame())
+
+    if (db_df is None or db_df.empty) and not daily_insights_data:
+        print("No daily insights / DB data available to plot.")
+        return None
+
+    api_data_lookup = {}
+
+    if db_df is not None and not db_df.empty:
+        print(f"Loaded {len(db_df)} days of cohort/DB data for blended plot")
+        for _, row in db_df.iterrows():
+            date_str = str(row["sale_date"])[:10]
+            revenue = float(row.get("revenue", 0) or 0)
+            cogs = float(row.get("cogs", 0) or 0)
+            ad_spend = float(row.get("total_ad_spend", 0) or 0)
+            net_roas = _channel_net_roas(revenue, cogs, ad_spend) or 0.0
+            api_data_lookup[date_str] = {
+                "revenue": revenue,
+                "ad_spend": ad_spend,
+                "cogs": cogs,
+                "net_roas": net_roas,
+                "net_profit": float(row.get("net_profit", 0) or 0),
+            }
+    else:
+        logger.warning("Failed to fetch cohort/DB data. Falling back to empty lookup.")
+
+    dates = []
+    spend_values = []
+    purchase_values = []
+    roas_values = []
+
+    all_dates = pd.date_range(start_str, end_str, freq="D").strftime("%Y-%m-%d").tolist()
+
+    for date_str in all_dates:
+        try:
+            date = pd.to_datetime(date_str)
+            dates.append(date)
+        except ValueError:
+            continue
+
+        api_record = api_data_lookup.get(date_str, {})
+        spend = api_record.get("ad_spend", 0)
+        spend_values.append(spend)
+        purchase_value = api_record.get("revenue", 0)
+        purchase_values.append(purchase_value)
+        net_roas = api_record.get("net_roas", 0)
+        if (
+            net_roas == 0
+            and api_record.get("revenue", 0) > 0
+            and api_record.get("ad_spend", 0) >= MIN_SPEND_FOR_ROAS
+        ):
+            revenue = api_record.get("revenue", 0)
+            cogs = api_record.get("cogs", 0)
+            ad_spend = api_record.get("ad_spend", 0)
+            net_roas = (revenue - cogs) / ad_spend
+        roas_values.append(round(net_roas, 2) if net_roas else 0)
+
+    if not dates or (
+        not any(spend_values) and not any(purchase_values) and not any(roas_values)
+    ):
+        print("No valid data points for daily insights after processing.")
+        return None
+
+    df = pd.DataFrame(
+        {
+            "Date": dates,
+            "Spend": spend_values,
+            "Purchase Value": purchase_values,
+            "ROAS": roas_values,
+        }
+    )
+    df["Date"] = pd.to_datetime(df["Date"])
+
+    n_days = len(df)
+    fig_w = max(12, min(16, 0.35 * n_days + 6))
+    fig, ax1 = plt.subplots(figsize=(fig_w, 7), facecolor="white")
+    _plot_one_channel_spend_revenue_roas(
+        ax1,
+        list(df["Date"]),
+        list(df["Spend"]),
+        list(df["Purchase Value"]),
+        [v if v else None for v in df["ROAS"]],
+        channel_label=f"Blended order-date cohort — Last {n_days} Days",
+        n_days=n_days,
+    )
+    fig.suptitle(
+        f'Daily Ad Spend, Revenue, and Net ROAS for Last {n_days} Days (blended fallback)',
         fontsize=13,
         fontweight='bold',
         color="#1a1a2e",
         y=0.98,
     )
-    fig.legend(
-        lines1 + lines2,
-        labels1 + labels2,
-        loc='upper center',
-        bbox_to_anchor=(0.5, 0.915),
-        ncol=3,
-        frameon=True,
-        fontsize=9,
-        edgecolor="#DDDDDD",
-        facecolor="white",
-    )
-
     plt.tight_layout()
-    plt.subplots_adjust(bottom=0.24 if n_days > 20 else 0.20, top=0.82)
+    plt.subplots_adjust(bottom=0.24 if n_days > 20 else 0.20, top=0.88)
 
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -540,16 +861,17 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
             return save_path
         except Exception as e:
             print(f"Error saving daily insights plot as PNG: {e}")
-            html_path = save_path.replace('.png', '.html')
-            plt.savefig(html_path, format='html', bbox_inches='tight')
-            print(f"Fallback: Daily insights plot saved as HTML: {html_path}")
             plt.close(fig)
-            return html_path
+            return None
     else:
-        print("Showing daily insights plot...")
         plt.show()
         plt.close(fig)
         return None
+
+
+def plot_daily_amounts_legacy_entry(daily_insights_data, save_path=None):
+    """Alias kept for callers that still expect the old name path."""
+    return plot_daily_amounts(daily_insights_data, save_path=save_path)
 
 def plot_daily_amounts_fallback(daily_insights_data, save_path=None):
     """
@@ -1123,13 +1445,13 @@ def plot_daily_shopify_profit(save_path=None):
         start_str = start_date.strftime('%Y-%m-%d')
         end_str = end_date.strftime('%Y-%m-%d')
         
-        # Net profit series — API time-patterns (dashboard-aligned), then ClickHouse, then Postgres
+        # Net profit series — order-date (time-patterns), then ClickHouse, then Postgres
         db_df = pd.DataFrame()
         totals = {}
         use_api_only = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
         try:
-            from api_data_fetcher import fetch_net_profit_series_from_api
-            db_df = fetch_net_profit_series_from_api(start_str, end_str)
+            from api_data_fetcher import fetch_net_profit_series_order_date_from_api
+            db_df = fetch_net_profit_series_order_date_from_api(start_str, end_str)
             if not db_df.empty:
                 totals = {
                     "revenue": float(db_df["revenue"].sum()),
@@ -1137,7 +1459,7 @@ def plot_daily_shopify_profit(save_path=None):
                     "adSpend": float(db_df["total_ad_spend"].sum()),
                     "netProfit": float(db_df["net_profit"].sum()),
                 }
-                logger.info("Net profit series from API time-patterns (%d days)", len(db_df))
+                logger.info("Net profit series from API time-patterns order-date (%d days)", len(db_df))
         except Exception as e:
             if use_api_only:
                 logger.error("API net profit series failed in API-only mode: %s", e)
@@ -1278,7 +1600,7 @@ def plot_daily_shopify_profit(save_path=None):
         ax.set_xlabel('Date', fontsize=10, color=PLOT_COLORS["text"])
         ax.set_ylabel('Net Profit (Rs)', fontsize=10, color=PLOT_COLORS["text"])
         ax.set_title(
-            f'Daily Net Profit ({start_str} to {end_str})',
+            f'Daily Net Profit — event cohort / order-date ({start_str} to {end_str})',
             fontsize=13,
             fontweight='bold',
             color="#1a1a2e",
@@ -1342,6 +1664,379 @@ def plot_daily_shopify_profit(save_path=None):
     except Exception as e:
         logger.error(f"Error plotting daily net profit: {str(e)}", exc_info=True)
         return None
+
+
+def plot_daily_placement_profit(save_path=None):
+    """
+    Daily Net Profit by placement channel (Meta / Google / Amazon).
+
+    Uses dashboard-aligned order-date cohort rows (same as dual NP chart).
+    """
+    try:
+        from timeframe_config import get_timeframe_config
+        from dashboard_stats import fetch_order_date_cohort_rows
+
+        logger.info("Plotting daily placement-channel net profit (order-date cohort)...")
+        tf = get_timeframe_config()
+        end_date = tf["end_date"]
+        start_date = end_date - pd.Timedelta(days=29)
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+
+        channel_df = fetch_order_date_cohort_rows(brand_id, start_str, end_str)
+        if channel_df is None or channel_df.empty:
+            logger.error("No order-date cohort data for placement net profit plot")
+            return None
+
+        channel_df = channel_df.copy()
+        channel_df["report_date"] = pd.to_datetime(channel_df["report_date"])
+        all_dates = pd.date_range(start_str, end_str, freq="D")
+        platforms = ["meta", "google", "amazon"]
+
+        fig_w = max(12, min(16, 0.35 * len(all_dates) + 6))
+        fig, ax = plt.subplots(figsize=(fig_w, 6), facecolor="white")
+
+        plotted = False
+        for platform in platforms:
+            plat = channel_df[channel_df["platform"] == platform]
+            series = (
+                plat.groupby("report_date")["net_profit"]
+                .sum()
+                .reindex(all_dates)
+                .fillna(0.0)
+            )
+            if series.abs().sum() == 0:
+                continue
+            plotted = True
+            color = PLATFORM_COLORS.get(platform, "#666666")
+            label = PLATFORM_LABELS.get(platform, platform.title())
+            ax.plot(
+                all_dates,
+                series.values,
+                color=color,
+                marker="o",
+                markersize=3.5,
+                linewidth=2.0,
+                markerfacecolor=color,
+                markeredgecolor="white",
+                markeredgewidth=0.6,
+                label=label,
+                zorder=3,
+            )
+
+        if not plotted:
+            logger.error("All placement-channel net profit series empty")
+            plt.close(fig)
+            return None
+
+        ax.axhline(0, color="#999999", linewidth=0.9, zorder=1)
+        ax.set_xlabel("Date", fontsize=10, color=PLOT_COLORS["text"])
+        ax.set_ylabel("Net Profit (Rs)", fontsize=10, color=PLOT_COLORS["text"])
+        ax.set_title(
+            f"Daily Net Profit — order-date by placement ({start_str} to {end_str})",
+            fontsize=13,
+            fontweight="bold",
+            color="#1a1a2e",
+            pad=16,
+        )
+        from matplotlib.ticker import FuncFormatter
+
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"Rs{x:,.0f}"))
+        n_days = len(all_dates)
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        plt.setp(
+            ax.xaxis.get_majorticklabels(),
+            rotation=90,
+            ha="center",
+            fontsize=7 if n_days > 20 else 8,
+            color=PLOT_COLORS["text"],
+        )
+        ax.set_facecolor("#FAFBFC")
+        _apply_light_grid(ax)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#BBBBBB")
+        ax.spines["bottom"].set_color("#BBBBBB")
+        ax.legend(
+            loc="upper left",
+            fontsize=9,
+            frameon=True,
+            edgecolor="#DDDDDD",
+            facecolor="white",
+            title="Channel",
+        )
+        fig.text(
+            0.5,
+            0.02,
+            "Order-date cohort Net Profit (net sales − cogs − spend) by paid channel. "
+            "Returns/cancels stay with the order day.",
+            ha="center",
+            fontsize=8,
+            color="#666666",
+        )
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.28 if n_days > 20 else 0.24)
+
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            logger.info("Placement-channel net profit plot saved as: %s", save_path)
+            plt.close(fig)
+            return save_path
+        plt.close(fig)
+        return None
+    except Exception as e:
+        logger.error("Error plotting placement net profit: %s", e, exc_info=True)
+        return None
+
+
+def _np_line_color_segments(ax, dates_series, values, pos_color, neg_color):
+    """Draw a net-profit line with green/red segments at zero crossings."""
+    for i in range(1, len(dates_series)):
+        x0, x1 = dates_series.iloc[i - 1], dates_series.iloc[i]
+        y0, y1 = values[i - 1], values[i]
+        if y0 >= 0 and y1 >= 0:
+            ax.plot([x0, x1], [y0, y1], color=pos_color, linewidth=2.0, solid_capstyle="round", zorder=1)
+        elif y0 < 0 and y1 < 0:
+            ax.plot([x0, x1], [y0, y1], color=neg_color, linewidth=2.0, solid_capstyle="round", zorder=1)
+        elif y1 != y0:
+            x_cross = x0 + (x1 - x0) * ((0 - y0) / (y1 - y0))
+            ax.plot(
+                [x0, x_cross],
+                [y0, 0],
+                color=neg_color if y0 < 0 else pos_color,
+                linewidth=2.0,
+                solid_capstyle="round",
+                zorder=1,
+            )
+            ax.plot(
+                [x_cross, x1],
+                [0, y1],
+                color=neg_color if y1 < 0 else pos_color,
+                linewidth=2.0,
+                solid_capstyle="round",
+                zorder=1,
+            )
+
+
+def plot_daily_net_profit_dual_cohort(save_path=None):
+    """
+    Consolidated order-date Net Profit for the last 30 days:
+
+    - Total NP as a solid green/red line (pos/neg) with clear point labels
+    - Meta / Google / Amazon as dotted lines (colors distinct from green/red)
+    """
+    try:
+        from matplotlib.ticker import FuncFormatter
+        from timeframe_config import get_timeframe_config
+        from dashboard_stats import (
+            fetch_order_date_cohort_pnl_series,
+            fetch_order_date_cohort_rows,
+        )
+
+        logger.info("Plotting consolidated order-date net profit (+ channel dotted)...")
+        tf = get_timeframe_config()
+        end_date = tf["end_date"]
+        start_date = end_date - pd.Timedelta(days=29)
+        start_str = start_date.strftime("%Y-%m-%d")
+        end_str = end_date.strftime("%Y-%m-%d")
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
+        all_dates = pd.date_range(start_str, end_str, freq="D")
+        n_days = len(all_dates)
+
+        event_df = fetch_order_date_cohort_pnl_series(brand_id, start_str, end_str)
+        if event_df is None or event_df.empty:
+            logger.error("No order-date cohort net profit series for dual plot")
+            return None
+        event_df = event_df.copy()
+        event_df["sale_date"] = pd.to_datetime(event_df["sale_date"])
+        event_series = (
+            event_df.set_index("sale_date")["net_profit"]
+            .reindex(all_dates)
+            .fillna(0.0)
+            .astype(float)
+        )
+
+        channel_df = fetch_order_date_cohort_rows(brand_id, start_str, end_str)
+        if channel_df is None or channel_df.empty:
+            logger.error("No order-date placement rows for dual plot")
+            return None
+        channel_df = channel_df.copy()
+        channel_df["report_date"] = pd.to_datetime(channel_df["report_date"])
+
+        fig_w = max(12, min(16, 0.35 * n_days + 6))
+        fig, ax = plt.subplots(
+            figsize=(fig_w, 6.4),
+            facecolor="white",
+        )
+
+        pos_color = PLOT_COLORS["profit_pos"]
+        neg_color = PLOT_COLORS["profit_neg"]
+        dates_series = pd.Series(all_dates)
+        net_profits = event_series.values.tolist()
+
+        # Channel dotted lines first (under total)
+        for platform in ("meta", "google", "amazon"):
+            plat = channel_df[channel_df["platform"] == platform]
+            series = (
+                plat.groupby("report_date")["net_profit"]
+                .sum()
+                .reindex(all_dates)
+                .fillna(0.0)
+            )
+            if series.abs().sum() == 0:
+                continue
+            color = NP_CHANNEL_LINE_COLORS.get(platform, "#CBD5E1")
+            ax.plot(
+                all_dates,
+                series.values,
+                color=color,
+                linestyle=NP_CHANNEL_LINE_STYLE,
+                linewidth=1.15,
+                marker="o",
+                markersize=2.0,
+                markerfacecolor=color,
+                markeredgecolor="none",
+                label=PLATFORM_LABELS.get(platform, platform.title()),
+                zorder=2,
+                alpha=0.55,
+            )
+
+        _np_line_color_segments(ax, dates_series, net_profits, pos_color, neg_color)
+        neg = event_series < 0
+        pos = event_series >= 0
+        ax.scatter(
+            all_dates[pos],
+            event_series[pos],
+            color=pos_color,
+            marker="o",
+            s=32,
+            linewidths=0.6,
+            edgecolors="#15803D",
+            zorder=4,
+            label="Total (profit)",
+        )
+        ax.scatter(
+            all_dates[neg],
+            event_series[neg],
+            color=neg_color,
+            marker="o",
+            s=32,
+            linewidths=0.6,
+            edgecolors="#B91C1C",
+            zorder=4,
+            label="Total (loss)",
+        )
+
+        # Clear non-overlapping total NP labels (alternate above/below)
+        _annotate_series_no_overlap(
+            ax,
+            list(all_dates),
+            net_profits,
+            color="#0F172A",
+            fontsize=6.8,
+            compact=True,
+            step=1,
+            zorder=6,
+        )
+
+        ax.axhline(0, color="#999999", linewidth=0.9, zorder=0)
+        ax.set_xlabel("Date", fontsize=9, color=PLOT_COLORS["text"])
+        ax.set_ylabel("Net Profit (Rs)", fontsize=9, color=PLOT_COLORS["text"])
+        ax.set_title(
+            f"Daily Net Profit — order-date cohort + channels ({start_str} to {end_str})",
+            fontsize=12,
+            fontweight="bold",
+            color="#1a1a2e",
+            pad=8,
+        )
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"Rs{x:,.0f}"))
+        ax.set_facecolor("#FAFBFC")
+        _apply_light_grid(ax)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#BBBBBB")
+        ax.spines["bottom"].set_color("#BBBBBB")
+
+        # Headroom so labels don't clip
+        y_min = float(min(event_series.min(), channel_df["net_profit"].min()))
+        y_max = float(max(event_series.max(), channel_df["net_profit"].max()))
+        pad = max(abs(y_max), abs(y_min), 1.0) * 0.28
+        ax.set_ylim(y_min - pad, y_max + pad)
+
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        plt.setp(
+            ax.xaxis.get_majorticklabels(),
+            rotation=90,
+            ha="center",
+            fontsize=7 if n_days > 20 else 8,
+            color=PLOT_COLORS["text"],
+        )
+
+        # Legend: Total + dotted channels
+        from matplotlib.lines import Line2D
+
+        legend_handles = [
+            Line2D([0], [0], color=pos_color, linewidth=2.2, label="Total NP (+)"),
+            Line2D([0], [0], color=neg_color, linewidth=2.2, label="Total NP (−)"),
+        ]
+        for platform in ("meta", "google", "amazon"):
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=NP_CHANNEL_LINE_COLORS[platform],
+                    linestyle=NP_CHANNEL_LINE_STYLE,
+                    linewidth=1.3,
+                    marker="o",
+                    markersize=3.0,
+                    alpha=0.7,
+                    label=PLATFORM_LABELS[platform],
+                )
+            )
+        ax.legend(
+            handles=legend_handles,
+            loc="upper left",
+            fontsize=7.5,
+            frameon=True,
+            edgecolor="#DDDDDD",
+            facecolor="white",
+            ncol=2,
+            borderpad=0.4,
+            labelspacing=0.3,
+            columnspacing=1.0,
+        )
+
+        fig.text(
+            0.5,
+            0.01,
+            "Solid green/red = total order-date NP · Dotted = Meta / Google / Amazon. "
+            "Returns/cancels stay with the order day.",
+            ha="center",
+            fontsize=7.5,
+            color="#666666",
+        )
+        plt.tight_layout()
+        plt.subplots_adjust(bottom=0.16, top=0.90)
+
+        if save_path:
+            d = os.path.dirname(save_path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            logger.info("Dual-cohort net profit plot saved as: %s", save_path)
+            plt.close(fig)
+            return save_path
+        plt.close(fig)
+        return None
+    except Exception as e:
+        logger.error("Error plotting dual-cohort net profit: %s", e, exc_info=True)
+        return None
+
+
 
 def plot_hourly_sales_last_7_days(save_path=None):
     """
@@ -1820,25 +2515,35 @@ def generate_plots_for_email(
     os.makedirs(report_path, exist_ok=True)
     logger.info(f"Created report directory: {report_path}")
 
-    # 1. Daily ad spend, revenue, and net ROAS
-    if daily_insights_data:
-        plot_file = os.path.join(report_path, f'daily_insights_{today}.png')
-        saved_path = plot_daily_amounts(daily_insights_data, save_path=plot_file)
-        if saved_path and saved_path.endswith('.png'):
-            plot_files.append(saved_path)
-            logger.info(f"Daily insights plot saved to: {saved_path}")
-    else:
-        logger.error(f"Could not plot daily insights due to fetching error: {daily_error}")
-
-    # 2. Daily net profit
-    logger.info("Generating daily Shopify profit plot...")
-    plot_file = os.path.join(report_path, f'daily_shopify_profit_{today}.png')
-    saved_path = plot_daily_shopify_profit(save_path=plot_file)
+    # 1. Daily ad spend, revenue, and net ROAS — channel-split (Meta / Google / Amazon)
+    plot_file = os.path.join(report_path, f'daily_insights_{today}.png')
+    saved_path = plot_daily_amounts(daily_insights_data, save_path=plot_file)
     if saved_path and saved_path.endswith('.png'):
         plot_files.append(saved_path)
-        logger.info(f"Daily Shopify profit plot saved to: {saved_path}")
+        logger.info(f"Daily insights plot saved to: {saved_path}")
     else:
-        logger.error("Failed to generate daily Shopify profit plot")
+        logger.error(
+            "Could not plot daily insights (channel-split or blended). FB error: %s",
+            daily_error,
+        )
+
+    # 2. Daily net profit — event cohort + placement cohort (single dual-panel figure)
+    logger.info("Generating dual-cohort daily net profit plot...")
+    plot_file = os.path.join(report_path, f"daily_net_profit_dual_cohort_{today}.png")
+    saved_path = plot_daily_net_profit_dual_cohort(save_path=plot_file)
+    if saved_path and saved_path.endswith(".png"):
+        plot_files.append(saved_path)
+        logger.info("Dual-cohort net profit plot saved to: %s", saved_path)
+    else:
+        logger.error("Dual-cohort net profit plot failed; falling back to separate plots")
+        plot_file = os.path.join(report_path, f"daily_shopify_profit_{today}.png")
+        saved_path = plot_daily_shopify_profit(save_path=plot_file)
+        if saved_path and saved_path.endswith(".png"):
+            plot_files.append(saved_path)
+        plot_file = os.path.join(report_path, f"daily_placement_profit_{today}.png")
+        saved_path = plot_daily_placement_profit(save_path=plot_file)
+        if saved_path and saved_path.endswith(".png"):
+            plot_files.append(saved_path)
 
     # 3. Channel performance (daily bars + last 7-day net ROAS trend)
     logger.info(

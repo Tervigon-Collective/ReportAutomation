@@ -113,6 +113,17 @@
   }
   .data td:first-child { text-align: left; font-weight: 600; color: #0f172a; padding-left: 12px; }
   .data td.wrap { white-space: normal; line-height: 1.2; }
+  /* Two-tier gross->net bridge table (Channel Performance) */
+  .data.bridge th { font-size: 6.2pt; padding: 6px 4px 5px; letter-spacing: 0.2px; }
+  .data.bridge td { font-size: 7.0pt; padding: 6px 4px; }
+  .data.bridge th.l, .data.bridge td.l { text-align: left; }
+  .data.bridge tr.grp th { text-align: center; border-bottom: 1px solid #eef1f5; }
+  .data.bridge tr.grp th.grp-sales { background: #f3f8fd; color: #2563eb; }
+  .data.bridge tr.grp th.grp-cogs { background: #fdf6f3; color: #b45309; }
+  .data.bridge tr.grp th.grp-profit { background: #f3fbf6; color: #15803d; }
+  .data.bridge tr.sub th { font-size: 5.9pt; color: #9aa4b4; padding-top: 4px; padding-bottom: 6px; }
+  .data.bridge td.strong { font-weight: 700; color: #0f172a; }
+  .data.bridge th[rowspan] { vertical-align: middle; }
   .pos { color: #16a34a; font-weight: 700; }
   .neg { color: #dc2626; font-weight: 700; }
   .warn { color: #d97706; font-weight: 700; }
@@ -227,15 +238,15 @@
 <div class="section-label">Executive Summary <span class="hint">&mdash; headline performance</span></div>
 <table class="kpi-grid">
   <tr>
-    <td class="kpi-card"><div class="kpi-label">Revenue</div><div class="kpi-value">{{ total.sales | fmt_inr }}</div><div class="kpi-sub">Net of GST</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross Revenue</div><div class="kpi-value">{{ total.gross_sales | fmt_inr }}</div><div class="kpi-sub">Placement, excl. GST</div></td>
     <td class="kpi-card"><div class="kpi-label">Ad Spend</div><div class="kpi-value">{{ total.ad_spend | fmt_inr }}</div><div class="kpi-sub">Meta + Google + Amazon</div></td>
-    <td class="kpi-card"><div class="kpi-label">Gross Profit</div><div class="kpi-value">{{ total.gross_profit | fmt_inr }}</div><div class="kpi-sub">Revenue &minus; COGS</div></td>
-    <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">After COGS &amp; ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross COGS</div><div class="kpi-value">{{ total.gross_cogs | fmt_inr }}</div><div class="kpi-sub">All placed items</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross Profit</div><div class="kpi-value {{ 'pos' if total.gross_profit >= 0 else 'neg' }}">{{ total.gross_profit | fmt_inr }}</div><div class="kpi-sub">Gross rev &minus; spend &minus; gross COGS</div></td>
   </tr>
   <tr>
-    <td class="kpi-card"><div class="kpi-label">Gross ROAS</div><div class="kpi-value">{{ (total.dashboard_gross_roas or total.gross_roas) | fmt_roas }}</div><div class="kpi-sub">Gross sales / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Net COGS</div><div class="kpi-value">{{ total.cogs | fmt_inr }}</div><div class="kpi-sub">After returns / cancels</div></td>
+    <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">Net sales &minus; spend &minus; net COGS</div></td>
     <td class="kpi-card"><div class="kpi-label">Net ROAS</div><div class="kpi-value">{{ total.net_roas | fmt_roas }}</div><div class="kpi-sub">Contribution / ad spend</div></td>
-    <td class="kpi-card"><div class="kpi-label">BE ROAS</div><div class="kpi-value">{{ total.be_roas | fmt_roas }}</div><div class="kpi-sub">Net sales / contribution</div></td>
     <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Placement period</div></td>
   </tr>
 </table>
@@ -244,73 +255,66 @@
 <table class="card">
   <tr class="card-head"><td>
     <span class="card-title">Channel Performance</span>
-    <span class="card-sub">&nbsp; Revenue, profitability &amp; efficiency by channel</span>
+    <span class="card-sub">&nbsp; Order-date cohort &middot; gross &rarr; net bridge by channel</span>
   </td></tr>
   <tr class="card-body"><td>
-    <table class="data">
+    <table class="data bridge">
       <colgroup>
-        <col style="width:14%;"><col style="width:9.5%;"><col style="width:9.5%;"><col style="width:9%;">
-        <col style="width:10.5%;"><col style="width:10.5%;"><col style="width:8.5%;"><col style="width:8.5%;">
-        <col style="width:8%;"><col style="width:9.5%;">
+        <col style="width:10%;">
+        <col style="width:7.5%;"><col style="width:6%;"><col style="width:6%;"><col style="width:6%;"><col style="width:8%;">
+        <col style="width:7.5%;">
+        <col style="width:7.5%;"><col style="width:6.5%;"><col style="width:7.5%;">
+        <col style="width:7.5%;"><col style="width:7.5%;">
       </colgroup>
-      <thead><tr>
-        <th>Channel</th><th>Revenue</th><th>Ad Spend</th><th>COGS</th><th>Gross Profit</th>
-        <th>Net Profit</th><th>Blended</th><th>Net ROAS</th><th>Orders</th><th>CPO</th>
-      </tr></thead>
+      <thead>
+        <tr class="grp">
+          <th rowspan="2" class="l">Channel</th>
+          <th colspan="5" class="grp-sales">Sales bridge</th>
+          <th rowspan="2">Ad Spend</th>
+          <th colspan="3" class="grp-cogs">COGS bridge</th>
+          <th colspan="2" class="grp-profit">Profit</th>
+        </tr>
+        <tr class="sub">
+          <th>Gross</th><th>&minus;Ret</th><th>&minus;Cnl</th><th>&minus;Disc</th><th>Net Sales</th>
+          <th>Gross</th><th>Adj</th><th>Net COGS</th>
+          <th>Gross</th><th>Net</th>
+        </tr>
+      </thead>
       <tbody>
         {% for ch_name, ch in channels %}
         <tr class="{{ 'best-row' if ch_name == best_channel_name else '' }}">
-          <td>{{ ch_name }}{% if ch_name == best_channel_name %} <span class="tag-best">Top</span>{% endif %}</td>
-          <td>{{ ch.sales | fmt_inr_compact }}</td>
+          <td class="l">{{ ch_name }}{% if ch_name == best_channel_name %} <span class="tag-best">Top</span>{% endif %}</td>
+          <td>{{ ch.gross_sales | fmt_inr_compact }}</td>
+          <td class="{{ 'neg' if ch.returned_amount else 'muted' }}">{% if ch.returned_amount %}&minus;{{ ch.returned_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="{{ 'neg' if ch.cancelled_amount else 'muted' }}">{% if ch.cancelled_amount %}&minus;{{ ch.cancelled_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="{{ 'neg' if ch.discounts else 'muted' }}">{% if ch.discounts %}&minus;{{ ch.discounts | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="strong">{{ ch.sales | fmt_inr_compact }}</td>
           <td>{{ ch.ad_spend | fmt_inr_compact }}</td>
-          <td class="muted">{{ ch.cogs | fmt_inr_compact }}</td>
+          <td>{{ ch.gross_cogs | fmt_inr_compact }}</td>
+          <td class="{{ 'neg' if ch.cogs_adjustment > 0 else ('pos' if ch.cogs_adjustment < 0 else 'muted') }}">{% if ch.cogs_adjustment %}{{ '+' if ch.cogs_adjustment > 0 else '&minus;' | safe }}{{ ch.cogs_adjustment | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="strong">{{ ch.cogs | fmt_inr_compact }}</td>
           <td class="{{ 'pos' if ch.gross_profit >= 0 else 'neg' }}">{{ ch.gross_profit | fmt_inr_compact }}</td>
-          <td class="{{ 'pos' if ch.net_profit >= 0 else 'neg' }}">{{ ch.net_profit | fmt_inr_compact }}</td>
-          <td>{{ ch.gross_roas | fmt_roas }}</td>
-          <td class="{{ ch.net_roas | roas_grad }}">{{ ch.net_roas | fmt_roas }}</td>
-          <td>{{ ch.order_count | fmt_num }}</td>
-          <td>{{ ch.cpp | fmt_inr_compact }}</td>
+          <td class="strong {{ 'pos' if ch.net_profit >= 0 else 'neg' }}">{{ ch.net_profit | fmt_inr_compact }}</td>
         </tr>
         {% endfor %}
-        {% if returns_row and returns_row.show %}
-        <tr class="adjustment-row">
-          <td>Rtrn/cncl <span class="muted">(info)</span></td>
-          <td>{{ returns_row.total_amount | fmt_inr_compact }}</td>
-          <td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
-          <td>{{ returns_row.order_count }}</td><td class="muted">&mdash;</td>
-        </tr>
-        {% endif %}
-        {% if residual_row and residual_row.show %}
-        <tr class="adjustment-row">
-          <td>Others</td>
-          <td>{{ residual_row.sales | fmt_inr_compact }}</td>
-          <td>{% if residual_row.ad_spend %}{{ residual_row.ad_spend | fmt_inr_compact }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
-          <td>{% if residual_row.cogs %}{{ residual_row.cogs | fmt_inr_compact }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
-          <td>{{ residual_row.gross_profit | fmt_inr_compact }}</td>
-          <td>{{ residual_row.net_profit | fmt_inr_compact }}</td>
-          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
-          <td class="muted">&mdash;</td><td class="muted">&mdash;</td>
-        </tr>
-        {% endif %}
         <tr class="total-row">
-          <td>Total</td>
-          <td>{{ total.sales | fmt_inr_compact }}</td>
+          <td class="l">Total</td>
+          <td>{{ total.gross_sales | fmt_inr_compact }}</td>
+          <td class="{{ 'neg' if total.returned_amount else 'muted' }}">{% if total.returned_amount %}&minus;{{ total.returned_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="{{ 'neg' if total.cancelled_amount else 'muted' }}">{% if total.cancelled_amount %}&minus;{{ total.cancelled_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="{{ 'neg' if total.discounts else 'muted' }}">{% if total.discounts %}&minus;{{ total.discounts | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="strong">{{ total.sales | fmt_inr_compact }}</td>
           <td>{{ total.ad_spend | fmt_inr_compact }}</td>
-          <td>{{ total.cogs | fmt_inr_compact }}</td>
-          <td>{{ total.gross_profit | fmt_inr_compact }}</td>
-          <td class="{{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr_compact }}</td>
-          <td>{{ total.gross_roas | fmt_roas }}</td>
-          <td class="{{ total.net_roas | roas_grad }}">{{ total.net_roas | fmt_roas }}</td>
-          <td>{{ total.order_count | fmt_num }}</td>
-          <td>{{ total.cpp | fmt_inr_compact }}</td>
+          <td>{{ total.gross_cogs | fmt_inr_compact }}</td>
+          <td class="{{ 'neg' if total.cogs_adjustment > 0 else ('pos' if total.cogs_adjustment < 0 else 'muted') }}">{% if total.cogs_adjustment %}{{ '+' if total.cogs_adjustment > 0 else '&minus;' | safe }}{{ total.cogs_adjustment | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="strong">{{ total.cogs | fmt_inr_compact }}</td>
+          <td class="{{ 'pos' if total.gross_profit >= 0 else 'neg' }}">{{ total.gross_profit | fmt_inr_compact }}</td>
+          <td class="strong {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr_compact }}</td>
         </tr>
       </tbody>
     </table>
   </td></tr>
+  <tr class="card-foot"><td>Net Sales = Gross &minus; Returned &minus; Cancelled &minus; Discounts. Net COGS = Gross COGS + Adj (returns/cancels: reverse-logistics added, returned/cancelled product cost removed). Gross Profit = Gross Sales &minus; Ad Spend &minus; Gross COGS. Net Profit = Net Sales &minus; Ad Spend &minus; Net COGS. Order-date cohort.</td></tr>
 </table>
 
 <!-- 3. FUNNEL PERFORMANCE -->
@@ -412,7 +416,7 @@
         {% endfor %}
         {% if campaign_total %}
         <tr class="grand-total">
-          <td>Overall Total</td>
+          <td>Attributed campaigns</td>
           <td>{{ campaign_total.spend | fmt_inr_detail }}</td>
           <td>{{ campaign_total.shopify_revenue | fmt_inr_detail }}</td>
           <td class="{{ 'pos' if campaign_total.net_profit >= 0 else 'neg' }}">{{ campaign_total.net_profit | fmt_inr_detail }}</td>
@@ -423,10 +427,30 @@
           <td>&mdash;</td>
         </tr>
         {% endif %}
+        {% if campaign_residual and campaign_residual.show %}
+        <tr class="sec-total">
+          <td>Unattributed paid</td>
+          <td>{{ campaign_residual.spend | fmt_inr_detail }}</td>
+          <td>{{ campaign_residual.shopify_revenue | fmt_inr_detail }}</td>
+          <td class="{{ 'pos' if campaign_residual.net_profit >= 0 else 'neg' }}">{{ campaign_residual.net_profit | fmt_inr_detail }}</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td>{{ campaign_residual.shopify_orders | fmt_num }}</td>
+        </tr>
+        {% endif %}
+        {% if campaign_channel_ref %}
+        <tr class="grand-total">
+          <td>Meta + Google (channel)</td>
+          <td>{{ campaign_channel_ref.spend | fmt_inr_detail }}</td>
+          <td>{{ campaign_channel_ref.shopify_revenue | fmt_inr_detail }}</td>
+          <td class="{{ 'pos' if campaign_channel_ref.net_profit >= 0 else 'neg' }}">{{ campaign_channel_ref.net_profit | fmt_inr_detail }}</td>
+          <td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td>
+          <td>{{ campaign_channel_ref.shopify_orders | fmt_num }}</td>
+        </tr>
+        {% endif %}
       </tbody>
     </table>
 </div>
-<div style="font-size:6.8pt;color:#94a3b8;font-style:italic;text-align:center;padding:6px 10px;">Campaign totals are computed from displayed campaign data. Bounce shading intensifies with rate.</div>
+<div style="font-size:6.8pt;color:#94a3b8;font-style:italic;text-align:center;padding:6px 10px;">Attributed campaigns + Unattributed paid reconcile to the Meta&nbsp;+&nbsp;Google channel rows above (order-date cohort). Revenue = net sales; bounce shading intensifies with rate.</div>
 {% endif %}
 
 </body>

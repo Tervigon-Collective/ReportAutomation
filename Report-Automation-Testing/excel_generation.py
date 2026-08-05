@@ -1037,6 +1037,8 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
     daily_plot_cid = None
     historical_plot_cid = None
     shopify_profit_plot_cid = None
+    dual_net_profit_cid = None
+    placement_profit_cid = None
     hourly_sales_plot_cid = None  # NEW: For hourly sales plot
     sales_by_state_pie_cid = None
     channel_performance_cid = None
@@ -1069,10 +1071,20 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
                 daily_plot_cid = f"daily_plot_{today_str}"
                 content_id = daily_plot_cid
                 is_inline = True
+            elif 'daily_net_profit_dual_cohort' in base_filename:
+                descriptive_name = f"Daily Net Profit (Event + Placement) - {today_str}.png"
+                dual_net_profit_cid = f"dual_net_profit_plot_{today_str}"
+                content_id = dual_net_profit_cid
+                is_inline = True
             elif 'daily_shopify_profit' in base_filename:
-                descriptive_name = f"Daily Shopify Net Profit - {today_str}.png"
+                descriptive_name = f"Daily Net Profit (Event Cohort) - {today_str}.png"
                 shopify_profit_plot_cid = f"shopify_profit_plot_{today_str}"
                 content_id = shopify_profit_plot_cid
+                is_inline = True
+            elif 'daily_placement_profit' in base_filename:
+                descriptive_name = f"Daily Net Profit (Placement Cohort) - {today_str}.png"
+                placement_profit_cid = f"placement_profit_plot_{today_str}"
+                content_id = placement_profit_cid
                 is_inline = True
             elif 'hourly_sales_last_7_days' in base_filename:  # NEW: Hourly sales plot
                 descriptive_name = f"Hourly Sales (Last 7 Days) - {today_str}.png"
@@ -1128,11 +1140,13 @@ def send_email(excel_file_param, pdf_file_param, ad_level_report_param, today, t
             graph_api_attachments.append(attachment_dict)
             logger.info(f"Added attachment: {descriptive_name} (Inline: {is_inline})")
 
-    # Collect chart CIDs for template rendering
+    # Collect chart CIDs for template rendering (order = email display order)
     chart_cids = [
         c for c in [
             daily_plot_cid,
+            dual_net_profit_cid,
             shopify_profit_plot_cid,
+            placement_profit_cid,
             channel_performance_cid,
             sales_by_state_pie_cid,
             hourly_sales_plot_cid,

@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 _USE_API_ONLY = os.getenv("USE_API_ONLY", "false").lower() in ("1", "true", "yes")
 _USE_API_FALLBACK = os.getenv("USE_API_FALLBACK", "true").lower() in ("1", "true", "yes")
+# Prefer order-date cohort (same as daily Net Profit charts) for PM metrics.
+_USE_ORDER_DATE_COHORT = os.getenv("CHANNEL_FROM_ORDER_DATE_COHORT", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 try:
     from amazon_entity_report import get_clickhouse_client
@@ -28,6 +34,9 @@ except ImportError:
     get_clickhouse_client = None
 
 PLATFORM_ORDER = ["meta", "google", "organic", "amazon", "other"]
+# Days with spend below this floor produce undefined ROAS (avoid 100×–1000×
+# spikes when ads ingest collapses while marketplace sales continue).
+MIN_SPEND_FOR_ROAS = 100.0
 PLATFORM_LABELS = {
     "meta": "Meta",
     "google": "Google",
@@ -58,7 +67,7 @@ METRIC_COLORS = {
     "orders": "#4A56E2",
 }
 METRIC_LABELS = {
-    "revenue": "Gross Revenue",
+    "revenue": "Net Sales",
     "cogs": "COGS",
     "ad_spend": "Ad Spend",
     "net_profit": "Net Profit",
@@ -148,7 +157,9 @@ def _amazon_row_from_dashboard(dash: dict, report_date: str) -> Optional[dict]:
         "cogs": round(co, 2),
         "ad_spend": round(spend, 2),
         "net_profit": round(net_profit, 2),
-        "gross_roas": round(rev / spend, 2) if spend > 0 else None,
+        "gross_roas": (
+            round(rev / spend, 2) if spend >= MIN_SPEND_FOR_ROAS else None
+        ),
     }
 
 
@@ -228,7 +239,7 @@ def _fetch_channel_performance_from_attribution(start_str: str, end_str: str) ->
             "cogs": round(co, 2),
             "ad_spend": round(spend, 2),
             "net_profit": round(net_profit, 2),
-            "gross_roas": round(rev / spend, 2) if spend > 0 else None,
+            "gross_roas": round(rev / spend, 2) if spend >= MIN_SPEND_FOR_ROAS else None,
         })
     df = pd.DataFrame(rows) if rows else pd.DataFrame()
     return _append_amazon_rows_from_dashboard(df, start_str, end_str)
@@ -275,7 +286,7 @@ def _fetch_channel_performance_from_dashboard_by_day(start_str: str, end_str: st
                 "cogs": round(co, 2),
                 "ad_spend": round(spend, 2),
                 "net_profit": round(net_profit, 2),
-                "gross_roas": round(rev / spend, 2) if spend > 0 else None,
+                "gross_roas": round(rev / spend, 2) if spend >= MIN_SPEND_FOR_ROAS else None,
             })
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -318,14 +329,91 @@ def _fetch_channel_performance_from_api(start_str: str, end_str: str) -> pd.Data
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
+def _fetch_channel_performance_from_order_date_cohort(
+    start_str: str,
+    end_str: str,
+    brand_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Map order-date cohort rows into the channel_performance schema.
+
+    Revenue = cohort net sales (gross − returns − cancels of orders placed that day).
+    Same definition as the daily Net Profit dual-cohort charts.
+    """
+    from dashboard_stats import fetch_order_date_cohort_rows
+
+    if brand_id is None:
+        brand_id = get_brand_id()
+    rows = fetch_order_date_cohort_rows(int(brand_id), start_str, end_str)
+    if rows is None or rows.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(
+        {
+            "report_date": pd.to_datetime(rows["report_date"]).dt.strftime("%Y-%m-%d"),
+            "platform": rows["platform"].astype(str),
+            "attributed_orders": pd.to_numeric(rows["orders"], errors="coerce")
+            .fillna(0)
+            .astype(int),
+            "gross_revenue_excl_gst": pd.to_numeric(rows["net_sales"], errors="coerce")
+            .fillna(0)
+            .round(2),
+            "cogs": pd.to_numeric(rows["net_cogs"], errors="coerce").fillna(0).round(2),
+            "ad_spend": pd.to_numeric(rows["ad_spend"], errors="coerce").fillna(0).round(2),
+            "net_profit": pd.to_numeric(rows["net_profit"], errors="coerce")
+            .fillna(0)
+            .round(2),
+        }
+    )
+    spend = out["ad_spend"].astype(float)
+    rev = out["gross_revenue_excl_gst"].astype(float)
+    cogs = out["cogs"].astype(float)
+    out["gross_roas"] = np.where(
+        spend >= MIN_SPEND_FOR_ROAS,
+        (rev / spend).round(2),
+        np.nan,
+    )
+    out["net_roas"] = np.where(
+        spend >= MIN_SPEND_FOR_ROAS,
+        ((rev - cogs) / spend).round(2),
+        np.nan,
+    )
+    return out.reset_index(drop=True)
+
+
 def fetch_channel_performance(
     start_date: str | date | datetime,
     end_date: str | date | datetime,
     brand_id: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Fetch daily channel performance rows (API-first, ClickHouse fallback)."""
+    """Fetch daily channel performance rows (order-date cohort first, then API/CH)."""
     start_str = _to_date_str(start_date)
     end_str = _to_date_str(end_date)
+    if brand_id is None:
+        brand_id = get_brand_id()
+
+    if _USE_ORDER_DATE_COHORT:
+        try:
+            df = _fetch_channel_performance_from_order_date_cohort(
+                start_str, end_str, brand_id=brand_id
+            )
+            if not df.empty:
+                logger.info(
+                    "channel performance from order-date cohort (%d rows, %s→%s)",
+                    len(df),
+                    start_str,
+                    end_str,
+                )
+                return df
+            logger.warning(
+                "order-date cohort returned empty for %s→%s; falling back",
+                start_str,
+                end_str,
+            )
+        except Exception as e:
+            logger.warning(
+                "order-date cohort channel fetch failed (%s); falling back", e
+            )
 
     if _USE_API_ONLY or _USE_API_FALLBACK:
         try:
@@ -834,8 +922,9 @@ def _prepare_daily_roas(
     """
     Daily gross ROAS per platform (revenue / ad spend).
 
-    When a day's ad spend is zero, the previous day's spend is used for ROAS so
-    delayed ad reporting (e.g. Amazon) does not suppress the metric.
+    ROAS is undefined (NaN) when that day's spend is below MIN_SPEND_FOR_ROAS.
+    Do NOT borrow prior-day spend — that produced Amazon 900×+ spikes when ads
+    reporting dropped to near-zero while marketplace Net Sales kept posting.
     """
     if raw.empty:
         return raw
@@ -847,18 +936,14 @@ def _prepare_daily_roas(
         plat = daily[daily["platform"] == platform].sort_values("report_date")
         if plat.empty:
             continue
-        prev_spend = 0.0
         roas_vals = []
         for _, row in plat.iterrows():
             spend = float(row.get("ad_spend") or 0)
             rev = float(row.get("gross_revenue_excl_gst") or 0)
-            effective_spend = spend if spend > 0 else prev_spend
-            if effective_spend > 0:
-                roas_vals.append(rev / effective_spend)
+            if spend >= MIN_SPEND_FOR_ROAS:
+                roas_vals.append(rev / spend)
             else:
                 roas_vals.append(np.nan)
-            if spend > 0:
-                prev_spend = spend
         daily.loc[plat.index, "gross_roas"] = roas_vals
 
     if min_plot_date:
@@ -997,6 +1082,11 @@ def _plot_roas_by_day(
     if not valid.empty:
         ymax = float(valid.max())
         ymin = float(valid.min())
+        # Cap axis when residual outliers remain so a single bad day cannot
+        # flatten the rest of the series (labels still show true values).
+        if ymax > 20:
+            p95 = float(np.nanpercentile(valid.values.astype(float), 95))
+            ymax = max(10.0, min(ymax, p95 * 1.5 if p95 > 0 else 10.0), 20.0)
         # Net sales (and therefore ROAS) can go negative on days where refunds/
         # cancellations outweigh new sales for a channel — extend the floor below
         # zero on those days instead of clipping the line flat against the x-axis,
@@ -1290,14 +1380,15 @@ def plot_channel_performance(
         ax1.set_xlim(-0.75, n - 0.25)
 
         subtitle_line1 = (
-            f"Total revenue: {_format_inr(total_rev)}   ·   "
+            f"Order-date cohort · "
+            f"Total net sales: {_format_inr(total_rev)}   ·   "
             f"Total COGS: {_format_inr(total_cogs)}   ·   "
             f"Total ad spend: {_format_inr(total_spend)}"
         )
         subtitle_line2 = (
             f"Net profit: {_format_inr(total_net_profit)}   ·   "
             f"Orders: {total_orders:,}   ·   "
-            f"Blended gross ROAS: {total_gross_roas:.2f}x"
+            f"Blended ROAS: {total_gross_roas:.2f}x"
         )
 
         fig.suptitle(title, fontsize=15, fontweight="bold", color="#1a1a1a", y=0.97)

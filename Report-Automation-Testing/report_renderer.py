@@ -960,6 +960,7 @@ def build_daily_pdf_context(
                   "net_roas", "be_roas", "order_count", "cpp",
                   # order-date cohort gross->net bridge fields
                   "gross_sales", "returned_amount", "cancelled_amount", "discounts",
+                  "revenue_adjustment",
                   "gross_cogs", "active_cogs", "return_cogs", "cancel_cogs",
                   "retcnl_cost", "cogs_adjustment"):
             if c.get(k) is None:
@@ -973,6 +974,12 @@ def build_daily_pdf_context(
             c["gross_cogs"] = c["cogs"]
         if not c.get("active_cogs") and c.get("cogs"):
             c["active_cogs"] = c["cogs"]
+        c["revenue_adjustment"] = round(
+            _f_metric(c.get("returned_amount"))
+            + _f_metric(c.get("cancelled_amount"))
+            + _f_metric(c.get("discounts")),
+            2,
+        )
         c["cogs_adjustment"] = round(_f_metric(c.get("cogs")) - _f_metric(c.get("gross_cogs")), 2)
         c["retcnl_cost"] = round(_f_metric(c.get("cogs")) - _f_metric(c.get("active_cogs")), 2)
         return c
@@ -1002,6 +1009,12 @@ def build_daily_pdf_context(
         ad = _f_metric(ch.get("ad_spend"))
         ch["gross_sales"] = round(gs, 2)
         ch["gross_cogs"] = round(gco, 2)
+        ch["revenue_adjustment"] = round(
+            _f_metric(ch.get("returned_amount"))
+            + _f_metric(ch.get("cancelled_amount"))
+            + _f_metric(ch.get("discounts")),
+            2,
+        )
         ch["cogs_adjustment"] = round(_f_metric(ch.get("cogs")) - gco, 2)
         ch["gross_profit"] = round(gs - ad - gco, 2)
         if ch.get("net_profit") is None:
@@ -1101,6 +1114,12 @@ def build_daily_pdf_context(
     gross_sales = _f_metric(total.get("gross_sales"))
     gross_cogs = _f_metric(total.get("gross_cogs"))
     total["cogs_adjustment"] = round(cogs - gross_cogs, 2)
+    total["revenue_adjustment"] = round(
+        _f_metric(total.get("returned_amount"))
+        + _f_metric(total.get("cancelled_amount"))
+        + _f_metric(total.get("discounts")),
+        2,
+    )
     total["gross_profit"] = round(gross_sales - spend - gross_cogs, 2)
     total["net_profit"] = round(sales - spend - cogs, 2)
     if spend > 0:

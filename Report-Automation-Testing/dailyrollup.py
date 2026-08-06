@@ -997,40 +997,13 @@ def build_meta_ads_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
                 net = (out['shopify_revenue'] - out['shopify_cogs']) / out['spend']
             out['net_roas'] = pd.to_numeric(net, errors='coerce').replace([np.inf, -np.inf], 0).fillna(0)
             
-            # Compute Net Profit - use SKU-level revenue/COGS if available, otherwise use ad-level
-            # Distribute ad spend proportionally based on SKU revenue contribution
-            if 'sku_revenue' in out.columns and 'sku_cogs' in out.columns:
-                # Calculate SKU-level net profit using SKU revenue/COGS and proportional spend
-                sku_rev = pd.to_numeric(out['sku_revenue'], errors='coerce').fillna(0)
-                sku_cogs = pd.to_numeric(out['sku_cogs'], errors='coerce').fillna(0)
-                ad_rev = pd.to_numeric(out['shopify_revenue'], errors='coerce').fillna(0)
-                ad_spend = pd.to_numeric(out['spend'], errors='coerce').fillna(0)
-                
-                # Calculate proportional spend for each SKU based on revenue contribution
-                # If ad revenue is 0, distribute spend equally among SKUs
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    revenue_ratio = sku_rev / ad_rev.replace(0, pd.NA)
-                    # For rows where ad_rev is 0 or ratio is invalid, distribute spend equally
-                    # Count SKUs per ad group (using merge_keys which is in scope)
-                    if len(merge_keys) > 0 and all(col in out.columns for col in merge_keys):
-                        # Group by ad-level keys to count SKUs per ad
-                        sku_counts = out.groupby(merge_keys, dropna=False).size()
-                        sku_counts_dict = sku_counts.to_dict()
-                        # Create a key for each row based on merge_keys
-                        row_keys = out[merge_keys].apply(lambda x: tuple(x), axis=1)
-                        equal_ratio = row_keys.map(lambda k: 1.0 / sku_counts_dict.get(k, 1))
-                        # Use revenue ratio if valid, otherwise equal distribution
-                        spend_ratio = revenue_ratio.fillna(equal_ratio)
-                    else:
-                        # If no merge_keys available, use revenue ratio or 1.0 as fallback
-                        spend_ratio = revenue_ratio.fillna(1.0)
-                
-                # Calculate SKU-level net profit
-                sku_spend = ad_spend * spend_ratio.fillna(0)
-                out['net_profit'] = (sku_rev - sku_cogs - sku_spend).fillna(0)
-            else:
-                # Fallback to ad-level calculation if SKU columns not available
-                out['net_profit'] = (out['shopify_revenue'] - out['shopify_cogs'] - out['spend']).fillna(0)
+            # Net Profit at AD level (revenue - cogs - spend). Every displayed column
+            # (shopify_revenue, gross_roas, net_roas) and the grand-total row are ad-level,
+            # so net_profit must be too — otherwise rows don't reconcile with the columns
+            # beside them or sum to the total. The old SKU-level branch diverged whenever
+            # SKU-match attribution disagreed with UTM revenue, producing impossible rows
+            # (positive net_profit next to zero revenue/COGS, e.g. TH-149-SCRATCHLOUNGE).
+            out['net_profit'] = (out['shopify_revenue'] - out['shopify_cogs'] - out['spend']).fillna(0)
             
             out['profit_margin'] = (out['net_profit'] / out['shopify_revenue']).replace([pd.NA, pd.NaT], 0).fillna(0)
         if 'quantity' in out.columns:

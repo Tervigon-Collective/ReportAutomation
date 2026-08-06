@@ -92,6 +92,10 @@ def _api_to_stats(data: dict) -> dict:
         spend = chan("ad_spend_breakdown", ch)
         channels[ch] = {
             "sales": chan("net_sales_breakdown", ch),
+            # Per-channel placement gross (excl GST) so the PDF SALES BRIDGE
+            # (Gross -> -Ret -> -Cnl -> -Disc -> Net) is real instead of degrading
+            # to gross==net. The historical route exposes gross_sales_breakdown.
+            "gross_sales": chan("gross_sales_breakdown", ch),
             "cogs": chan("cogs_breakdown", ch),
             "ad_spend": spend if ch != "organic" else 0.0,
             "order_count": int(chan("orders_breakdown", ch)),
@@ -690,7 +694,24 @@ amazon_mkt AS (
     toUInt64(countDistinctIf(amazon_order_id, pnl_refund_status = 'RETURN')) AS returned_orders,
     toUInt64(countDistinctIf(amazon_order_id, pnl_refund_status = 'CANCELLATION')) AS cancelled_orders,
     sum(product_cost) AS active_cogs,
-    sum(product_cost) AS gross_cogs,
+    -- Amazon has no gross/net COGS split (matches the main dashboard): marketplace
+    -- fees are STANDING cost on every order, not a returns/cancels effect, so they
+    -- belong in Gross COGS — not the reconciliation row. gross_cogs == net_cogs here,
+    -- so Amazon never distorts the "Returns / Cancels / Disc" bridge line.
+    -- NOTE: column order MUST match shopify_cohort for the UNION ALL below
+    -- (active_cogs, gross_cogs, return_cogs, cancel_cogs, net_cogs).
+    sum(
+      CASE
+        WHEN payout_basis = 'NONE' AND pnl_refund_status = 'CANCELLATION' THEN toFloat64(0)
+        WHEN payout_basis = 'NONE' THEN product_cost
+        WHEN pnl_refund_status = 'RETURN' THEN
+          item_revenue + item_refunds + item_commission + item_closing
+          + item_shipping + item_tax_withheld + item_other_fees
+        ELSE
+          product_cost + abs(item_commission) + abs(item_closing)
+          + abs(item_shipping) + abs(item_tax_withheld) + abs(item_other_fees)
+      END
+    ) AS gross_cogs,
     toFloat64(0) AS return_cogs,
     toFloat64(0) AS cancel_cogs,
     sum(
@@ -1434,6 +1455,7 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
         return {
             "gross_sales": 0.0, "discounts": 0.0,
             "returned_amount": 0.0, "cancelled_amount": 0.0,
+            "revenue_adjustment": 0.0,
             "sales": 0.0, "ad_spend": 0.0,
             "gross_cogs": 0.0, "active_cogs": 0.0,
             "return_cogs": 0.0, "cancel_cogs": 0.0,
@@ -1468,6 +1490,11 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
                   "sales", "ad_spend", "gross_cogs", "active_cogs",
                   "return_cogs", "cancel_cogs", "cogs"):
             c[k] = round(c[k], 2)
+        # Single revenue adjustment: everything that takes Gross Sales → Net Sales
+        # (returns + cancels + discounts) on the order-date cohort.
+        c["revenue_adjustment"] = round(
+            c["returned_amount"] + c["cancelled_amount"] + c["discounts"], 2
+        )
         # COGS bridge: gross_cogs + cogs_adjustment == net_cogs (single signed line).
         # adjustment = reverse-logistics/fee cost added  MINUS  returned/cancelled
         # product cost removed; usually small and often negative (net COGS < gross).
@@ -1502,6 +1529,9 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
                   "sales", "ad_spend", "gross_cogs", "active_cogs",
                   "return_cogs", "cancel_cogs", "cogs")
     }
+    total["revenue_adjustment"] = round(
+        total["returned_amount"] + total["cancelled_amount"] + total["discounts"], 2
+    )
     total["cogs_adjustment"] = round(total["cogs"] - total["gross_cogs"], 2)
     total["retcnl_cost"] = round(total["cogs"] - total["active_cogs"], 2)
     total["order_count"] = sum(int(p["order_count"]) for p in parts)

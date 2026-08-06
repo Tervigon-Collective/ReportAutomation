@@ -46,46 +46,65 @@
   </tr>
 
   <!-- CHARTS -->
+  {% if chart_cids or weather_chart_cid %}
+  {% set ns = namespace(weather_shown=false, sales_state_cid=None, hourly_cid=None) %}
+  {% set section_pad_x = "30px" %}
+  {% set section_gap_y = "10px" %}
+  {% set chart_frame = "width:100%;max-width:556px;height:auto;border-radius:8px;display:block;border:1px solid #e2e8f0;background:#ffffff;" %}
   {% if chart_cids %}
-  {% set ns = namespace(weather_shown=false) %}
+    {% for cid in chart_cids %}
+      {% if cid.startswith('sales_by_state_pie_') %}
+        {% set ns.sales_state_cid = cid %}
+      {% elif cid.startswith('hourly_sales_plot_') %}
+        {% set ns.hourly_cid = cid %}
+      {% endif %}
+    {% endfor %}
+  {% endif %}
   <tr>
-    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+    <td style="background:#ffffff;padding:20px {{ section_pad_x }} 2px {{ section_pad_x }};">
       <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:12px;">Performance Charts</div>
     </td>
   </tr>
   {% for cid in chart_cids %}
+  {% if not cid.startswith('sales_by_state_pie_') and not cid.startswith('hourly_sales_plot_') %}
   <tr>
-    <td style="background:#ffffff;padding:8px 32px;">
-      <img src="cid:{{ cid }}" alt="Chart" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;">
+    <td style="background:#ffffff;padding:{{ section_gap_y }} {{ section_pad_x }};">
+      <img src="cid:{{ cid }}" alt="Chart" style="{{ chart_frame }}">
     </td>
   </tr>
-  {% if weather_chart_cid and cid.startswith('channel_performance_daily_') %}
-  <tr>
-    <td style="background:#ffffff;padding:20px 32px 0 32px;">
-      <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
-      <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
-        {{ weather_report_date | default(report_date) }}
-        {% if weather_report_time %} · {{ weather_report_time }} IST{% endif %}
-        {% if weather_fetched_at %} · Weather data fetched {{ weather_fetched_at }}{% endif %}
-      </div>
-    </td>
-  </tr>
-  <tr>
-    <td style="background:#ffffff;padding:8px 32px;">
-      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
-    </td>
-  </tr>
-  <tr>
-    <td style="background:#ffffff;padding:8px 32px 0 32px;">
-      <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
-    </td>
-  </tr>
-  {% set ns.weather_shown = true %}
   {% endif %}
   {% endfor %}
+  {% if ns.sales_state_cid and ns.hourly_cid %}
+  <tr>
+    <td style="background:#ffffff;padding:{{ section_gap_y }} 22px;">
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
+        <tr>
+          <td width="40%" valign="top" style="padding-right:8px;">
+            <img src="cid:{{ ns.sales_state_cid }}" alt="Sales by state pie chart" style="width:100%;height:auto;border-radius:8px;display:block;border:1px solid #e2e8f0;background:#ffffff;">
+          </td>
+          <td width="60%" valign="top" style="padding-left:8px;">
+            <img src="cid:{{ ns.hourly_cid }}" alt="Hourly sales last 7 days" style="width:100%;height:auto;border-radius:8px;display:block;border:1px solid #e2e8f0;background:#ffffff;">
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+  {% elif ns.sales_state_cid %}
+  <tr>
+    <td style="background:#ffffff;padding:{{ section_gap_y }} {{ section_pad_x }};">
+      <img src="cid:{{ ns.sales_state_cid }}" alt="Sales by state pie chart" style="{{ chart_frame }}">
+    </td>
+  </tr>
+  {% elif ns.hourly_cid %}
+  <tr>
+    <td style="background:#ffffff;padding:{{ section_gap_y }} {{ section_pad_x }};">
+      <img src="cid:{{ ns.hourly_cid }}" alt="Hourly sales last 7 days" style="{{ chart_frame }}">
+    </td>
+  </tr>
+  {% endif %}
   {% if weather_chart_cid and not ns.weather_shown %}
   <tr>
-    <td style="background:#ffffff;padding:20px 32px 0 32px;">
+    <td style="background:#ffffff;padding:20px {{ section_pad_x }} 0 {{ section_pad_x }};">
       <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>
       <div style="font-size:11px;color:#64748b;margin-bottom:12px;">
         {{ weather_report_date | default(report_date) }}
@@ -95,17 +114,17 @@
     </td>
   </tr>
   <tr>
-    <td style="background:#ffffff;padding:8px 32px;">
-      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="width:100%;max-width:556px;height:auto;border-radius:6px;display:block;border:1px solid #e2e8f0;">
+    <td style="background:#ffffff;padding:{{ section_gap_y }} {{ section_pad_x }};">
+      <img src="cid:{{ weather_chart_cid }}" alt="Weather opportunity charts" style="{{ chart_frame }}">
     </td>
   </tr>
   <tr>
-    <td style="background:#ffffff;padding:8px 32px 0 32px;">
+    <td style="background:#ffffff;padding:6px {{ section_pad_x }} 0 {{ section_pad_x }};">
       <div style="font-size:10px;color:#94a3b8;">Full ranked city data in attached Weather Campaign CSV.</div>
     </td>
   </tr>
   {% endif %}
-  {% elif weather_chart_cid %}
+  {% elif weather_chart_cid and not ns.weather_shown %}
   <tr>
     <td style="background:#ffffff;padding:20px 32px 0 32px;">
       <div style="font-size:13px;font-weight:700;color:#1a1a2e;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:4px;">Weather Campaign Opportunity</div>

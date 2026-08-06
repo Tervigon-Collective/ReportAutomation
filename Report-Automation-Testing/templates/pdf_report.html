@@ -255,29 +255,18 @@
 <table class="card">
   <tr class="card-head"><td>
     <span class="card-title">Channel Performance</span>
-    <span class="card-sub">&nbsp; Order-date cohort &middot; gross &rarr; net bridge by channel</span>
+    <span class="card-sub">&nbsp; Order-date cohort &middot; Gross &rarr; Net &rarr; Profit</span>
   </td></tr>
   <tr class="card-body"><td>
     <table class="data bridge">
       <colgroup>
-        <col style="width:10%;">
-        <col style="width:7.5%;"><col style="width:6%;"><col style="width:6%;"><col style="width:6%;"><col style="width:8%;">
-        <col style="width:7.5%;">
-        <col style="width:7.5%;"><col style="width:6.5%;"><col style="width:7.5%;">
-        <col style="width:7.5%;"><col style="width:7.5%;">
+        <col style="width:28%;"><col style="width:18%;"><col style="width:18%;">
+        <col style="width:18%;"><col style="width:18%;">
       </colgroup>
       <thead>
-        <tr class="grp">
-          <th rowspan="2" class="l">Channel</th>
-          <th colspan="5" class="grp-sales">Sales bridge</th>
-          <th rowspan="2">Ad Spend</th>
-          <th colspan="3" class="grp-cogs">COGS bridge</th>
-          <th colspan="2" class="grp-profit">Profit</th>
-        </tr>
         <tr class="sub">
-          <th>Gross</th><th>&minus;Ret</th><th>&minus;Cnl</th><th>&minus;Disc</th><th>Net Sales</th>
-          <th>Gross</th><th>Adj</th><th>Net COGS</th>
-          <th>Gross</th><th>Net</th>
+          <th class="l">Channel &mdash; gross, order-date cohort</th>
+          <th>Sales</th><th>Ad Spend</th><th>COGS</th><th>Profit</th>
         </tr>
       </thead>
       <tbody>
@@ -285,36 +274,41 @@
         <tr class="{{ 'best-row' if ch_name == best_channel_name else '' }}">
           <td class="l">{{ ch_name }}{% if ch_name == best_channel_name %} <span class="tag-best">Top</span>{% endif %}</td>
           <td>{{ ch.gross_sales | fmt_inr_compact }}</td>
-          <td class="{{ 'neg' if ch.returned_amount else 'muted' }}">{% if ch.returned_amount %}&minus;{{ ch.returned_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="{{ 'neg' if ch.cancelled_amount else 'muted' }}">{% if ch.cancelled_amount %}&minus;{{ ch.cancelled_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="{{ 'neg' if ch.discounts else 'muted' }}">{% if ch.discounts %}&minus;{{ ch.discounts | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="strong">{{ ch.sales | fmt_inr_compact }}</td>
           <td>{{ ch.ad_spend | fmt_inr_compact }}</td>
           <td>{{ ch.gross_cogs | fmt_inr_compact }}</td>
-          <td class="{{ 'neg' if ch.cogs_adjustment > 0 else ('pos' if ch.cogs_adjustment < 0 else 'muted') }}">{% if ch.cogs_adjustment %}{{ '+' if ch.cogs_adjustment > 0 else '&minus;' | safe }}{{ ch.cogs_adjustment | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="strong">{{ ch.cogs | fmt_inr_compact }}</td>
           <td class="{{ 'pos' if ch.gross_profit >= 0 else 'neg' }}">{{ ch.gross_profit | fmt_inr_compact }}</td>
-          <td class="strong {{ 'pos' if ch.net_profit >= 0 else 'neg' }}">{{ ch.net_profit | fmt_inr_compact }}</td>
         </tr>
         {% endfor %}
         <tr class="total-row">
-          <td class="l">Total</td>
+          <td class="l">Gross &mdash; sum of channels</td>
           <td>{{ total.gross_sales | fmt_inr_compact }}</td>
-          <td class="{{ 'neg' if total.returned_amount else 'muted' }}">{% if total.returned_amount %}&minus;{{ total.returned_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="{{ 'neg' if total.cancelled_amount else 'muted' }}">{% if total.cancelled_amount %}&minus;{{ total.cancelled_amount | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="{{ 'neg' if total.discounts else 'muted' }}">{% if total.discounts %}&minus;{{ total.discounts | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="strong">{{ total.sales | fmt_inr_compact }}</td>
           <td>{{ total.ad_spend | fmt_inr_compact }}</td>
           <td>{{ total.gross_cogs | fmt_inr_compact }}</td>
-          <td class="{{ 'neg' if total.cogs_adjustment > 0 else ('pos' if total.cogs_adjustment < 0 else 'muted') }}">{% if total.cogs_adjustment %}{{ '+' if total.cogs_adjustment > 0 else '&minus;' | safe }}{{ total.cogs_adjustment | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
-          <td class="strong">{{ total.cogs | fmt_inr_compact }}</td>
           <td class="{{ 'pos' if total.gross_profit >= 0 else 'neg' }}">{{ total.gross_profit | fmt_inr_compact }}</td>
+        </tr>
+        {% set prof_delta = total.net_profit - total.gross_profit %}
+        <tr class="adjustment-row">
+          <td class="l">Less: Returns / Cancels / Disc</td>
+          <td class="{{ 'neg' if total.revenue_adjustment else 'muted' }}">{% if total.revenue_adjustment %}&minus;{{ total.revenue_adjustment | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="muted">&mdash;</td>
+          <td class="{{ 'neg' if total.cogs_adjustment > 0 else ('pos' if total.cogs_adjustment < 0 else 'muted') }}">{% if total.cogs_adjustment %}{{ '+' if total.cogs_adjustment > 0 else '&minus;' | safe }}{{ total.cogs_adjustment | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+          <td class="{{ 'neg' if prof_delta < 0 else ('pos' if prof_delta > 0 else 'muted') }}">{% if prof_delta %}{{ '+' if prof_delta > 0 else '&minus;' | safe }}{{ prof_delta | abs | fmt_inr_compact }}{% else %}&mdash;{% endif %}</td>
+        </tr>
+        <tr class="total-row">
+          <td class="l">Net &mdash; day total</td>
+          <td class="strong">{{ total.sales | fmt_inr_compact }}</td>
+          <td class="strong">{{ total.ad_spend | fmt_inr_compact }}</td>
+          <td class="strong">{{ total.cogs | fmt_inr_compact }}</td>
           <td class="strong {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr_compact }}</td>
         </tr>
       </tbody>
     </table>
   </td></tr>
-  <tr class="card-foot"><td>Net Sales = Gross &minus; Returned &minus; Cancelled &minus; Discounts. Net COGS = Gross COGS + Adj (returns/cancels: reverse-logistics added, returned/cancelled product cost removed). Gross Profit = Gross Sales &minus; Ad Spend &minus; Gross COGS. Net Profit = Net Sales &minus; Ad Spend &minus; Net COGS. Order-date cohort.</td></tr>
+  <tr class="card-foot"><td>
+    Each channel row is <b>gross</b> (order-date cohort). <b>Gross</b> = sum of channels &rarr; Gross Profit = Gross Sales &minus; Ad Spend &minus; Gross COGS.
+    The <b>Returns / Cancels / Disc</b> row bridges to Net: sales less returns + cancels + discounts; COGS adjusted for reverse-logistics added &minus; returned/cancelled product cost recovered.
+    <b>Net</b> = day total &rarr; Net Profit = Net Sales &minus; Ad Spend &minus; Net COGS. &nbsp; Gross + Reconciliation = Net (every column). Order-date cohort (returns/cancels land on placement day).
+  </td></tr>
 </table>
 
 <!-- 3. FUNNEL PERFORMANCE -->

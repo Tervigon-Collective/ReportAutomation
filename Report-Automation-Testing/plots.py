@@ -43,6 +43,16 @@ PLOT_COLORS = {
     "text": "#334155",
 }
 
+# Stakeholder-facing chart design scale for daily email visuals
+TYPE_SCALE = {
+    "title": 13,
+    "subtitle": 9,
+    "axis": 9,
+    "tick": 8,
+    "legend": 8,
+    "label": 6.6,
+}
+
 
 def _compact_rs(val: float) -> str:
     """Compact Rs label for dense daily bar charts."""
@@ -113,11 +123,13 @@ def _annotate_series_no_overlap(
 
 # Placement lines on the consolidated NP chart — light accents (not green/red)
 NP_CHANNEL_LINE_COLORS = {
-    "meta": "#93C5FD",      # light blue
-    "google": "#C4B5FD",    # light violet
-    "amazon": "#FCD34D",    # light amber
+    "meta": "#60A5FA",      # medium-light blue
+    "google": "#A78BFA",    # medium-light violet
+    "amazon": "#FBBF24",    # medium-light amber
 }
 NP_CHANNEL_LINE_STYLE = (0, (1.2, 2.8))  # light, spaced dots
+NP_CHANNEL_LINE_ALPHA = 0.78
+NP_CHANNEL_LINE_WIDTH = 1.15
 
 
 
@@ -399,6 +411,23 @@ def _plot_one_channel_spend_revenue_roas(
     show_legend: bool = True,
 ):
     """Single panel: Ad Spend + Net Sales bars + Net ROAS line (right axis)."""
+    def _smooth_series(x_vals, y_vals):
+        """Shape-preserving smooth line with safe fallback."""
+        x_arr = np.asarray(x_vals, dtype=float)
+        y_arr = np.asarray(y_vals, dtype=float)
+        finite = np.isfinite(y_arr)
+        if finite.sum() < 3:
+            return x_arr, y_arr
+        try:
+            from scipy.interpolate import PchipInterpolator
+            x_f = x_arr[finite]
+            y_f = y_arr[finite]
+            x_dense = np.linspace(float(x_f[0]), float(x_f[-1]), max(len(x_f) * 18, len(x_f) + 2))
+            y_dense = PchipInterpolator(x_f, y_f)(x_dense)
+            return x_dense, y_dense
+        except Exception:
+            return x_arr, y_arr
+
     ax2 = ax1.twinx()
     x = np.arange(len(dates))
     bar_width = 0.36
@@ -438,18 +467,30 @@ def _plot_one_channel_spend_revenue_roas(
         zorder=2,
         clip_on=True,
     )
+    x_smooth, y_smooth = _smooth_series(x, roas_plot)
     ax2.plot(
-        x,
-        roas_plot,
+        x_smooth,
+        y_smooth,
         color=PLOT_COLORS["roas"],
-        marker="o",
-        markersize=3.5,
-        linewidth=1.8,
-        markerfacecolor=PLOT_COLORS["roas"],
-        markeredgecolor="white",
-        markeredgewidth=0.6,
+        linewidth=1.7,
+        solid_capstyle="round",
+        solid_joinstyle="round",
         label="Net ROAS",
         zorder=4,
+        clip_on=True,
+    )
+    marker_step = 3 if n_days > 20 else 2
+    ax2.plot(
+        x[::marker_step],
+        roas_plot[::marker_step],
+        color=PLOT_COLORS["roas"],
+        linestyle="none",
+        marker="o",
+        markersize=2.8,
+        markerfacecolor=PLOT_COLORS["roas"],
+        markeredgecolor="white",
+        markeredgewidth=0.55,
+        zorder=5,
         clip_on=True,
     )
 
@@ -465,7 +506,7 @@ def _plot_one_channel_spend_revenue_roas(
     )
     label_pad = max(abs(money_max), abs(money_min), 1.0) * 0.035
     # Sparse, readable labels on multi-channel stacked panels
-    step = 3 if n_days > 20 else 2
+    step = 5 if n_days > 20 else 3
     for i, bar in enumerate(bars_spend):
         val = float(df_spend[i])
         if val != 0 and i % step == 0:
@@ -475,7 +516,7 @@ def _plot_one_channel_spend_revenue_roas(
                 _compact_rs(val),
                 ha="center",
                 va="bottom" if val > 0 else "top",
-                fontsize=6.5,
+                fontsize=TYPE_SCALE["label"],
                 fontweight="700",
                 color=PLOT_COLORS["spend"],
                 clip_on=False,
@@ -490,32 +531,40 @@ def _plot_one_channel_spend_revenue_roas(
                 _compact_rs(val),
                 ha="center",
                 va="bottom" if val > 0 else "top",
-                fontsize=6.5,
+                fontsize=TYPE_SCALE["label"],
                 fontweight="700",
                 color=PLOT_COLORS["revenue"],
                 clip_on=False,
             )
+    roas_label_step = 7 if n_days > 20 else 4
     for i, roas in enumerate(roas_vals):
         if np.isnan(roas):
             continue
-        if i % step != 0:
+        is_last = i == len(roas_vals) - 1
+        if (i % roas_label_step != 0) and not is_last:
             continue
         if over[i] or under[i]:
             continue
         y = float(roas_plot[i])
-        above = (i // step) % 2 == 0
+        above = (i // roas_label_step) % 2 == 0
         ax2.annotate(
             f"{roas:.2f}x",
             (x[i], y),
             textcoords="offset points",
-            xytext=(0, 8 if above else -10),
-            ha="center",
+            xytext=(8 if is_last else 0, 9 if above else -11),
+            ha="left" if is_last else "center",
             va="bottom" if above else "top",
-            fontsize=6.5,
+            fontsize=TYPE_SCALE["label"] - 0.4,
             fontweight="700",
             color=PLOT_COLORS["roas"],
             clip_on=False,
             annotation_clip=False,
+            bbox=dict(
+                boxstyle="round,pad=0.12",
+                facecolor="white",
+                edgecolor="none",
+                alpha=0.70,
+            ),
         )
 
     ax1.set_xticks(x)
@@ -523,10 +572,10 @@ def _plot_one_channel_spend_revenue_roas(
         [d.strftime("%d %b") for d in dates],
         rotation=90,
         ha="center",
-        fontsize=6 if n_days > 20 else 7,
+        fontsize=TYPE_SCALE["tick"] - 1 if n_days > 20 else TYPE_SCALE["tick"],
         color=PLOT_COLORS["text"],
     )
-    ax1.set_xlim(-0.6, len(dates) - 0.4)
+    ax1.set_xlim(-0.6, len(dates) - 0.4 + 0.9)
     ax1.set_facecolor("#FAFBFC")
     _apply_light_grid(ax1)
     for spine in ("top", "right"):
@@ -544,11 +593,11 @@ def _plot_one_channel_spend_revenue_roas(
     if y_lo >= y_hi:
         y_hi = y_lo + 1.0
     ax1.set_ylim(y_lo, y_hi)
-    ax1.set_title(channel_label, fontsize=10, fontweight="bold", color="#1a1a2e", pad=6)
-    ax1.set_ylabel("Amount (Rs)", fontsize=8, color=PLOT_COLORS["text"], labelpad=4)
-    ax2.set_ylabel("Net ROAS", fontsize=8, color=PLOT_COLORS["roas"], labelpad=4)
-    ax1.tick_params(axis="y", colors=PLOT_COLORS["text"], labelsize=6.5)
-    ax2.tick_params(axis="y", labelcolor=PLOT_COLORS["roas"], labelsize=6.5)
+    ax1.set_title(channel_label, fontsize=TYPE_SCALE["axis"] + 1, fontweight="bold", color="#1a1a2e", pad=6)
+    ax1.set_ylabel("Amount (Rs)", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"], labelpad=4)
+    ax2.set_ylabel("Net ROAS", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["roas"], labelpad=4)
+    ax1.tick_params(axis="y", colors=PLOT_COLORS["text"], labelsize=TYPE_SCALE["tick"] - 1)
+    ax2.tick_params(axis="y", labelcolor=PLOT_COLORS["roas"], labelsize=TYPE_SCALE["tick"] - 1)
 
     if show_legend:
         lines1, labels1 = ax1.get_legend_handles_labels()
@@ -557,7 +606,7 @@ def _plot_one_channel_spend_revenue_roas(
             lines1 + lines2,
             labels1 + labels2,
             loc="upper left",
-            fontsize=6.5,
+            fontsize=TYPE_SCALE["legend"] - 1,
             frameon=True,
             edgecolor="#DDDDDD",
             facecolor="white",
@@ -692,8 +741,8 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     )
 
     fig.suptitle(
-        f"Daily Ad Spend, Net Sales, and Net ROAS by Channel — Last {n_days} Days",
-        fontsize=12,
+        f"Paid Channel Performance — Ad Spend, Net Sales, and Net ROAS ({n_days} Days)",
+        fontsize=TYPE_SCALE["title"],
         fontweight="bold",
         color="#1a1a2e",
         y=0.995,
@@ -701,12 +750,11 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     fig.text(
         0.5,
         0.962,
-        f"Order-date cohort · Net ROAS = (net sales − cogs) / spend · "
-        f"hidden when spend < Rs{int(MIN_SPEND_FOR_ROAS)} · "
-        "returns/cancels stay with the order day",
+        f"Net ROAS = (Net Sales - COGS) / Ad Spend · "
+        f"hidden when spend < Rs{int(MIN_SPEND_FOR_ROAS)}",
         ha="center",
         va="top",
-        fontsize=7.5,
+        fontsize=TYPE_SCALE["subtitle"] - 1,
         color="#666666",
     )
     plt.tight_layout()
@@ -839,7 +887,7 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
         list(df["Spend"]),
         list(df["Purchase Value"]),
         [v if v else None for v in df["ROAS"]],
-        channel_label=f"Blended order-date cohort — Last {n_days} Days",
+        channel_label=f"Blended Paid Performance — Last {n_days} Days",
         n_days=n_days,
     )
     fig.suptitle(
@@ -1600,7 +1648,7 @@ def plot_daily_shopify_profit(save_path=None):
         ax.set_xlabel('Date', fontsize=10, color=PLOT_COLORS["text"])
         ax.set_ylabel('Net Profit (Rs)', fontsize=10, color=PLOT_COLORS["text"])
         ax.set_title(
-            f'Daily Net Profit — event cohort / order-date ({start_str} to {end_str})',
+            f'Daily Net Profit Trend ({start_str} to {end_str})',
             fontsize=13,
             fontweight='bold',
             color="#1a1a2e",
@@ -1734,7 +1782,7 @@ def plot_daily_placement_profit(save_path=None):
         ax.set_xlabel("Date", fontsize=10, color=PLOT_COLORS["text"])
         ax.set_ylabel("Net Profit (Rs)", fontsize=10, color=PLOT_COLORS["text"])
         ax.set_title(
-            f"Daily Net Profit — order-date by placement ({start_str} to {end_str})",
+            f"Daily Net Profit by Paid Channel ({start_str} to {end_str})",
             fontsize=13,
             fontweight="bold",
             color="#1a1a2e",
@@ -1770,8 +1818,7 @@ def plot_daily_placement_profit(save_path=None):
         fig.text(
             0.5,
             0.02,
-            "Order-date cohort Net Profit (net sales − cogs − spend) by paid channel. "
-            "Returns/cancels stay with the order day.",
+            "Net Profit by paid channel = Net Sales - COGS - Ad Spend.",
             ha="center",
             fontsize=8,
             color="#666666",
@@ -1798,16 +1845,16 @@ def _np_line_color_segments(ax, dates_series, values, pos_color, neg_color):
         x0, x1 = dates_series.iloc[i - 1], dates_series.iloc[i]
         y0, y1 = values[i - 1], values[i]
         if y0 >= 0 and y1 >= 0:
-            ax.plot([x0, x1], [y0, y1], color=pos_color, linewidth=2.0, solid_capstyle="round", zorder=1)
+            ax.plot([x0, x1], [y0, y1], color=pos_color, linewidth=1.7, solid_capstyle="round", zorder=1)
         elif y0 < 0 and y1 < 0:
-            ax.plot([x0, x1], [y0, y1], color=neg_color, linewidth=2.0, solid_capstyle="round", zorder=1)
+            ax.plot([x0, x1], [y0, y1], color=neg_color, linewidth=1.7, solid_capstyle="round", zorder=1)
         elif y1 != y0:
             x_cross = x0 + (x1 - x0) * ((0 - y0) / (y1 - y0))
             ax.plot(
                 [x0, x_cross],
                 [y0, 0],
                 color=neg_color if y0 < 0 else pos_color,
-                linewidth=2.0,
+                linewidth=1.7,
                 solid_capstyle="round",
                 zorder=1,
             )
@@ -1815,7 +1862,7 @@ def _np_line_color_segments(ax, dates_series, values, pos_color, neg_color):
                 [x_cross, x1],
                 [0, y1],
                 color=neg_color if y1 < 0 else pos_color,
-                linewidth=2.0,
+                linewidth=1.7,
                 solid_capstyle="round",
                 zorder=1,
             )
@@ -1888,20 +1935,20 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             )
             if series.abs().sum() == 0:
                 continue
-            color = NP_CHANNEL_LINE_COLORS.get(platform, "#CBD5E1")
+            color = NP_CHANNEL_LINE_COLORS.get(platform, "#94A3B8")
             ax.plot(
                 all_dates,
                 series.values,
                 color=color,
                 linestyle=NP_CHANNEL_LINE_STYLE,
-                linewidth=1.15,
+                linewidth=NP_CHANNEL_LINE_WIDTH,
                 marker="o",
-                markersize=2.0,
+                markersize=2.2,
                 markerfacecolor=color,
                 markeredgecolor="none",
                 label=PLATFORM_LABELS.get(platform, platform.title()),
                 zorder=2,
-                alpha=0.55,
+                alpha=NP_CHANNEL_LINE_ALPHA,
             )
 
         _np_line_color_segments(ax, dates_series, net_profits, pos_color, neg_color)
@@ -1912,8 +1959,8 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             event_series[pos],
             color=pos_color,
             marker="o",
-            s=32,
-            linewidths=0.6,
+            s=24,
+            linewidths=0.5,
             edgecolors="#15803D",
             zorder=4,
             label="Total (profit)",
@@ -1923,8 +1970,8 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             event_series[neg],
             color=neg_color,
             marker="o",
-            s=32,
-            linewidths=0.6,
+            s=24,
+            linewidths=0.5,
             edgecolors="#B91C1C",
             zorder=4,
             label="Total (loss)",
@@ -1938,16 +1985,16 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             color="#0F172A",
             fontsize=6.8,
             compact=True,
-            step=1,
+            step=3 if n_days > 20 else 2,
             zorder=6,
         )
 
         ax.axhline(0, color="#999999", linewidth=0.9, zorder=0)
-        ax.set_xlabel("Date", fontsize=9, color=PLOT_COLORS["text"])
-        ax.set_ylabel("Net Profit (Rs)", fontsize=9, color=PLOT_COLORS["text"])
+        ax.set_xlabel("Date", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
+        ax.set_ylabel("Net Profit (Rs)", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
         ax.set_title(
-            f"Daily Net Profit — order-date cohort + channels ({start_str} to {end_str})",
-            fontsize=12,
+            f"Daily Net Profit Trend by Channel ({start_str} to {end_str})",
+            fontsize=TYPE_SCALE["title"] - 1,
             fontweight="bold",
             color="#1a1a2e",
             pad=8,
@@ -1990,17 +2037,17 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
                     [0],
                     color=NP_CHANNEL_LINE_COLORS[platform],
                     linestyle=NP_CHANNEL_LINE_STYLE,
-                    linewidth=1.3,
+                    linewidth=NP_CHANNEL_LINE_WIDTH,
                     marker="o",
                     markersize=3.0,
-                    alpha=0.7,
+                    alpha=NP_CHANNEL_LINE_ALPHA,
                     label=PLATFORM_LABELS[platform],
                 )
             )
         ax.legend(
             handles=legend_handles,
             loc="upper left",
-            fontsize=7.5,
+            fontsize=TYPE_SCALE["legend"] - 0.5,
             frameon=True,
             edgecolor="#DDDDDD",
             facecolor="white",
@@ -2013,10 +2060,9 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
         fig.text(
             0.5,
             0.01,
-            "Solid green/red = total order-date NP · Dotted = Meta / Google / Amazon. "
-            "Returns/cancels stay with the order day.",
+            "Solid line = Total net profit · Dotted lines = Meta / Google / Amazon",
             ha="center",
-            fontsize=7.5,
+            fontsize=TYPE_SCALE["subtitle"] - 1,
             color="#666666",
         )
         plt.tight_layout()
@@ -2092,19 +2138,20 @@ def plot_hourly_sales_last_7_days(save_path=None):
         hourly_mean = pivot.mean(axis=1)
         # Plot
         sns.set_style("whitegrid")
-        fig, ax = plt.subplots(figsize=(14, 7))
+        fig, ax = plt.subplots(figsize=(14, 6.2))
         # Plot individual days in unique colors and label each date, with more faded lines
         color_palette = sns.color_palette('tab10', n_colors=len(pivot.columns))
         for i, (date, color) in enumerate(zip(pivot.columns, color_palette)):
-            ax.plot(pivot.index, pivot[date], color=color, alpha=0.3, linewidth=2, label=str(date))
+            ax.plot(pivot.index, pivot[date], color=color, alpha=0.24, linewidth=1.2)
         # Plot mean line in bold black
-        ax.plot(hourly_mean.index, hourly_mean.values, color='black', linewidth=2.5, linestyle='-', marker='o', label='Average (7 days)')
-        ax.set_xlabel('Hour of Day', fontsize=12)
-        ax.set_ylabel('Total Sales (₹)', fontsize=12)
+        ax.plot(hourly_mean.index, hourly_mean.values, color='black', linewidth=2.0, linestyle='-', marker='o', markersize=2.4, label='7-day average')
+        ax.set_xlabel('Hour of Day', fontsize=TYPE_SCALE["axis"])
+        ax.set_ylabel('Total Sales (Rs)', fontsize=TYPE_SCALE["axis"])
         ax.set_xticks(range(24))
-        ax.set_xticklabels([f"{h:02d}" for h in range(24)])
-        ax.set_title('Hourly Sales for Last 7 Days', fontsize=15, fontweight='bold', pad=20)
-        ax.legend(loc='upper left', title='Date')
+        ax.set_xticklabels([f"{h:02d}" for h in range(24)], fontsize=TYPE_SCALE["tick"] - 1)
+        ax.tick_params(axis="y", labelsize=TYPE_SCALE["tick"] - 1)
+        ax.set_title('Hourly Sales Trend — Last 7 Days', fontsize=TYPE_SCALE["title"], fontweight='bold', pad=12)
+        ax.legend(loc='upper left', fontsize=TYPE_SCALE["legend"] - 1, frameon=True)
         from matplotlib.ticker import FuncFormatter
         ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'₹{x:,.0f}'))
         plt.tight_layout()
@@ -2405,13 +2452,13 @@ def plot_sales_by_state_pie_chart(start_date_str, end_date_str, save_path=None, 
         fig.text(
             0.5,
             0.945,
-            f"Sales by state — {range_note}",
+            f"State Sales Mix — {range_note}",
             ha="center",
-            fontsize=15,
+            fontsize=TYPE_SCALE["title"] + 1,
             fontweight="bold",
             color="#1a1a1a",
         )
-        fig.text(0.5, 0.905, sub, ha="center", fontsize=12, color="#333333")
+        fig.text(0.5, 0.905, sub, ha="center", fontsize=TYPE_SCALE["subtitle"] + 1, color="#333333")
 
         # When autopct is None, matplotlib's pie() returns only (wedges, texts), not three values.
         _pie_ret = ax_pie.pie(
@@ -2423,7 +2470,7 @@ def plot_sales_by_state_pie_chart(start_date_str, end_date_str, save_path=None, 
             colors=colors,
             radius=1.0,
             wedgeprops=dict(edgecolor="white", linewidth=0.9),
-            textprops=dict(color="#333333", fontsize=10),
+            textprops=dict(color="#333333", fontsize=TYPE_SCALE["tick"] + 1),
             labeldistance=1.12,
             rotatelabels=True,
         )
@@ -2444,12 +2491,12 @@ def plot_sales_by_state_pie_chart(start_date_str, end_date_str, save_path=None, 
         fig.legend(
             wedges,
             legend_rows,
-            title="By state (sales | orders | share)",
+            title="State breakdown (sales | orders | share)",
             loc="lower center",
             bbox_to_anchor=(0.5, 0.02),
             ncol=ncol,
-            fontsize=10,
-            title_fontsize=11,
+            fontsize=TYPE_SCALE["legend"],
+            title_fontsize=TYPE_SCALE["legend"] + 1,
             frameon=True,
             fancybox=True,
             framealpha=0.95,

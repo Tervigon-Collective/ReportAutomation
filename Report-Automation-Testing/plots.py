@@ -1839,41 +1839,96 @@ def plot_daily_placement_profit(save_path=None):
         return None
 
 
-def _np_line_color_segments(ax, dates_series, values, pos_color, neg_color):
-    """Draw a net-profit line with green/red segments at zero crossings."""
-    for i in range(1, len(dates_series)):
-        x0, x1 = dates_series.iloc[i - 1], dates_series.iloc[i]
-        y0, y1 = values[i - 1], values[i]
+def _np_line_color_segments(ax, dates_series, values, pos_color, neg_color, *, smooth: bool = False):
+    """Draw a net-profit line with green/red segments at zero crossings.
+
+    When smooth=True, densify with shape-preserving PCHIP then color each
+    micro-segment by sign so the curve stays smooth across the zero line.
+    """
+    dates = pd.to_datetime(list(dates_series))
+    y = np.asarray(values, dtype=float)
+    if len(y) < 2:
+        return
+
+    if smooth and len(y) >= 3:
+        try:
+            from scipy.interpolate import PchipInterpolator
+
+            x_num = mdates.date2num(dates)
+            n_out = max(len(y) * 20, len(y) + 2)
+            x_dense = np.linspace(float(x_num[0]), float(x_num[-1]), n_out)
+            y_dense = PchipInterpolator(x_num, y)(x_dense)
+            xs = list(mdates.num2date(x_dense))
+            ys = y_dense.tolist()
+        except Exception:
+            xs = list(dates)
+            ys = y.tolist()
+    else:
+        xs = list(dates)
+        ys = y.tolist()
+
+    for i in range(1, len(xs)):
+        x0, x1 = xs[i - 1], xs[i]
+        y0, y1 = ys[i - 1], ys[i]
         if y0 >= 0 and y1 >= 0:
-            ax.plot([x0, x1], [y0, y1], color=pos_color, linewidth=1.7, solid_capstyle="round", zorder=1)
+            ax.plot(
+                [x0, x1], [y0, y1],
+                color=pos_color, linewidth=2.0,
+                solid_capstyle="round", solid_joinstyle="round",
+                zorder=3, antialiased=True,
+            )
         elif y0 < 0 and y1 < 0:
-            ax.plot([x0, x1], [y0, y1], color=neg_color, linewidth=1.7, solid_capstyle="round", zorder=1)
+            ax.plot(
+                [x0, x1], [y0, y1],
+                color=neg_color, linewidth=2.0,
+                solid_capstyle="round", solid_joinstyle="round",
+                zorder=3, antialiased=True,
+            )
         elif y1 != y0:
-            x_cross = x0 + (x1 - x0) * ((0 - y0) / (y1 - y0))
+            # Zero-crossing: split the segment at y=0
+            t = (0 - y0) / (y1 - y0)
+            if hasattr(x0, "to_pydatetime"):
+                x0_ts = pd.Timestamp(x0)
+                x1_ts = pd.Timestamp(x1)
+                x_cross = x0_ts + (x1_ts - x0_ts) * t
+            else:
+                x_cross = x0 + (x1 - x0) * t
             ax.plot(
-                [x0, x_cross],
-                [y0, 0],
+                [x0, x_cross], [y0, 0],
                 color=neg_color if y0 < 0 else pos_color,
-                linewidth=1.7,
-                solid_capstyle="round",
-                zorder=1,
+                linewidth=2.0, solid_capstyle="round", zorder=3, antialiased=True,
             )
             ax.plot(
-                [x_cross, x1],
-                [0, y1],
+                [x_cross, x1], [0, y1],
                 color=neg_color if y1 < 0 else pos_color,
-                linewidth=1.7,
-                solid_capstyle="round",
-                zorder=1,
+                linewidth=2.0, solid_capstyle="round", zorder=3, antialiased=True,
             )
+
+
+def _smooth_series_dates(dates, values, *, points_per_seg: int = 18):
+    """PCHIP-smooth a date series; returns (dates_dense, y_dense)."""
+    dates = pd.to_datetime(list(dates))
+    y = np.asarray(values, dtype=float)
+    if len(y) < 3:
+        return dates, y
+    try:
+        from scipy.interpolate import PchipInterpolator
+
+        x_num = mdates.date2num(dates)
+        n_out = max(len(y) * points_per_seg, len(y) + 2)
+        x_dense = np.linspace(float(x_num[0]), float(x_num[-1]), n_out)
+        y_dense = PchipInterpolator(x_num, y)(x_dense)
+        return mdates.num2date(x_dense), y_dense
+    except Exception:
+        return dates, y
 
 
 def plot_daily_net_profit_dual_cohort(save_path=None):
     """
     Consolidated order-date Net Profit for the last 30 days:
 
-    - Total NP as a solid green/red line (pos/neg) with clear point labels
-    - Meta / Google / Amazon as dotted lines (colors distinct from green/red)
+    - Total NP as a smooth green/red line (pos/neg) with a value label on every day
+    - Meta / Google / Amazon as smooth dotted lines (colors distinct from green/red)
     """
     try:
         from matplotlib.ticker import FuncFormatter
@@ -1913,9 +1968,9 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
         channel_df = channel_df.copy()
         channel_df["report_date"] = pd.to_datetime(channel_df["report_date"])
 
-        fig_w = max(12, min(16, 0.35 * n_days + 6))
+        fig_w = max(13, min(17, 0.42 * n_days + 6))
         fig, ax = plt.subplots(
-            figsize=(fig_w, 6.4),
+            figsize=(fig_w, 7.2),
             facecolor="white",
         )
 
@@ -1924,7 +1979,7 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
         dates_series = pd.Series(all_dates)
         net_profits = event_series.values.tolist()
 
-        # Channel dotted lines first (under total)
+        # Channel dotted lines first (under total) — smoothed
         for platform in ("meta", "google", "amazon"):
             plat = channel_df[channel_df["platform"] == platform]
             series = (
@@ -1936,22 +1991,36 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             if series.abs().sum() == 0:
                 continue
             color = NP_CHANNEL_LINE_COLORS.get(platform, "#94A3B8")
+            x_s, y_s = _smooth_series_dates(all_dates, series.values, points_per_seg=18)
+            ax.plot(
+                x_s,
+                y_s,
+                color=color,
+                linestyle=NP_CHANNEL_LINE_STYLE,
+                linewidth=NP_CHANNEL_LINE_WIDTH,
+                label=PLATFORM_LABELS.get(platform, platform.title()),
+                zorder=2,
+                alpha=NP_CHANNEL_LINE_ALPHA,
+                solid_capstyle="round",
+                antialiased=True,
+            )
+            # Keep daily markers on the raw points
             ax.plot(
                 all_dates,
                 series.values,
                 color=color,
-                linestyle=NP_CHANNEL_LINE_STYLE,
-                linewidth=NP_CHANNEL_LINE_WIDTH,
+                linestyle="none",
                 marker="o",
                 markersize=2.2,
                 markerfacecolor=color,
                 markeredgecolor="none",
-                label=PLATFORM_LABELS.get(platform, platform.title()),
                 zorder=2,
                 alpha=NP_CHANNEL_LINE_ALPHA,
             )
 
-        _np_line_color_segments(ax, dates_series, net_profits, pos_color, neg_color)
+        _np_line_color_segments(
+            ax, dates_series, net_profits, pos_color, neg_color, smooth=True
+        )
         neg = event_series < 0
         pos = event_series >= 0
         ax.scatter(
@@ -1977,15 +2046,15 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
             label="Total (loss)",
         )
 
-        # Clear non-overlapping total NP labels (alternate above/below)
+        # Net profit value on every day
         _annotate_series_no_overlap(
             ax,
             list(all_dates),
             net_profits,
             color="#0F172A",
-            fontsize=6.8,
+            fontsize=5.8 if n_days > 24 else 6.4,
             compact=True,
-            step=3 if n_days > 20 else 2,
+            step=1,
             zorder=6,
         )
 
@@ -2007,10 +2076,10 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
         ax.spines["left"].set_color("#BBBBBB")
         ax.spines["bottom"].set_color("#BBBBBB")
 
-        # Headroom so labels don't clip
+        # Headroom so daily labels don't clip
         y_min = float(min(event_series.min(), channel_df["net_profit"].min()))
         y_max = float(max(event_series.max(), channel_df["net_profit"].max()))
-        pad = max(abs(y_max), abs(y_min), 1.0) * 0.28
+        pad = max(abs(y_max), abs(y_min), 1.0) * 0.36
         ax.set_ylim(y_min - pad, y_max + pad)
 
         ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
@@ -2084,24 +2153,49 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
 
 
 
+def _smooth_numeric_series(x, y, *, points_per_seg: int = 16):
+    """PCHIP-smooth a numeric series; returns (x_dense, y_dense)."""
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    finite = np.isfinite(y_arr)
+    if finite.sum() < 3:
+        return x_arr, y_arr
+    try:
+        from scipy.interpolate import PchipInterpolator
+
+        x_f = x_arr[finite]
+        y_f = y_arr[finite]
+        n_out = max(len(x_f) * points_per_seg, len(x_f) + 2)
+        x_dense = np.linspace(float(x_f[0]), float(x_f[-1]), n_out)
+        y_dense = PchipInterpolator(x_f, y_f)(x_dense)
+        return x_dense, y_dense
+    except Exception:
+        return x_arr, y_arr
+
+
 def plot_hourly_sales_last_7_days(save_path=None):
     """
-    Plots a line graph of total sales (sum of total_price_amount) by hour for each of the last 7 days (including today)
-    from the shopify_orders table, excluding cancelled orders. Shows individual daily sum lines (unique color, labeled, faded) and the mean (average) line (bold black).
-    All lines are continuous from 00 to 23 (missing hours are filled with zero).
-    The y-axis is autoscaled (not capped). Uses a dynamic date range for the last 7 days.
+    Sales by time-of-day for the last 7 days (including today) from shopify_orders.
+
+    Uses 30-minute buckets (finer than hourly) from order timestamps.
+    Plots each day faded + a bold 7-day average, both as smooth PCHIP curves.
+    Missing slots are filled with zero so every day covers 00:00–23:30.
     """
     try:
-        logger.info("Plotting sum of hourly sales for individual days and mean for average line for last 7 days from shopify_orders...")
+        logger.info(
+            "Plotting 30-min sales by time-of-day for last 7 days from shopify_orders..."
+        )
         conn_str = (
             f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
             f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?sslmode=require"
         )
         engine = create_engine(conn_str, isolation_level="AUTOCOMMIT")
-        # Calculate dynamic date range for last 7 days (including today)
-        end_date = pd.Timestamp.now(tz=INDIAN_TZ).replace(hour=23, minute=59, second=59, microsecond=0)
-        start_date = (end_date - pd.Timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # Query for the relevant data, excluding cancelled orders
+        end_date = pd.Timestamp.now(tz=INDIAN_TZ).replace(
+            hour=23, minute=59, second=59, microsecond=0
+        )
+        start_date = (end_date - pd.Timedelta(days=6)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         query = f'''
             SELECT
                 total_price_amount,
@@ -2119,46 +2213,117 @@ def plot_hourly_sales_last_7_days(save_path=None):
         if df.empty:
             logger.warning("No shopify_orders data found for the last 7 days.")
             return None
-        if 'total_price_amount' in df.columns:
-            df['total_price_amount'] = apply_net_revenue_column(df['total_price_amount'])
-        # Parse datetime and extract hour and date
-        df['created_at_ist'] = pd.to_datetime(df['created_at_ist'])
-        df['hour'] = df['created_at_ist'].dt.hour
-        df['date'] = df['created_at_ist'].dt.date
-        # Compute sum of sales per hour for each day
-        daily_hourly = df.groupby(['date', 'hour'])['total_price_amount'].sum().reset_index()
-        # Ensure every day has all 24 hours (fill missing with zero)
-        all_hours = pd.Series(range(24), name='hour')
-        all_dates = pd.Series(sorted(daily_hourly['date'].unique()), name='date')
-        full_index = pd.MultiIndex.from_product([all_dates, all_hours], names=['date', 'hour'])
-        daily_hourly_full = daily_hourly.set_index(['date', 'hour']).reindex(full_index, fill_value=0).reset_index()
-        # Pivot for plotting individual days
-        pivot = daily_hourly_full.pivot(index='hour', columns='date', values='total_price_amount')
-        # Compute mean (average) per hour across all days
-        hourly_mean = pivot.mean(axis=1)
-        # Plot
+        if "total_price_amount" in df.columns:
+            df["total_price_amount"] = apply_net_revenue_column(df["total_price_amount"])
+
+        df["created_at_ist"] = pd.to_datetime(df["created_at_ist"])
+        # 30-min slot within the day: 0=00:00, 1=00:30, …, 47=23:30
+        slot_minutes = 30
+        slots_per_day = 24 * 60 // slot_minutes  # 48
+        df["slot"] = (
+            df["created_at_ist"].dt.hour * (60 // slot_minutes)
+            + (df["created_at_ist"].dt.minute // slot_minutes)
+        ).astype(int)
+        df["date"] = df["created_at_ist"].dt.date
+
+        daily = (
+            df.groupby(["date", "slot"])["total_price_amount"]
+            .sum()
+            .reset_index()
+        )
+        all_slots = pd.Series(range(slots_per_day), name="slot")
+        all_dates = pd.Series(sorted(daily["date"].unique()), name="date")
+        full_index = pd.MultiIndex.from_product(
+            [all_dates, all_slots], names=["date", "slot"]
+        )
+        daily_full = (
+            daily.set_index(["date", "slot"])
+            .reindex(full_index, fill_value=0)
+            .reset_index()
+        )
+        pivot = daily_full.pivot(index="slot", columns="date", values="total_price_amount")
+        slot_mean = pivot.mean(axis=1)
+
         sns.set_style("whitegrid")
-        fig, ax = plt.subplots(figsize=(14, 6.2))
-        # Plot individual days in unique colors and label each date, with more faded lines
-        color_palette = sns.color_palette('tab10', n_colors=len(pivot.columns))
-        for i, (date, color) in enumerate(zip(pivot.columns, color_palette)):
-            ax.plot(pivot.index, pivot[date], color=color, alpha=0.24, linewidth=1.2)
-        # Plot mean line in bold black
-        ax.plot(hourly_mean.index, hourly_mean.values, color='black', linewidth=2.0, linestyle='-', marker='o', markersize=2.4, label='7-day average')
-        ax.set_xlabel('Hour of Day', fontsize=TYPE_SCALE["axis"])
-        ax.set_ylabel('Total Sales (Rs)', fontsize=TYPE_SCALE["axis"])
-        ax.set_xticks(range(24))
-        ax.set_xticklabels([f"{h:02d}" for h in range(24)], fontsize=TYPE_SCALE["tick"] - 1)
+        fig, ax = plt.subplots(figsize=(14, 6.4))
+        x = pivot.index.to_numpy(dtype=float)
+
+        color_palette = sns.color_palette("tab10", n_colors=len(pivot.columns))
+        for date, color in zip(pivot.columns, color_palette):
+            y = pivot[date].to_numpy(dtype=float)
+            x_s, y_s = _smooth_numeric_series(x, y, points_per_seg=12)
+            ax.plot(
+                x_s,
+                y_s,
+                color=color,
+                alpha=0.28,
+                linewidth=1.15,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                antialiased=True,
+                zorder=2,
+            )
+
+        x_avg, y_avg = _smooth_numeric_series(
+            x, slot_mean.to_numpy(dtype=float), points_per_seg=16
+        )
+        ax.plot(
+            x_avg,
+            y_avg,
+            color="black",
+            linewidth=2.2,
+            linestyle="-",
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            label="7-day average",
+            zorder=4,
+            antialiased=True,
+        )
+        # Markers on real 30-min average points (every other for readability)
+        ax.plot(
+            x[::2],
+            slot_mean.values[::2],
+            color="black",
+            linestyle="none",
+            marker="o",
+            markersize=2.6,
+            markerfacecolor="black",
+            markeredgecolor="white",
+            markeredgewidth=0.4,
+            zorder=5,
+        )
+
+        # Tick every hour (even slots); minor feel via labels HH:00
+        hour_ticks = list(range(0, slots_per_day, 2))
+        ax.set_xticks(hour_ticks)
+        ax.set_xticklabels(
+            [f"{(s * slot_minutes) // 60:02d}" for s in hour_ticks],
+            fontsize=TYPE_SCALE["tick"] - 1,
+        )
+        ax.set_xlim(-0.5, slots_per_day - 0.5)
+        ax.set_xlabel("Hour of Day (30-min buckets)", fontsize=TYPE_SCALE["axis"])
+        ax.set_ylabel("Total Sales (Rs)", fontsize=TYPE_SCALE["axis"])
         ax.tick_params(axis="y", labelsize=TYPE_SCALE["tick"] - 1)
-        ax.set_title('Hourly Sales Trend — Last 7 Days', fontsize=TYPE_SCALE["title"], fontweight='bold', pad=12)
-        ax.legend(loc='upper left', fontsize=TYPE_SCALE["legend"] - 1, frameon=True)
+        ax.set_title(
+            "Sales by Time of Day — Last 7 Days (30-min)",
+            fontsize=TYPE_SCALE["title"],
+            fontweight="bold",
+            pad=12,
+        )
+        ax.legend(loc="upper left", fontsize=TYPE_SCALE["legend"] - 1, frameon=True)
         from matplotlib.ticker import FuncFormatter
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'₹{x:,.0f}'))
+
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"₹{v:,.0f}"))
+        ax.set_facecolor("#FAFBFC")
+        _apply_light_grid(ax)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+
         plt.tight_layout()
         if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            plt.savefig(save_path, dpi=200, bbox_inches='tight')
-            logger.info(f"Hourly sales plot saved as: {save_path}")
+            os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            logger.info(f"Half-hourly sales plot saved as: {save_path}")
             plt.close(fig)
             return save_path
         else:
@@ -2169,7 +2334,7 @@ def plot_hourly_sales_last_7_days(save_path=None):
         logger.error(f"Error plotting hourly sales: {str(e)}", exc_info=True)
         return None
     finally:
-        if 'engine' in locals():
+        if "engine" in locals():
             engine.dispose()
             logger.info("Database connection closed")
 

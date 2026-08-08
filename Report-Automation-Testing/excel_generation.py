@@ -236,6 +236,30 @@ logger.info(f"Database configuration: host={DB_CONFIG['host']}, port={DB_CONFIG[
 # Meta API endpoint
 BASE_URL = f'https://graph.facebook.com/v22.0/act_{ACCOUNT_ID}/insights'
 
+
+def fetch_gross_aov(start_str: str, end_str: str) -> float:
+    """Actual order value (incl GST) per order over the report window.
+
+    AOV = SUM(total_price_amount) / COUNT(orders). total_price_amount is the
+    amount charged (incl GST, after discounts) — the "actual order value", not
+    the GST-excluded gross. All placed orders count (cancels included).
+    """
+    try:
+        engine = get_db_engine()
+        query = f"""
+            SELECT COALESCE(SUM(total_price_amount), 0) AS gross_value,
+                   COUNT(*) AS orders
+            FROM shopify_orders
+            WHERE created_at_ist >= '{start_str} 00:00:00+05:30'
+              AND created_at_ist <= '{end_str} 23:59:59+05:30'
+        """
+        row = pd.read_sql(query, engine).iloc[0]
+        orders = float(row["orders"] or 0)
+        return round(float(row["gross_value"] or 0) / orders, 2) if orders else 0.0
+    except Exception as exc:  # noqa: BLE001 - AOV is non-fatal decoration
+        logger.warning("fetch_gross_aov failed: %s", exc)
+        return 0.0
+
 def fetch_product_metrics():
     try:
         # Use centralized database engine
@@ -842,6 +866,17 @@ def generate_pdf_report(metrics, today, timestamp_str, timeframe_start=None, tim
             date_range = today.strftime('%Y-%m-%d') if hasattr(today, 'strftime') else str(today)
             start_str = end_str = None
         report_time = datetime.now(IST).strftime('%H:%M')
+
+        # AOV (actual order value, incl GST) + gross_profit onto the shared total
+        # so both the PDF exec summary and the email KPI strip read all-gross.
+        _t = api_metrics.get("total")
+        if isinstance(_t, dict):
+            _aov_day = today.strftime('%Y-%m-%d') if hasattr(today, 'strftime') else str(today)[:10]
+            _t["aov"] = fetch_gross_aov(start_str or _aov_day, end_str or _aov_day)
+            if _t.get("gross_profit") is None:
+                _gs = float(_t.get("gross_sales") or _t.get("sales") or 0)
+                _gc = float(_t.get("gross_cogs") or _t.get("cogs") or 0)
+                _t["gross_profit"] = round(_gs - float(_t.get("ad_spend") or 0) - _gc, 2)
 
         # Fetch supplementary data (errors are non-fatal).
         # Funnel + campaign performance are sourced from ClickHouse gold when

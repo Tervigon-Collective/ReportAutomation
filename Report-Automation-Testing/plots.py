@@ -26,6 +26,7 @@ from channel_performance import (
     MIN_SPEND_FOR_ROAS,
     PLATFORM_COLORS,
     PLATFORM_LABELS,
+    _smooth_line_segments,
     fetch_channel_performance,
     plot_channel_performance_daily,
 )
@@ -121,15 +122,21 @@ def _annotate_series_no_overlap(
         )
 
 
-# Placement lines on the consolidated NP chart — light accents (not green/red)
+# Placement lines on the consolidated NP chart — colorblind-safe (Okabe-Ito),
+# each channel also gets a distinct dash pattern so it reads without colour.
 NP_CHANNEL_LINE_COLORS = {
-    "meta": "#60A5FA",      # medium-light blue
-    "google": "#A78BFA",    # medium-light violet
-    "amazon": "#FBBF24",    # medium-light amber
+    "meta": "#0072B2",      # blue
+    "google": "#CC79A7",    # reddish purple
+    "amazon": "#E69F00",    # orange
 }
-NP_CHANNEL_LINE_STYLE = (0, (1.2, 2.8))  # light, spaced dots
-NP_CHANNEL_LINE_ALPHA = 0.78
-NP_CHANNEL_LINE_WIDTH = 1.15
+NP_CHANNEL_LINE_STYLES = {
+    "meta": (0, (1.5, 2.2)),        # dotted
+    "google": (0, (6, 2.5)),        # dashed
+    "amazon": (0, (6, 2, 1.5, 2)),  # dash-dot
+}
+NP_CHANNEL_LINE_STYLE = (0, (1.2, 2.8))  # fallback
+NP_CHANNEL_LINE_ALPHA = 0.85
+NP_CHANNEL_LINE_WIDTH = 1.3
 
 
 
@@ -368,6 +375,13 @@ def _channel_net_roas(revenue, cogs, spend):
     return round((revenue - cogs) / spend, 2)
 
 
+def _channel_gross_roas(gross_sales, spend):
+    """Gross ROAS = gross sales / spend (dashboard definition); None when spend is too low."""
+    if spend < MIN_SPEND_FOR_ROAS:
+        return None
+    return round(gross_sales / spend, 2)
+
+
 def _roas_axis_limits(roas_vals: np.ndarray) -> tuple[float, float]:
     """
     Sensible Net ROAS y-limits that keep the line + labels inside the panel.
@@ -407,27 +421,11 @@ def _plot_one_channel_spend_revenue_roas(
     *,
     channel_label: str,
     n_days: int,
-    revenue_label: str = "Net Sales",
+    revenue_label: str = "Gross Sales",
+    roas_label: str = "Gross ROAS",
     show_legend: bool = True,
 ):
-    """Single panel: Ad Spend + Net Sales bars + Net ROAS line (right axis)."""
-    def _smooth_series(x_vals, y_vals):
-        """Shape-preserving smooth line with safe fallback."""
-        x_arr = np.asarray(x_vals, dtype=float)
-        y_arr = np.asarray(y_vals, dtype=float)
-        finite = np.isfinite(y_arr)
-        if finite.sum() < 3:
-            return x_arr, y_arr
-        try:
-            from scipy.interpolate import PchipInterpolator
-            x_f = x_arr[finite]
-            y_f = y_arr[finite]
-            x_dense = np.linspace(float(x_f[0]), float(x_f[-1]), max(len(x_f) * 18, len(x_f) + 2))
-            y_dense = PchipInterpolator(x_f, y_f)(x_dense)
-            return x_dense, y_dense
-        except Exception:
-            return x_arr, y_arr
-
+    """Single panel: Ad Spend + revenue bars + ROAS line (right axis)."""
     ax2 = ax1.twinx()
     x = np.arange(len(dates))
     bar_width = 0.36
@@ -467,7 +465,9 @@ def _plot_one_channel_spend_revenue_roas(
         zorder=2,
         clip_on=True,
     )
-    x_smooth, y_smooth = _smooth_series(x, roas_plot)
+    # Gap-aware smooth: do not bridge days where spend < MIN_SPEND_FOR_ROAS (NaN ROAS).
+    # Amazon Jul 30–Aug 6 had near-zero spend — old interpolator drew a fake diagonal.
+    x_smooth, y_smooth = _smooth_line_segments(x, roas_plot, points_per_seg=18)
     ax2.plot(
         x_smooth,
         y_smooth,
@@ -475,24 +475,29 @@ def _plot_one_channel_spend_revenue_roas(
         linewidth=1.7,
         solid_capstyle="round",
         solid_joinstyle="round",
-        label="Net ROAS",
+        label=roas_label,
         zorder=4,
         clip_on=True,
     )
+    finite_idx = np.flatnonzero(np.isfinite(roas_plot))
     marker_step = 3 if n_days > 20 else 2
-    ax2.plot(
-        x[::marker_step],
-        roas_plot[::marker_step],
-        color=PLOT_COLORS["roas"],
-        linestyle="none",
-        marker="o",
-        markersize=2.8,
-        markerfacecolor=PLOT_COLORS["roas"],
-        markeredgecolor="white",
-        markeredgewidth=0.55,
-        zorder=5,
-        clip_on=True,
-    )
+    if len(finite_idx):
+        marker_idx = finite_idx[::marker_step]
+        if finite_idx[-1] not in marker_idx:
+            marker_idx = np.append(marker_idx, finite_idx[-1])
+        ax2.plot(
+            x[marker_idx],
+            roas_plot[marker_idx],
+            color=PLOT_COLORS["roas"],
+            linestyle="none",
+            marker="o",
+            markersize=2.8,
+            markerfacecolor=PLOT_COLORS["roas"],
+            markeredgecolor="white",
+            markeredgewidth=0.55,
+            zorder=5,
+            clip_on=True,
+        )
 
     money_max = max(
         float(np.nanmax(df_spend) if len(df_spend) else 0),
@@ -595,7 +600,7 @@ def _plot_one_channel_spend_revenue_roas(
     ax1.set_ylim(y_lo, y_hi)
     ax1.set_title(channel_label, fontsize=TYPE_SCALE["axis"] + 1, fontweight="bold", color="#1a1a2e", pad=6)
     ax1.set_ylabel("Amount (Rs)", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"], labelpad=4)
-    ax2.set_ylabel("Net ROAS", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["roas"], labelpad=4)
+    ax2.set_ylabel(roas_label, fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["roas"], labelpad=4)
     ax1.tick_params(axis="y", colors=PLOT_COLORS["text"], labelsize=TYPE_SCALE["tick"] - 1)
     ax2.tick_params(axis="y", labelcolor=PLOT_COLORS["roas"], labelsize=TYPE_SCALE["tick"] - 1)
 
@@ -618,11 +623,11 @@ def _plot_one_channel_spend_revenue_roas(
 
 def plot_daily_amounts(daily_insights_data, save_path=None):
     """
-    Channel-split Daily Ad Spend, Net Sales, and Net ROAS (Meta / Google / Amazon).
+    Channel-split Daily Ad Spend, Gross Sales, and Gross ROAS (Meta / Google / Amazon).
 
-    Same order-date cohort as the Net Profit charts: for orders placed on day D,
-    net sales = gross − returns − cancels of those orders; ad spend is that day's
-    platform spend; Net ROAS = (net sales − cogs) / spend.
+    Same order-date cohort as the Profit charts: for orders placed on day D,
+    gross sales = placement value before returns/cancels; ad spend is that day's
+    platform spend; Gross ROAS = gross sales / spend.
     """
     from timeframe_config import get_timeframe_config
     from datetime import timedelta
@@ -635,7 +640,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     end_date_str = end_date.strftime("%Y-%m-%d")
 
     print(
-        f"Building order-date cohort spend/net sales/Net ROAS for "
+        f"Building order-date cohort spend/gross sales/Gross ROAS for "
         f"{start_date_str} → {end_date_str}..."
     )
     try:
@@ -676,18 +681,16 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
             plat.groupby("report_date", as_index=True)
             .agg({
                 "ad_spend": "sum",
-                "net_sales": "sum",
-                "net_cogs": "sum",
+                "gross_sales": "sum",
             })
             .reindex(all_dates)
             .fillna(0.0)
         )
         spend_values = by_day["ad_spend"].tolist()
-        revenue_values = by_day["net_sales"].tolist()
+        revenue_values = by_day["gross_sales"].tolist()
         roas_values = [
-            _channel_net_roas(
-                float(by_day["net_sales"].iloc[i]),
-                float(by_day["net_cogs"].iloc[i]),
+            _channel_gross_roas(
+                float(by_day["gross_sales"].iloc[i]),
                 float(by_day["ad_spend"].iloc[i]),
             )
             for i in range(len(by_day))
@@ -702,7 +705,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
             roas_values,
             channel_label=PLATFORM_LABELS.get(platform, platform.title()),
             n_days=n_days,
-            revenue_label="Net Sales",
+            revenue_label="Gross Sales",
             show_legend=False,
         )
 
@@ -717,7 +720,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     fig.legend(
         handles=[
             Patch(facecolor=PLOT_COLORS["spend"], edgecolor="white", label="Ad Spend"),
-            Patch(facecolor=PLOT_COLORS["revenue"], edgecolor="white", label="Net Sales"),
+            Patch(facecolor=PLOT_COLORS["revenue"], edgecolor="white", label="Gross Sales"),
             Line2D(
                 [0],
                 [0],
@@ -725,7 +728,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
                 marker="o",
                 markersize=4,
                 linewidth=1.6,
-                label="Net ROAS",
+                label="Gross ROAS",
             ),
         ],
         loc="upper center",
@@ -741,7 +744,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     )
 
     fig.suptitle(
-        f"Paid Channel Performance — Ad Spend, Net Sales, and Net ROAS ({n_days} Days)",
+        f"Paid Channel Performance — Ad Spend, Gross Sales, and Gross ROAS ({n_days} Days)",
         fontsize=TYPE_SCALE["title"],
         fontweight="bold",
         color="#1a1a2e",
@@ -750,7 +753,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     fig.text(
         0.5,
         0.962,
-        f"Net ROAS = (Net Sales - COGS) / Ad Spend · "
+        f"Gross ROAS = Gross Sales / Ad Spend · "
         f"hidden when spend < Rs{int(MIN_SPEND_FOR_ROAS)}",
         ha="center",
         va="top",
@@ -779,7 +782,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
 
 def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
     """
-    Legacy blended Daily Spend / Revenue / Net ROAS plot.
+    Legacy blended Daily Spend / Gross Sales / Gross ROAS plot.
     Used when channel-split data is unavailable. Prefer order-date cohort
     P&L series; then DB net-profit; daily_insights_data is unused for values.
     """
@@ -793,7 +796,7 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
     end_str = end_date.strftime("%Y-%m-%d")
     brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
 
-    print("Fetching order-date cohort for blended spend/revenue/Net ROAS...")
+    print("Fetching order-date cohort for blended spend/gross sales/Gross ROAS...")
     db_df = pd.DataFrame()
     try:
         from dashboard_stats import fetch_order_date_cohort_pnl_series
@@ -817,15 +820,16 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
         print(f"Loaded {len(db_df)} days of cohort/DB data for blended plot")
         for _, row in db_df.iterrows():
             date_str = str(row["sale_date"])[:10]
-            revenue = float(row.get("revenue", 0) or 0)
+            # Prefer gross sales; fall back to net revenue for sources that lack it.
+            revenue = float(row.get("gross_sales", 0) or row.get("revenue", 0) or 0)
             cogs = float(row.get("cogs", 0) or 0)
             ad_spend = float(row.get("total_ad_spend", 0) or 0)
-            net_roas = _channel_net_roas(revenue, cogs, ad_spend) or 0.0
+            gross_roas = _channel_gross_roas(revenue, ad_spend) or 0.0
             api_data_lookup[date_str] = {
                 "revenue": revenue,
                 "ad_spend": ad_spend,
                 "cogs": cogs,
-                "net_roas": net_roas,
+                "net_roas": gross_roas,
                 "net_profit": float(row.get("net_profit", 0) or 0),
             }
     else:
@@ -857,9 +861,8 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
             and api_record.get("ad_spend", 0) >= MIN_SPEND_FOR_ROAS
         ):
             revenue = api_record.get("revenue", 0)
-            cogs = api_record.get("cogs", 0)
             ad_spend = api_record.get("ad_spend", 0)
-            net_roas = (revenue - cogs) / ad_spend
+            net_roas = revenue / ad_spend
         roas_values.append(round(net_roas, 2) if net_roas else 0)
 
     if not dates or (
@@ -889,9 +892,10 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
         [v if v else None for v in df["ROAS"]],
         channel_label=f"Blended Paid Performance — Last {n_days} Days",
         n_days=n_days,
+        revenue_label="Gross Sales",
     )
     fig.suptitle(
-        f'Daily Ad Spend, Revenue, and Net ROAS for Last {n_days} Days (blended fallback)',
+        f'Daily Ad Spend, Gross Sales, and Gross ROAS for Last {n_days} Days (blended fallback)',
         fontsize=13,
         fontweight='bold',
         color="#1a1a2e",
@@ -1925,20 +1929,23 @@ def _smooth_series_dates(dates, values, *, points_per_seg: int = 18):
 
 def plot_daily_net_profit_dual_cohort(save_path=None):
     """
-    Consolidated order-date Net Profit for the last 30 days:
+    Order-date profit for the last 30 days, split into two stacked panels on one
+    canvas:
 
-    - Total NP as a smooth green/red line (pos/neg) with a value label on every day
-    - Meta / Google / Amazon as smooth dotted lines (colors distinct from green/red)
+    - Top:    Gross Profit  (gross sales − ad spend − gross COGS; before returns/cancels)
+    - Bottom: Net Profit    (after returns/cancels)
+
+    In each panel the Total is a smooth green/red line (pos/neg) with a value
+    label on every day, and Meta / Google / Amazon are colourblind-safe lines
+    that also differ by dash pattern.
     """
     try:
         from matplotlib.ticker import FuncFormatter
+        from matplotlib.lines import Line2D
         from timeframe_config import get_timeframe_config
-        from dashboard_stats import (
-            fetch_order_date_cohort_pnl_series,
-            fetch_order_date_cohort_rows,
-        )
+        from dashboard_stats import fetch_order_date_cohort_rows
 
-        logger.info("Plotting consolidated order-date net profit (+ channel dotted)...")
+        logger.info("Plotting order-date gross vs net profit (two panels)...")
         tf = get_timeframe_config()
         end_date = tf["end_date"]
         start_date = end_date - pd.Timedelta(days=29)
@@ -1948,207 +1955,153 @@ def plot_daily_net_profit_dual_cohort(save_path=None):
         all_dates = pd.date_range(start_str, end_str, freq="D")
         n_days = len(all_dates)
 
-        event_df = fetch_order_date_cohort_pnl_series(brand_id, start_str, end_str)
-        if event_df is None or event_df.empty:
-            logger.error("No order-date cohort net profit series for dual plot")
-            return None
-        event_df = event_df.copy()
-        event_df["sale_date"] = pd.to_datetime(event_df["sale_date"])
-        event_series = (
-            event_df.set_index("sale_date")["net_profit"]
-            .reindex(all_dates)
-            .fillna(0.0)
-            .astype(float)
-        )
-
         channel_df = fetch_order_date_cohort_rows(brand_id, start_str, end_str)
         if channel_df is None or channel_df.empty:
-            logger.error("No order-date placement rows for dual plot")
+            logger.error("No order-date placement rows for profit plot")
             return None
         channel_df = channel_df.copy()
         channel_df["report_date"] = pd.to_datetime(channel_df["report_date"])
-
-        fig_w = max(13, min(17, 0.42 * n_days + 6))
-        fig, ax = plt.subplots(
-            figsize=(fig_w, 7.2),
-            facecolor="white",
+        # Gross profit per placement row = gross sales − ad spend − gross COGS.
+        channel_df["gross_profit"] = (
+            channel_df["gross_sales"] - channel_df["ad_spend"] - channel_df["gross_cogs"]
         )
+
+        def _channel_series(metric):
+            out = {}
+            for platform in ("meta", "google", "amazon"):
+                plat = channel_df[channel_df["platform"] == platform]
+                out[platform] = (
+                    plat.groupby("report_date")[metric]
+                    .sum()
+                    .reindex(all_dates)
+                    .fillna(0.0)
+                )
+            return out
+
+        def _total_series(metric):
+            return (
+                channel_df.groupby("report_date")[metric]
+                .sum()
+                .reindex(all_dates)
+                .fillna(0.0)
+                .astype(float)
+            )
 
         pos_color = PLOT_COLORS["profit_pos"]
         neg_color = PLOT_COLORS["profit_neg"]
         dates_series = pd.Series(all_dates)
-        net_profits = event_series.values.tolist()
 
-        # Channel dotted lines first (under total) — smoothed
-        for platform in ("meta", "google", "amazon"):
-            plat = channel_df[channel_df["platform"] == platform]
-            series = (
-                plat.groupby("report_date")["net_profit"]
-                .sum()
-                .reindex(all_dates)
-                .fillna(0.0)
+        def _draw_panel(ax, total_series, chan_series, title):
+            totals = total_series.values.tolist()
+            for platform in ("meta", "google", "amazon"):
+                series = chan_series.get(platform)
+                if series is None or series.abs().sum() == 0:
+                    continue
+                color = NP_CHANNEL_LINE_COLORS.get(platform, "#94A3B8")
+                style = NP_CHANNEL_LINE_STYLES.get(platform, NP_CHANNEL_LINE_STYLE)
+                x_s, y_s = _smooth_series_dates(all_dates, series.values, points_per_seg=18)
+                ax.plot(
+                    x_s, y_s, color=color, linestyle=style,
+                    linewidth=NP_CHANNEL_LINE_WIDTH, zorder=2,
+                    alpha=NP_CHANNEL_LINE_ALPHA, solid_capstyle="round", antialiased=True,
+                )
+                ax.plot(
+                    all_dates, series.values, color=color, linestyle="none", marker="o",
+                    markersize=2.2, markerfacecolor=color, markeredgecolor="none",
+                    zorder=2, alpha=NP_CHANNEL_LINE_ALPHA,
+                )
+            _np_line_color_segments(ax, dates_series, totals, pos_color, neg_color, smooth=True)
+            pos = total_series >= 0
+            neg = total_series < 0
+            ax.scatter(all_dates[pos], total_series[pos], color=pos_color, marker="o",
+                       s=22, linewidths=0.5, edgecolors="#15803D", zorder=4)
+            ax.scatter(all_dates[neg], total_series[neg], color=neg_color, marker="o",
+                       s=22, linewidths=0.5, edgecolors="#B91C1C", zorder=4)
+            _annotate_series_no_overlap(
+                ax, list(all_dates), totals, color="#0F172A",
+                fontsize=5.4 if n_days > 24 else 6.0, compact=True, step=1, zorder=6,
             )
-            if series.abs().sum() == 0:
-                continue
-            color = NP_CHANNEL_LINE_COLORS.get(platform, "#94A3B8")
-            x_s, y_s = _smooth_series_dates(all_dates, series.values, points_per_seg=18)
-            ax.plot(
-                x_s,
-                y_s,
-                color=color,
-                linestyle=NP_CHANNEL_LINE_STYLE,
-                linewidth=NP_CHANNEL_LINE_WIDTH,
-                label=PLATFORM_LABELS.get(platform, platform.title()),
-                zorder=2,
-                alpha=NP_CHANNEL_LINE_ALPHA,
-                solid_capstyle="round",
-                antialiased=True,
-            )
-            # Keep daily markers on the raw points
-            ax.plot(
-                all_dates,
-                series.values,
-                color=color,
-                linestyle="none",
-                marker="o",
-                markersize=2.2,
-                markerfacecolor=color,
-                markeredgecolor="none",
-                zorder=2,
-                alpha=NP_CHANNEL_LINE_ALPHA,
-            )
+            ax.axhline(0, color="#999999", linewidth=0.9, zorder=0)
+            ax.set_ylabel("Rs", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
+            ax.set_title(title, fontsize=TYPE_SCALE["title"] - 2, fontweight="bold",
+                         color="#1a1a2e", pad=6, loc="left")
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"Rs{x:,.0f}"))
+            ax.set_facecolor("#FAFBFC")
+            _apply_light_grid(ax)
+            for spine in ("top", "right"):
+                ax.spines[spine].set_visible(False)
+            ax.spines["left"].set_color("#BBBBBB")
+            ax.spines["bottom"].set_color("#BBBBBB")
+            y_min = float(min(total_series.min(), 0.0))
+            y_max = float(max(total_series.max(), 0.0))
+            pad = max(abs(y_max), abs(y_min), 1.0) * 0.40
+            ax.set_ylim(y_min - pad, y_max + pad)
 
-        _np_line_color_segments(
-            ax, dates_series, net_profits, pos_color, neg_color, smooth=True
-        )
-        neg = event_series < 0
-        pos = event_series >= 0
-        ax.scatter(
-            all_dates[pos],
-            event_series[pos],
-            color=pos_color,
-            marker="o",
-            s=24,
-            linewidths=0.5,
-            edgecolors="#15803D",
-            zorder=4,
-            label="Total (profit)",
-        )
-        ax.scatter(
-            all_dates[neg],
-            event_series[neg],
-            color=neg_color,
-            marker="o",
-            s=24,
-            linewidths=0.5,
-            edgecolors="#B91C1C",
-            zorder=4,
-            label="Total (loss)",
-        )
+        gross_total = _total_series("gross_profit")
+        net_total = _total_series("net_profit")
 
-        # Net profit value on every day
-        _annotate_series_no_overlap(
-            ax,
-            list(all_dates),
-            net_profits,
-            color="#0F172A",
-            fontsize=5.8 if n_days > 24 else 6.4,
-            compact=True,
-            step=1,
-            zorder=6,
+        fig_w = max(13, min(17, 0.42 * n_days + 6))
+        fig, (ax_g, ax_n) = plt.subplots(
+            2, 1, figsize=(fig_w, 10.0), facecolor="white", sharex=True,
         )
+        _draw_panel(ax_g, gross_total, _channel_series("gross_profit"),
+                    "Gross Profit — before returns & cancels")
+        _draw_panel(ax_n, net_total, _channel_series("net_profit"),
+                    "Net Profit — after returns & cancels")
 
-        ax.axhline(0, color="#999999", linewidth=0.9, zorder=0)
-        ax.set_xlabel("Date", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
-        ax.set_ylabel("Net Profit (Rs)", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
-        ax.set_title(
-            f"Daily Net Profit Trend by Channel ({start_str} to {end_str})",
-            fontsize=TYPE_SCALE["title"] - 1,
-            fontweight="bold",
-            color="#1a1a2e",
-            pad=8,
-        )
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f"Rs{x:,.0f}"))
-        ax.set_facecolor("#FAFBFC")
-        _apply_light_grid(ax)
-        for spine in ("top", "right"):
-            ax.spines[spine].set_visible(False)
-        ax.spines["left"].set_color("#BBBBBB")
-        ax.spines["bottom"].set_color("#BBBBBB")
-
-        # Headroom so daily labels don't clip
-        y_min = float(min(event_series.min(), channel_df["net_profit"].min()))
-        y_max = float(max(event_series.max(), channel_df["net_profit"].max()))
-        pad = max(abs(y_max), abs(y_min), 1.0) * 0.36
-        ax.set_ylim(y_min - pad, y_max + pad)
-
-        ax.xaxis.set_major_locator(mdates.DayLocator(interval=1))
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+        ax_n.set_xlabel("Date", fontsize=TYPE_SCALE["axis"], color=PLOT_COLORS["text"])
+        ax_n.xaxis.set_major_locator(mdates.DayLocator(interval=1))
+        ax_n.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
         plt.setp(
-            ax.xaxis.get_majorticklabels(),
-            rotation=90,
-            ha="center",
-            fontsize=7 if n_days > 20 else 8,
-            color=PLOT_COLORS["text"],
+            ax_n.xaxis.get_majorticklabels(), rotation=90, ha="center",
+            fontsize=7 if n_days > 20 else 8, color=PLOT_COLORS["text"],
         )
 
-        # Legend: Total + dotted channels
-        from matplotlib.lines import Line2D
+        fig.suptitle(
+            f"Daily Profit Trend by Channel ({start_str} to {end_str})",
+            fontsize=TYPE_SCALE["title"], fontweight="bold", color="#1a1a2e",
+        )
 
         legend_handles = [
-            Line2D([0], [0], color=pos_color, linewidth=2.2, label="Total NP (+)"),
-            Line2D([0], [0], color=neg_color, linewidth=2.2, label="Total NP (−)"),
+            Line2D([0], [0], color=pos_color, linewidth=2.2, label="Total (+)"),
+            Line2D([0], [0], color=neg_color, linewidth=2.2, label="Total (−)"),
         ]
         for platform in ("meta", "google", "amazon"):
             legend_handles.append(
                 Line2D(
-                    [0],
-                    [0],
-                    color=NP_CHANNEL_LINE_COLORS[platform],
-                    linestyle=NP_CHANNEL_LINE_STYLE,
-                    linewidth=NP_CHANNEL_LINE_WIDTH,
-                    marker="o",
-                    markersize=3.0,
-                    alpha=NP_CHANNEL_LINE_ALPHA,
-                    label=PLATFORM_LABELS[platform],
+                    [0], [0], color=NP_CHANNEL_LINE_COLORS[platform],
+                    linestyle=NP_CHANNEL_LINE_STYLES[platform],
+                    linewidth=NP_CHANNEL_LINE_WIDTH, marker="o", markersize=3.0,
+                    alpha=NP_CHANNEL_LINE_ALPHA, label=PLATFORM_LABELS[platform],
                 )
             )
-        ax.legend(
-            handles=legend_handles,
-            loc="upper left",
-            fontsize=TYPE_SCALE["legend"] - 0.5,
-            frameon=True,
-            edgecolor="#DDDDDD",
-            facecolor="white",
-            ncol=2,
-            borderpad=0.4,
-            labelspacing=0.3,
-            columnspacing=1.0,
+        ax_g.legend(
+            handles=legend_handles, loc="upper left",
+            fontsize=TYPE_SCALE["legend"] - 0.5, frameon=True, edgecolor="#DDDDDD",
+            facecolor="white", ncol=5, borderpad=0.4, labelspacing=0.3, columnspacing=1.0,
         )
 
         fig.text(
-            0.5,
-            0.01,
-            "Solid line = Total net profit · Dotted lines = Meta / Google / Amazon",
-            ha="center",
-            fontsize=TYPE_SCALE["subtitle"] - 1,
-            color="#666666",
+            0.5, 0.005,
+            "Solid line = Total profit · Dotted/dashed lines = Meta / Google / Amazon · "
+            "Gross excludes returns & cancels",
+            ha="center", fontsize=TYPE_SCALE["subtitle"] - 1, color="#666666",
         )
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.16, top=0.90)
+        plt.subplots_adjust(bottom=0.11, top=0.93, hspace=0.22)
 
         if save_path:
             d = os.path.dirname(save_path)
             if d:
                 os.makedirs(d, exist_ok=True)
             plt.savefig(save_path, dpi=200, bbox_inches="tight")
-            logger.info("Dual-cohort net profit plot saved as: %s", save_path)
+            logger.info("Gross/net profit two-panel plot saved as: %s", save_path)
             plt.close(fig)
             return save_path
         plt.close(fig)
         return None
     except Exception as e:
-        logger.error("Error plotting dual-cohort net profit: %s", e, exc_info=True)
+        logger.error("Error plotting gross/net profit panels: %s", e, exc_info=True)
         return None
 
 
@@ -2178,8 +2131,9 @@ def plot_hourly_sales_last_7_days(save_path=None):
     Sales by time-of-day for the last 7 days (including today) from shopify_orders.
 
     Uses 30-minute buckets (finer than hourly) from order timestamps.
-    Plots each day faded + a bold 7-day average, both as smooth PCHIP curves.
-    Missing slots are filled with zero so every day covers 00:00–23:30.
+    Plots the average daily profile for the top 5 cities by gross sales, plus a
+    bold all-cities average, all as smooth PCHIP curves (no faded per-day lines).
+    Sales are gross (incl GST). Missing slots are filled with zero.
     """
     try:
         logger.info(
@@ -2199,7 +2153,8 @@ def plot_hourly_sales_last_7_days(save_path=None):
         query = f'''
             SELECT
                 total_price_amount,
-                created_at_ist
+                created_at_ist,
+                COALESCE(NULLIF(TRIM(ship_city), ''), 'Unknown') AS ship_city
             FROM
                 shopify_orders
             WHERE
@@ -2213,8 +2168,7 @@ def plot_hourly_sales_last_7_days(save_path=None):
         if df.empty:
             logger.warning("No shopify_orders data found for the last 7 days.")
             return None
-        if "total_price_amount" in df.columns:
-            df["total_price_amount"] = apply_net_revenue_column(df["total_price_amount"])
+        # Gross sales (incl GST) — no net-revenue adjustment on this chart.
 
         df["created_at_ist"] = pd.to_datetime(df["created_at_ist"])
         # 30-min slot within the day: 0=00:00, 1=00:30, …, 47=23:30
@@ -2224,48 +2178,43 @@ def plot_hourly_sales_last_7_days(save_path=None):
             df["created_at_ist"].dt.hour * (60 // slot_minutes)
             + (df["created_at_ist"].dt.minute // slot_minutes)
         ).astype(int)
-        df["date"] = df["created_at_ist"].dt.date
+        n_window_days = 7  # averaging window (start_date..end_date inclusive)
+        full_slots = pd.Index(range(slots_per_day), name="slot")
 
-        daily = (
-            df.groupby(["date", "slot"])["total_price_amount"]
-            .sum()
-            .reset_index()
+        # Top 5 cities by total gross sales over the window
+        top_cities = (
+            df.groupby("ship_city")["total_price_amount"].sum().nlargest(5).index.tolist()
         )
-        all_slots = pd.Series(range(slots_per_day), name="slot")
-        all_dates = pd.Series(sorted(daily["date"].unique()), name="date")
-        full_index = pd.MultiIndex.from_product(
-            [all_dates, all_slots], names=["date", "slot"]
+        # Per-city average daily profile = summed sales per slot / window days
+        city_slot_sum = (
+            df[df["ship_city"].isin(top_cities)]
+            .groupby(["ship_city", "slot"])["total_price_amount"].sum()
         )
-        daily_full = (
-            daily.set_index(["date", "slot"])
-            .reindex(full_index, fill_value=0)
-            .reset_index()
+        overall_avg = (
+            df.groupby("slot")["total_price_amount"].sum()
+            .reindex(full_slots, fill_value=0) / n_window_days
         )
-        pivot = daily_full.pivot(index="slot", columns="date", values="total_price_amount")
-        slot_mean = pivot.mean(axis=1)
 
         sns.set_style("whitegrid")
         fig, ax = plt.subplots(figsize=(14, 6.4))
-        x = pivot.index.to_numpy(dtype=float)
+        x = np.asarray(full_slots, dtype=float)
 
-        color_palette = sns.color_palette("tab10", n_colors=len(pivot.columns))
-        for date, color in zip(pivot.columns, color_palette):
-            y = pivot[date].to_numpy(dtype=float)
+        # Colourblind-safe (Okabe-Ito), distinct from the black average line
+        city_colors = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#D55E00"]
+        for city, color in zip(top_cities, city_colors):
+            y = (
+                city_slot_sum.loc[city].reindex(full_slots, fill_value=0).to_numpy(dtype=float)
+                / n_window_days
+            )
             x_s, y_s = _smooth_numeric_series(x, y, points_per_seg=12)
             ax.plot(
-                x_s,
-                y_s,
-                color=color,
-                alpha=0.28,
-                linewidth=1.15,
-                solid_capstyle="round",
-                solid_joinstyle="round",
-                antialiased=True,
-                zorder=2,
+                x_s, y_s, color=color, alpha=0.95, linewidth=1.8,
+                solid_capstyle="round", solid_joinstyle="round",
+                antialiased=True, zorder=3, label=str(city),
             )
 
         x_avg, y_avg = _smooth_numeric_series(
-            x, slot_mean.to_numpy(dtype=float), points_per_seg=16
+            x, overall_avg.to_numpy(dtype=float), points_per_seg=16
         )
         ax.plot(
             x_avg,
@@ -2275,22 +2224,9 @@ def plot_hourly_sales_last_7_days(save_path=None):
             linestyle="-",
             solid_capstyle="round",
             solid_joinstyle="round",
-            label="7-day average",
+            label="All cities avg",
             zorder=4,
             antialiased=True,
-        )
-        # Markers on real 30-min average points (every other for readability)
-        ax.plot(
-            x[::2],
-            slot_mean.values[::2],
-            color="black",
-            linestyle="none",
-            marker="o",
-            markersize=2.6,
-            markerfacecolor="black",
-            markeredgecolor="white",
-            markeredgewidth=0.4,
-            zorder=5,
         )
 
         # Tick every hour (even slots); minor feel via labels HH:00
@@ -2302,15 +2238,15 @@ def plot_hourly_sales_last_7_days(save_path=None):
         )
         ax.set_xlim(-0.5, slots_per_day - 0.5)
         ax.set_xlabel("Hour of Day (30-min buckets)", fontsize=TYPE_SCALE["axis"])
-        ax.set_ylabel("Total Sales (Rs)", fontsize=TYPE_SCALE["axis"])
+        ax.set_ylabel("Avg Sales (Rs)", fontsize=TYPE_SCALE["axis"])
         ax.tick_params(axis="y", labelsize=TYPE_SCALE["tick"] - 1)
         ax.set_title(
-            "Sales by Time of Day — Last 7 Days (30-min)",
+            "Sales by Time of Day — Top 5 Cities, Last 7 Days (30-min)",
             fontsize=TYPE_SCALE["title"],
             fontweight="bold",
             pad=12,
         )
-        ax.legend(loc="upper left", fontsize=TYPE_SCALE["legend"] - 1, frameon=True)
+        ax.legend(loc="upper left", fontsize=TYPE_SCALE["legend"] - 1, frameon=True, ncol=2)
         from matplotlib.ticker import FuncFormatter
 
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"₹{v:,.0f}"))

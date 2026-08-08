@@ -25,18 +25,18 @@
       <table width="100%" cellpadding="0" cellspacing="0">
         <tr>
           {% set kpis = [
-            ('Revenue', total.sales | fmt_inr, total.sales_delta),
+            ('Revenue', (total.gross_sales or total.sales) | fmt_inr, total.sales_delta),
             ('Ad Spend', total.ad_spend | fmt_inr, None),
-            ('Net Profit', total.net_profit | fmt_inr, total.profit_delta),
+            ('Gross Profit', total.gross_profit | fmt_inr, total.profit_delta),
+            ('AOV', total.aov | fmt_inr, None),
             ('Gross ROAS', (total.dashboard_gross_roas or total.gross_roas) | fmt_roas, None),
-            ('BE ROAS', total.be_roas | fmt_roas, None),
           ] %}
           {% for label, value, delta in kpis %}
-          <td width="20%" style="padding:18px 8px;text-align:center;border-right:{{ '1px solid #16213e' if not loop.last else 'none' }};">
-            <div style="font-size:10px;color:#8892b0;text-transform:uppercase;letter-spacing:1px;">{{ label }}</div>
-            <div style="font-size:18px;font-weight:700;color:{% if label == 'Net Profit' and total.net_profit < 0 %}#f87171{% else %}#e2e8f0{% endif %};margin-top:4px;white-space:nowrap;">{{ value }}</div>
+          <td width="20%" valign="top" style="padding:20px 6px 18px 6px;text-align:center;">
+            <div style="font-size:9px;color:#8892b0;text-transform:uppercase;letter-spacing:0.6px;line-height:12px;height:12px;white-space:nowrap;">{{ label }}</div>
+            <div style="font-size:18px;font-weight:700;color:{% if label == 'Gross Profit' and total.gross_profit < 0 %}#f87171{% else %}#e2e8f0{% endif %};margin-top:8px;white-space:nowrap;">{{ value }}</div>
             {% if delta %}
-            <div style="font-size:10px;color:{{ '#4ade80' if delta.startswith('+') else '#f87171' }};margin-top:2px;">{{ delta }} vs yesterday</div>
+            <div style="font-size:9px;color:{{ '#4ade80' if delta.startswith('+') else '#f87171' }};margin-top:3px;white-space:nowrap;">{{ delta }} vs yesterday</div>
             {% endif %}
           </td>
           {% endfor %}

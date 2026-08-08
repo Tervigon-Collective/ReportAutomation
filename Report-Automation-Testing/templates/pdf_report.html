@@ -244,9 +244,9 @@
     <td class="kpi-card"><div class="kpi-label">Gross Profit</div><div class="kpi-value {{ 'pos' if total.gross_profit >= 0 else 'neg' }}">{{ total.gross_profit | fmt_inr }}</div><div class="kpi-sub">Gross rev &minus; spend &minus; gross COGS</div></td>
   </tr>
   <tr>
-    <td class="kpi-card"><div class="kpi-label">Net COGS</div><div class="kpi-value">{{ total.cogs | fmt_inr }}</div><div class="kpi-sub">After returns / cancels</div></td>
-    <td class="kpi-card"><div class="kpi-label">Net Profit</div><div class="kpi-value {{ 'pos' if total.net_profit >= 0 else 'neg' }}">{{ total.net_profit | fmt_inr }}</div><div class="kpi-sub">Net sales &minus; spend &minus; net COGS</div></td>
-    <td class="kpi-card"><div class="kpi-label">Net ROAS</div><div class="kpi-value">{{ total.net_roas | fmt_roas }}</div><div class="kpi-sub">Contribution / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">Gross ROAS</div><div class="kpi-value">{{ (total.dashboard_gross_roas or total.gross_roas) | fmt_roas }}</div><div class="kpi-sub">Gross sales / ad spend</div></td>
+    <td class="kpi-card"><div class="kpi-label">BE ROAS</div><div class="kpi-value">{{ total.be_roas | fmt_roas }}</div><div class="kpi-sub">Break-even target</div></td>
+    <td class="kpi-card"><div class="kpi-label">AOV</div><div class="kpi-value">{{ total.aov | fmt_inr }}</div><div class="kpi-sub">Actual order value, incl GST</div></td>
     <td class="kpi-card"><div class="kpi-label">Orders</div><div class="kpi-value">{{ total.order_count | fmt_num }}</div><div class="kpi-sub">Placement period</div></td>
   </tr>
 </table>
@@ -352,7 +352,7 @@
       {% endif %}
     </table>
   </td></tr>
-  <tr class="card-foot"><td>On-site LP / Add-to-Cart / Checkout stages are Meta-only; Google shows the ad-delivery funnel.</td></tr>
+  <tr class="card-foot"><td>On-site LP / Add-to-Cart stages are Meta-only; Google shows the ad-delivery funnel.</td></tr>
 </table>
 {% endif %}
 

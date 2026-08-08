@@ -393,12 +393,6 @@ def build_meta_funnel_rows(funnel: dict | None) -> list[dict]:
             drop_off=f.get("drop_off_landing_to_cart"),
         ),
         _funnel_row(
-            "Checkout",
-            f.get("initiate_checkout"),
-            rate=f.get("checkout_rate"),
-            drop_off=f.get("drop_off_cart_to_checkout"),
-        ),
-        _funnel_row(
             "Orders",
             f.get("orders"),
             rate=f.get("conversion_rate"),
@@ -444,12 +438,6 @@ def build_google_funnel_rows(funnel: dict | None) -> list[dict]:
             g.get("add_to_cart"),
             rate=g.get("add_to_cart_rate"),
             drop_off=g.get("drop_off_landing_to_cart"),
-        ),
-        _funnel_row(
-            "Checkout",
-            g.get("checkout"),
-            rate=g.get("checkout_rate"),
-            drop_off=g.get("drop_off_cart_to_checkout"),
         ),
         _funnel_row(
             "Orders",
@@ -1100,7 +1088,7 @@ def build_daily_pdf_context(
     #   Gross ROAS   = Gross Sales / Ad Spend
     total = dict(total)
     for k in ("sales", "gross_sales", "ad_spend", "cogs", "gross_cogs",
-              "net_profit", "gross_roas", "net_roas", "be_roas", "order_count", "cpp"):
+              "net_profit", "gross_roas", "net_roas", "be_roas", "order_count", "cpp", "aov"):
         if total.get(k) is None:
             total[k] = 0
     # Degrade for the fallback source (no gross split available).

@@ -613,20 +613,24 @@ amz_item_pnl AS (
     ai.pnl_refund_status AS pnl_refund_status,
     ai.product_cost AS product_cost,
     coalesce(ap.payout_basis, 'NONE') AS payout_basis,
+    -- ClickHouse LEFT JOIN fills missing String keys as '' (not NULL). Treat
+    -- empty(ap.amazon_order_id) as "no PnL yet" and fall back to item_gross —
+    -- same as the dashboard amazonHistoricalHelpers path. Otherwise same-day
+    -- Amazon orders post COGS with ₹0 revenue → fake 0.00 / negative ROAS cliffs.
     if(
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
-        coalesce(ap.gross_revenue, 0) * (ai.item_gross / og.order_gross_total),
-        if(ap.amazon_order_id IS NULL, ai.item_gross, toFloat64(0))
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
+        coalesce(ap.gross_revenue, ai.item_gross) * (ai.item_gross / og.order_gross_total),
+        ai.item_gross
       )
     ) AS item_revenue,
     if(
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.refund_amount, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )
@@ -635,7 +639,7 @@ amz_item_pnl AS (
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.commission, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )
@@ -644,7 +648,7 @@ amz_item_pnl AS (
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.closing, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )
@@ -653,7 +657,7 @@ amz_item_pnl AS (
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.shipping, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )
@@ -662,7 +666,7 @@ amz_item_pnl AS (
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.tax_withheld, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )
@@ -671,7 +675,7 @@ amz_item_pnl AS (
       coalesce(ap.payout_basis, 'NONE') = 'NONE' AND ai.pnl_refund_status = 'CANCELLATION',
       toFloat64(0),
       if(
-        coalesce(og.order_gross_total, 0) > 0 AND ap.amazon_order_id IS NOT NULL,
+        NOT empty(ap.amazon_order_id) AND coalesce(og.order_gross_total, 0) > 0,
         coalesce(ap.other_fees, 0) * (ai.item_gross / og.order_gross_total),
         toFloat64(0)
       )

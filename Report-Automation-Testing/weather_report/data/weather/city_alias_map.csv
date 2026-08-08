@@ -1,0 +1,511 @@
+alias_id,raw_city_normalized,raw_state_normalized,city_id,canonical_city,match_method,confidence_score,reviewed,created_at
+1,delhi ncr,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+2,mumbai,maharashtra,2,Mumbai,alias,100,True,2026-06-26
+3,bengaluru,karnataka,3,Bengaluru,alias,100,True,2026-06-26
+4,hyderabad,telangana,4,Hyderabad,alias,100,True,2026-06-26
+5,chennai,tamil nadu,5,Chennai,alias,100,True,2026-06-26
+6,kolkata,west bengal,6,Kolkata,alias,100,True,2026-06-26
+7,pune,maharashtra,7,Pune,alias,100,True,2026-06-26
+8,ahmedabad,gujarat,8,Ahmedabad,alias,100,True,2026-06-26
+9,jaipur,rajasthan,9,Jaipur,alias,100,True,2026-06-26
+10,surat,gujarat,10,Surat,alias,100,True,2026-06-26
+11,lucknow,uttar pradesh,11,Lucknow,alias,100,True,2026-06-26
+12,kanpur,uttar pradesh,12,Kanpur,alias,100,True,2026-06-26
+13,nagpur,maharashtra,13,Nagpur,alias,100,True,2026-06-26
+14,indore,madhya pradesh,14,Indore,alias,100,True,2026-06-26
+15,bhopal,madhya pradesh,15,Bhopal,alias,100,True,2026-06-26
+16,patna,bihar,16,Patna,alias,100,True,2026-06-26
+17,vadodara,gujarat,17,Vadodara,alias,100,True,2026-06-26
+18,ludhiana,punjab,18,Ludhiana,alias,100,True,2026-06-26
+19,coimbatore,tamil nadu,19,Coimbatore,alias,100,True,2026-06-26
+20,kochi,kerala,20,Kochi,alias,100,True,2026-06-26
+21,thiruvananthapuram,kerala,21,Thiruvananthapuram,alias,100,True,2026-06-26
+22,kozhikode,kerala,22,Kozhikode,alias,100,True,2026-06-26
+23,mysuru,karnataka,23,Mysuru,alias,100,True,2026-06-26
+24,mangaluru,karnataka,24,Mangaluru,alias,100,True,2026-06-26
+25,vijayawada,andhra pradesh,25,Vijayawada,alias,100,True,2026-06-26
+26,visakhapatnam,andhra pradesh,26,Visakhapatnam,alias,100,True,2026-06-26
+27,bhubaneswar,odisha,27,Bhubaneswar,alias,100,True,2026-06-26
+28,cuttack,odisha,28,Cuttack,alias,100,True,2026-06-26
+29,guwahati,assam,29,Guwahati,alias,100,True,2026-06-26
+30,shillong,meghalaya,30,Shillong,alias,100,True,2026-06-26
+31,agartala,tripura,31,Agartala,alias,100,True,2026-06-26
+32,ranchi,jharkhand,32,Ranchi,alias,100,True,2026-06-26
+33,jamshedpur,jharkhand,33,Jamshedpur,alias,100,True,2026-06-26
+34,raipur,chhattisgarh,34,Raipur,alias,100,True,2026-06-26
+35,bilaspur,chhattisgarh,35,Bilaspur,alias,100,True,2026-06-26
+36,nashik,maharashtra,36,Nashik,alias,100,True,2026-06-26
+37,aurangabad,maharashtra,37,Aurangabad,alias,100,True,2026-06-26
+38,kolhapur,maharashtra,38,Kolhapur,alias,100,True,2026-06-26
+39,goa,goa,39,Goa,alias,100,True,2026-06-26
+40,rajkot,gujarat,40,Rajkot,alias,100,True,2026-06-26
+41,jodhpur,rajasthan,41,Jodhpur,alias,100,True,2026-06-26
+42,udaipur,rajasthan,42,Udaipur,alias,100,True,2026-06-26
+43,kota,rajasthan,43,Kota,alias,100,True,2026-06-26
+44,chandigarh tricity,chandigarh punjab haryana,44,Chandigarh Tricity,alias,100,True,2026-06-26
+45,amritsar,punjab,45,Amritsar,alias,100,True,2026-06-26
+46,jalandhar,punjab,46,Jalandhar,alias,100,True,2026-06-26
+47,dehradun,uttarakhand,47,Dehradun,alias,100,True,2026-06-26
+48,haridwar,uttarakhand,48,Haridwar,alias,100,True,2026-06-26
+49,varanasi,uttar pradesh,49,Varanasi,alias,100,True,2026-06-26
+50,prayagraj,uttar pradesh,50,Prayagraj,alias,100,True,2026-06-26
+51,agra,uttar pradesh,51,Agra,alias,100,True,2026-06-26
+52,meerut,uttar pradesh,52,Meerut,alias,100,True,2026-06-26
+53,gorakhpur,uttar pradesh,53,Gorakhpur,alias,100,True,2026-06-26
+54,bareilly,uttar pradesh,54,Bareilly,alias,100,True,2026-06-26
+55,gwalior,madhya pradesh,55,Gwalior,alias,100,True,2026-06-26
+56,jabalpur,madhya pradesh,56,Jabalpur,alias,100,True,2026-06-26
+57,ujjain,madhya pradesh,57,Ujjain,alias,100,True,2026-06-26
+58,madurai,tamil nadu,58,Madurai,alias,100,True,2026-06-26
+59,tiruchirappalli,tamil nadu,59,Tiruchirappalli,alias,100,True,2026-06-26
+60,salem,tamil nadu,60,Salem,alias,100,True,2026-06-26
+61,tiruppur,tamil nadu,61,Tiruppur,alias,100,True,2026-06-26
+62,hubballi dharwad,karnataka,62,Hubballi-Dharwad,alias,100,True,2026-06-26
+63,belagavi,karnataka,63,Belagavi,alias,100,True,2026-06-26
+64,warangal,telangana,64,Warangal,alias,100,True,2026-06-26
+65,tirupati,andhra pradesh,65,Tirupati,alias,100,True,2026-06-26
+66,nellore,andhra pradesh,66,Nellore,alias,100,True,2026-06-26
+67,guntur,andhra pradesh,67,Guntur,alias,100,True,2026-06-26
+68,durgapur,west bengal,68,Durgapur,alias,100,True,2026-06-26
+69,siliguri,west bengal,69,Siliguri,alias,100,True,2026-06-26
+70,asansol,west bengal,70,Asansol,alias,100,True,2026-06-26
+71,imphal,manipur,71,Imphal,alias,100,True,2026-06-26
+72,aizawl,mizoram,72,Aizawl,alias,100,True,2026-06-26
+73,kohima,nagaland,73,Kohima,alias,100,True,2026-06-26
+74,gangtok,sikkim,74,Gangtok,alias,100,True,2026-06-26
+75,puducherry,puducherry,75,Puducherry,alias,100,True,2026-06-26
+76,delhi,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+77,new delhi,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+78,gurgaon,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+79,gurugram,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+80,noida,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+81,faridabad,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+82,ghaziabad,delhi haryana uttar pradesh,1,Delhi NCR,alias,100,True,2026-06-26
+83,bombay,maharashtra,2,Mumbai,alias,100,True,2026-06-26
+84,navi mumbai,maharashtra,2,Mumbai,alias,100,True,2026-06-26
+85,thane,maharashtra,2,Mumbai,alias,100,True,2026-06-26
+86,bangalore,karnataka,3,Bengaluru,alias,100,True,2026-06-26
+87,secunderabad,telangana,4,Hyderabad,alias,100,True,2026-06-26
+88,madras,tamil nadu,5,Chennai,alias,100,True,2026-06-26
+89,calcutta,west bengal,6,Kolkata,alias,100,True,2026-06-26
+90,howrah,west bengal,6,Kolkata,alias,100,True,2026-06-26
+91,pimpri chinchwad,maharashtra,7,Pune,alias,100,True,2026-06-26
+92,pcmc,maharashtra,7,Pune,alias,100,True,2026-06-26
+93,amdavad,gujarat,8,Ahmedabad,alias,100,True,2026-06-26
+94,gandhinagar,gujarat,8,Ahmedabad,alias,100,True,2026-06-26
+95,lko,uttar pradesh,11,Lucknow,alias,100,True,2026-06-26
+96,cawnpore,uttar pradesh,12,Kanpur,alias,100,True,2026-06-26
+97,baroda,gujarat,17,Vadodara,alias,100,True,2026-06-26
+98,kovai,tamil nadu,19,Coimbatore,alias,100,True,2026-06-26
+99,cochin,kerala,20,Kochi,alias,100,True,2026-06-26
+100,ernakulam,kerala,20,Kochi,alias,100,True,2026-06-26
+101,trivandrum,kerala,21,Thiruvananthapuram,alias,100,True,2026-06-26
+102,calicut,kerala,22,Kozhikode,alias,100,True,2026-06-26
+103,mysore,karnataka,23,Mysuru,alias,100,True,2026-06-26
+104,mangalore,karnataka,24,Mangaluru,alias,100,True,2026-06-26
+105,bezawada,andhra pradesh,25,Vijayawada,alias,100,True,2026-06-26
+106,vizag,andhra pradesh,26,Visakhapatnam,alias,100,True,2026-06-26
+107,bbsr,odisha,27,Bhubaneswar,alias,100,True,2026-06-26
+108,gauhati,assam,29,Guwahati,alias,100,True,2026-06-26
+109,tatanagar,jharkhand,33,Jamshedpur,alias,100,True,2026-06-26
+110,nasik,maharashtra,36,Nashik,alias,100,True,2026-06-26
+111,chhatrapati sambhajinagar,maharashtra,37,Aurangabad,alias,100,True,2026-06-26
+112,panaji,goa,39,Goa,alias,100,True,2026-06-26
+113,panjim,goa,39,Goa,alias,100,True,2026-06-26
+114,mapusa,goa,39,Goa,alias,100,True,2026-06-26
+115,margao,goa,39,Goa,alias,100,True,2026-06-26
+116,chandigarh,chandigarh punjab haryana,44,Chandigarh Tricity,alias,100,True,2026-06-26
+117,mohali,chandigarh punjab haryana,44,Chandigarh Tricity,alias,100,True,2026-06-26
+118,panchkula,chandigarh punjab haryana,44,Chandigarh Tricity,alias,100,True,2026-06-26
+119,zirakpur,chandigarh punjab haryana,44,Chandigarh Tricity,alias,100,True,2026-06-26
+120,doon,uttarakhand,47,Dehradun,alias,100,True,2026-06-26
+121,banaras,uttar pradesh,49,Varanasi,alias,100,True,2026-06-26
+122,benares,uttar pradesh,49,Varanasi,alias,100,True,2026-06-26
+123,kashi,uttar pradesh,49,Varanasi,alias,100,True,2026-06-26
+124,allahabad,uttar pradesh,50,Prayagraj,alias,100,True,2026-06-26
+125,trichy,tamil nadu,59,Tiruchirappalli,alias,100,True,2026-06-26
+126,tiruchi,tamil nadu,59,Tiruchirappalli,alias,100,True,2026-06-26
+127,tirupur,tamil nadu,61,Tiruppur,alias,100,True,2026-06-26
+128,hubballi,karnataka,62,Hubballi-Dharwad,alias,100,True,2026-06-26
+129,hubli,karnataka,62,Hubballi-Dharwad,alias,100,True,2026-06-26
+130,dharwad,karnataka,62,Hubballi-Dharwad,alias,100,True,2026-06-26
+131,hubli dharwad,karnataka,62,Hubballi-Dharwad,alias,100,True,2026-06-26
+132,belgaum,karnataka,63,Belagavi,alias,100,True,2026-06-26
+133,pondicherry,puducherry,75,Puducherry,alias,100,True,2026-06-26
+134,ahmadabad,gujarat,8,Ahmedabad,state_aware_fuzzy,89,False,2026-06-26
+135,new dephi,delhi,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+136,newdelhi,delhi,1,Delhi NCR,state_aware_fuzzy,94,False,2026-06-26
+137,banglore,karnataka,3,Bengaluru,state_aware_fuzzy,94,False,2026-06-26
+138,chennsi,tamil nadu,5,Chennai,state_aware_fuzzy,86,False,2026-06-26
+139,faridavad,haryana,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+140,deheradun,uttarakhand,47,Dehradun,state_aware_fuzzy,94,False,2026-06-26
+141,ahemdabad,gujarat,8,Ahmedabad,state_aware_fuzzy,89,False,2026-06-26
+142,dehi,delhi,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+143,visakhapatanam,andhra pradesh,26,Visakhapatnam,fuzzy,96,False,2026-06-26
+144,bengalore,karnataka,3,Bengaluru,state_aware_fuzzy,89,False,2026-06-26
+145,mmbai,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+146,pun e,maharashtra,7,Pune,state_aware_fuzzy,89,False,2026-06-26
+147,brngaluru,karnataka,3,Bengaluru,state_aware_fuzzy,89,False,2026-06-26
+148,gandhi nagar,gujarat,8,Ahmedabad,fuzzy,96,False,2026-06-26
+149,faridabd,haryana,1,Delhi NCR,state_aware_fuzzy,94,False,2026-06-26
+150,bqngalore,karnataka,3,Bengaluru,state_aware_fuzzy,89,False,2026-06-26
+151,gaziabad,uttar pradesh,1,Delhi NCR,state_aware_fuzzy,94,False,2026-06-26
+152,hyderebad,telangana,4,Hyderabad,state_aware_fuzzy,89,False,2026-06-26
+153,kochin,kerala,20,Kochi,state_aware_fuzzy,91,False,2026-06-26
+154,new delhi no,delhi,1,Delhi NCR,state_aware_fuzzy,86,False,2026-06-26
+155,mymbai,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+156,chandighar,chandigarh,44,Chandigarh Tricity,state_aware_fuzzy,90,False,2026-06-26
+157,nee delhi,delhi,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+158,hopal,madhya pradesh,15,Bhopal,state_aware_fuzzy,91,False,2026-06-26
+159,mimbai,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+160,gurugrsm,haryana,1,Delhi NCR,state_aware_fuzzy,88,False,2026-06-26
+161,thaane,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+162,ahmedabd,gujarat,8,Ahmedabad,state_aware_fuzzy,94,False,2026-06-26
+163,mumba,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+164,delhi (ncr),haryana,1,Delhi NCR,state_aware_fuzzy,90,False,2026-06-26
+165,bangalote,karnataka,3,Bengaluru,state_aware_fuzzy,89,False,2026-06-26
+166,mmumbai,maharashtra,2,Mumbai,state_aware_fuzzy,92,False,2026-06-26
+167,hyderbad,telangana,4,Hyderabad,state_aware_fuzzy,94,False,2026-06-26
+168,new delhk,delhi,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+169,bhubaneshwar,odisha,27,Bhubaneswar,fuzzy,96,False,2026-06-26
+170,chemnai,tamil nadu,5,Chennai,state_aware_fuzzy,86,False,2026-06-26
+171,new dekhi,delhi,1,Delhi NCR,state_aware_fuzzy,89,False,2026-06-26
+172,hyderabadad,telangana,4,Hyderabad,state_aware_fuzzy,90,False,2026-06-26
+173,gurgaun,haryana,1,Delhi NCR,state_aware_fuzzy,86,False,2026-06-26
+174,gudgaon,haryana,1,Delhi NCR,state_aware_fuzzy,86,False,2026-06-26
+175,secundrabad,telangana,4,Hyderabad,fuzzy,96,False,2026-06-26
+176,mumbi,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+177,mumbai suburban,,2,Mumbai,manual,100,True,2026-06-26
+178,mumbai subueban,,2,Mumbai,manual,100,True,2026-06-26
+179,mumbai city,,2,Mumbai,manual,100,True,2026-06-26
+180,mumbai city south division,,2,Mumbai,manual,100,True,2026-06-26
+181,thane west,,2,Mumbai,manual,100,True,2026-06-26
+182,mira bhayandar,,2,Mumbai,manual,100,True,2026-06-26
+183,raigarh mh,,2,Mumbai,manual,100,True,2026-06-26
+184,raigarh(mh),,2,Mumbai,manual,100,True,2026-06-26
+185,south delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+186,south west delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+187,south east delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+188,west delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+189,east delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+190,north delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+191,north west delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+192,north east delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+193,central delhi,,1,Delhi NCR,manual,100,True,2026-06-26
+194,gautam buddha nagar,,1,Delhi NCR,manual,100,True,2026-06-26
+195,greater noida,,1,Delhi NCR,manual,100,True,2026-06-26
+196,rangareddy,,4,Hyderabad,manual,100,True,2026-06-26
+197,ranga reddy,,4,Hyderabad,manual,100,True,2026-06-26
+198,k v rangareddy,,4,Hyderabad,manual,100,True,2026-06-26
+199,medchal malkajgiri,,4,Hyderabad,manual,100,True,2026-06-26
+200,nanakramguda hyderabad,,4,Hyderabad,manual,100,True,2026-06-26
+201,hyd,,4,Hyderabad,manual,100,True,2026-06-26
+202,bengaluru urban,,3,Bengaluru,manual,100,True,2026-06-26
+203,bengaluru rural,,3,Bengaluru,manual,100,True,2026-06-26
+204,bangalore urban,,3,Bengaluru,manual,100,True,2026-06-26
+205,bangalore rural,,3,Bengaluru,manual,100,True,2026-06-26
+206,north goa,,39,Goa,manual,100,True,2026-06-26
+207,south goa,,39,Goa,manual,100,True,2026-06-26
+208,pune city,,7,Pune,manual,100,True,2026-06-26
+209,kanpur nagar,,12,Kanpur,manual,100,True,2026-06-26
+210,noida gautam buddha nagar,uttar pradesh,1,Delhi NCR,state_aware_fuzzy,86,False,2026-06-26
+211,mumbaj,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+212,mumbay,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+213,k v rangareddytele,telangana,4,Hyderabad,state_aware_fuzzy,88,False,2026-06-26
+214,mumbau,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-06-26
+215,gautam budh nagar,uttar pradesh,1,Delhi NCR,state_aware_fuzzy,94,False,2026-06-26
+216,sangareddy,telangana,4,Hyderabad,state_aware_fuzzy,90,False,2026-06-26
+217,bally,west bengal,6,Kolkata,llm,90,False,2026-06-26
+218,old goa bangunium,goa,39,Goa,llm,85,False,2026-06-26
+219,porvorim,goa,39,Goa,llm,90,False,2026-06-26
+220,west tripura,tripura,31,Agartala,llm,80,False,2026-06-26
+221,khorda,odisha,27,Bhubaneswar,llm,85,False,2026-06-26
+222,nipani,karnataka,63,Belagavi,llm,80,False,2026-06-26
+223,south east,delhi,1,Delhi NCR,llm,90,False,2026-06-26
+224,betalbatim,goa,39,Goa,llm,90,False,2026-06-26
+225,ambattur chennai,tamil nadu,5,Chennai,llm,95,False,2026-06-26
+226,dakshina kannada,karnataka,24,Mangaluru,llm,85,False,2026-06-26
+227,bamphakuda cuttack,odisha,28,Cuttack,llm,90,False,2026-06-26
+228,mahe,kerala,75,Puducherry,llm,95,False,2026-06-26
+229,panvel,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+230,wagholi,maharashtra,7,Pune,llm,90,False,2026-06-26
+231,kumbalagodu,karnataka,3,Bengaluru,llm,90,False,2026-06-26
+232,siliguri darjiling,west bengal,69,Siliguri,llm,95,False,2026-06-26
+233,thane mumbai,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+234,thiruvallur,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+235,yapral secunderabad,telangana,4,Hyderabad,llm,90,False,2026-06-26
+236,mumbai mmr,maharashtra,2,Mumbai,llm,100,False,2026-06-26
+237,south,delhi,1,Delhi NCR,llm,80,False,2026-06-26
+238,shivajinagar pune,maharashtra,7,Pune,llm,95,False,2026-06-26
+239,talegaon 3,maharashtra,7,Pune,llm,85,False,2026-06-26
+240,bangalore north,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+241,bangalore south,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+242,mazgaon mumbai 10,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+243,pume,maharashtra,7,Pune,llm,90,False,2026-06-26
+244,bengaluru janatha colony,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+245,east singhbhum,jharkhand,33,Jamshedpur,llm,90,False,2026-06-26
+246,malad east,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+247,rajanukunte,karnataka,3,Bengaluru,llm,90,False,2026-06-26
+248,sonipat,haryana,1,Delhi NCR,llm,90,False,2026-06-26
+249,chennainai,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+250,nanakramguda,telangana,4,Hyderabad,llm,90,False,2026-06-26
+251,new town,west bengal,6,Kolkata,llm,90,False,2026-06-26
+252,kuntloor hyderabad,telangana,4,Hyderabad,llm,95,False,2026-06-26
+253,sahibzada ajit singh nagar,punjab,44,Chandigarh Tricity,llm,95,False,2026-06-26
+254,west,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+255,dombivli,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+256,haralur,karnataka,3,Bengaluru,llm,85,False,2026-06-26
+257,mansoorabad hyderabad,telangana,4,Hyderabad,llm,95,False,2026-06-26
+258,24 paraganas south,west bengal,6,Kolkata,llm,80,False,2026-06-26
+259,central,delhi,1,Delhi NCR,llm,80,False,2026-06-26
+260,delhj,delhi,1,Delhi NCR,llm,90,False,2026-06-26
+261,dholka,gujarat,8,Ahmedabad,llm,85,False,2026-06-26
+262,gurugram meoka,haryana,1,Delhi NCR,llm,90,False,2026-06-26
+263,kalyan west,maharashtra,2,Mumbai,llm,80,False,2026-06-26
+264,panvel navi mumbai,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+265,pimpripune,maharashtra,7,Pune,llm,90,False,2026-06-26
+266,chennai city south,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+267,maharashtra mumbai,maharashtra,2,Mumbai,llm,85,False,2026-06-26
+268,new delhi south west,delhi,1,Delhi NCR,llm,90,False,2026-06-26
+269,pattabiram,tamil nadu,5,Chennai,llm,85,False,2026-06-26
+270,virar vasai,maharashtra,2,Mumbai,llm,85,False,2026-06-26
+271,bengaluru karnataka,karnataka,3,Bengaluru,llm,100,False,2026-06-26
+272,chennai city corporation,tamil nadu,5,Chennai,llm,95,False,2026-06-26
+273,kakkanad,kerala,20,Kochi,llm,90,False,2026-06-26
+274,kanpur nagarkanpur,uttar pradesh,12,Kanpur,llm,90,False,2026-06-26
+275,new dlehj,delhi,1,Delhi NCR,llm,90,False,2026-06-26
+276,perumbavoor,kerala,20,Kochi,llm,85,False,2026-06-26
+277,pollachi,tamil nadu,19,Coimbatore,llm,85,False,2026-06-26
+278,thvim,goa,39,Goa,llm,85,False,2026-06-26
+279,benaulim,goa,39,Goa,llm,90,False,2026-06-26
+280,electronic city,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+281,paneer derlakatte,karnataka,24,Mangaluru,llm,90,False,2026-06-26
+282,vanasthalipuram,telangana,4,Hyderabad,llm,95,False,2026-06-26
+283,ch sambhajinagar,maharashtra,37,Aurangabad,llm,95,False,2026-06-26
+284,east,delhi,1,Delhi NCR,llm,90,False,2026-06-26
+285,ghaziabad uttar pradesh,uttar pradesh,1,Delhi NCR,llm,95,False,2026-06-26
+286,4 bungalows andheri west,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+287,hosur,tamil nadu,3,Bengaluru,llm,85,False,2026-06-26
+288,kamrup,assam,29,Guwahati,llm,90,False,2026-06-26
+289,mullanpur,punjab,44,Chandigarh Tricity,llm,80,False,2026-06-26
+290,mumbai west,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+291,north,delhi,1,Delhi NCR,llm,80,False,2026-06-26
+292,kalyan,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+293,nalasopara,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+294,santa cruz west,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+295,ulwe,maharashtra,2,Mumbai,llm,85,False,2026-06-26
+296,mhow,madhya pradesh,14,Indore,llm,90,False,2026-06-26
+297,kochi 32,kerala,20,Kochi,llm,95,False,2026-06-26
+298,saiven marble arch dommasandra,karnataka,3,Bengaluru,llm,90,False,2026-06-26
+299,hyderabad city,telangana,4,Hyderabad,llm,100,False,2026-06-26
+300,madhapur,telangana,4,Hyderabad,llm,95,False,2026-06-26
+301,mumbai 50,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+302,ponda,goa,39,Goa,llm,90,False,2026-06-26
+303,ambavadi,gujarat,8,Ahmedabad,llm,90,False,2026-06-26
+304,greater kailash 2,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+305,guduvancheri,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+306,jalandhar cantt,punjab,46,Jalandhar,llm,95,False,2026-06-26
+307,noida india,uttar pradesh,1,Delhi NCR,llm,98,False,2026-06-26
+308,delhii9,delhi,1,Delhi NCR,llm,85,False,2026-06-26
+309,greater noida west,uttar pradesh,1,Delhi NCR,llm,95,False,2026-06-26
+310,khordha,odisha,27,Bhubaneswar,llm,85,False,2026-06-26
+311,new,delhi,1,Delhi NCR,llm,80,False,2026-06-26
+312,north paravur,kerala,20,Kochi,llm,88,False,2026-06-26
+313,south west,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+314,sholinganallur,tamil nadu,5,Chennai,llm,95,False,2026-06-26
+315,thoraipakkam,tamil nadu,5,Chennai,llm,95,False,2026-06-26
+316,katwaria sarai,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+317,kothaguda,telangana,4,Hyderabad,llm,90,False,2026-06-26
+318,west punjabi bagh,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+319,imphal east,manipur,71,Imphal,llm,95,False,2026-06-26
+320,near j block market,delhi,1,Delhi NCR,llm,85,False,2026-06-26
+321,new delhi west,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+322,siruseri,tamil nadu,5,Chennai,llm,95,False,2026-06-26
+323,south parganas,west bengal,6,Kolkata,llm,80,False,2026-06-26
+324,aradi socorro,goa,39,Goa,llm,85,False,2026-06-26
+325,marudhamlai adivaram coimbatore,tamil nadu,19,Coimbatore,llm,95,False,2026-06-26
+326,sainikpuri,telangana,4,Hyderabad,llm,95,False,2026-06-26
+327,saligaon,goa,39,Goa,llm,90,False,2026-06-26
+328,noida extension,uttar pradesh,1,Delhi NCR,llm,95,False,2026-06-26
+329,south delhidelhi,delhi,1,Delhi NCR,llm,98,False,2026-06-26
+330,aganampudi visakhapatnam,andhra pradesh,26,Visakhapatnam,llm,98,False,2026-06-26
+331,churchgate,maharashtra,2,Mumbai,llm,98,False,2026-06-26
+332,chinchwad pune,maharashtra,7,Pune,llm,98,False,2026-06-26
+333,imphal west,manipur,71,Imphal,llm,98,False,2026-06-26
+334,mumbai metro vodafone,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+335,bandra,maharashtra,2,Mumbai,llm,98,False,2026-06-26
+336,bhugaon,maharashtra,7,Pune,llm,80,False,2026-06-26
+337,kamrup metropolitan,assam,29,Guwahati,llm,98,False,2026-06-26
+338,vasai virar,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+339,vasco,goa,39,Goa,llm,85,False,2026-06-26
+340,ambarnath,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+341,ambernath east,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+342,dwarka phase 1,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+343,new delhi new delhi india,delhi,1,Delhi NCR,llm,100,False,2026-06-26
+344,pomburpa olaulim,goa,39,Goa,llm,80,False,2026-06-26
+345,wilson garden,karnataka,3,Bengaluru,llm,90,False,2026-06-26
+346,ahmadabad city,gujarat,8,Ahmedabad,llm,95,False,2026-06-26
+347,janakpuri,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+348,pitampura,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+349,andheri west mumbai,maharashtra,2,Mumbai,llm,100,False,2026-06-26
+350,new delhi delhi,delhi,1,Delhi NCR,llm,100,False,2026-06-26
+351,anaimalai,tamil nadu,19,Coimbatore,llm,85,False,2026-06-26
+352,kondapur,telangana,4,Hyderabad,llm,90,False,2026-06-26
+353,bandhwari,haryana,1,Delhi NCR,llm,85,False,2026-06-26
+354,ernakulam kerala,kerala,20,Kochi,llm,95,False,2026-06-26
+355,new delhi 110010,delhi,1,Delhi NCR,llm,100,False,2026-06-26
+356,alwarpet,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+357,bilaspurcgh,chhattisgarh,35,Bilaspur,llm,95,False,2026-06-26
+358,kolkata: 700012,west bengal,6,Kolkata,llm,100,False,2026-06-26
+359,bhopal madhya pradesh,maharashtra,15,Bhopal,llm,90,False,2026-06-26
+360,tilhari jabalpur,madhya pradesh,56,Jabalpur,llm,95,False,2026-06-26
+361,bangalore east,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+362,hal 2nd stage,karnataka,3,Bengaluru,llm,92,False,2026-06-26
+363,sector 50 noida,uttar pradesh,1,Delhi NCR,llm,98,False,2026-06-26
+364,chakan,maharashtra,7,Pune,llm,88,False,2026-06-26
+365,gladys alwares road thane west,maharashtra,2,Mumbai,llm,85,False,2026-06-26
+366,north parganas kolkata,west bengal,6,Kolkata,llm,85,False,2026-06-26
+367,pollachi coimbatore,tamil nadu,19,Coimbatore,llm,95,False,2026-06-26
+368,24 paraganas north,west bengal,6,Kolkata,llm,80,False,2026-06-26
+369,block l,delhi,1,Delhi NCR,llm,85,False,2026-06-26
+370,noids,uttar pradesh,1,Delhi NCR,llm,85,False,2026-06-26
+371,st thomas mount,tamil nadu,5,Chennai,llm,92,False,2026-06-26
+372,udaipur india,rajasthan,42,Udaipur,llm,96,False,2026-06-26
+373,yelahanka bangalore,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+374,visveshwara nagar,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+375,bandra west,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+376,kanpur dehat,uttar pradesh,12,Kanpur,llm,90,False,2026-06-26
+377,koramangala,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+378,mumbai 6 next to petrol pump,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+379,mumbai bandra west,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+380,powai mumbai,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+381,110026,delhi,1,Delhi NCR,llm,85,False,2026-06-26
+382,east sikkim,sikkim,74,Gangtok,llm,85,False,2026-06-26
+383,rai durg hyderabad,telangana,4,Hyderabad,llm,90,False,2026-06-26
+384,shahdara,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+385,mumvai,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+386,noida up,uttar pradesh,1,Delhi NCR,llm,95,False,2026-06-26
+387,s a s nagar,punjab,44,Chandigarh Tricity,llm,95,False,2026-06-26
+388,bhiwadi,rajasthan,1,Delhi NCR,llm,85,False,2026-06-26
+389,hosur taluk,tamil nadu,3,Bengaluru,llm,80,False,2026-06-26
+390,narayangaon,maharashtra,7,Pune,llm,80,False,2026-06-26
+391,nayapakkam,tamil nadu,5,Chennai,llm,90,False,2026-06-26
+392,north parganas,west bengal,6,Kolkata,llm,85,False,2026-06-26
+393,pune camp,maharashtra,7,Pune,llm,90,False,2026-06-26
+394,kamrup metro,assam,29,Guwahati,llm,95,False,2026-06-26
+395,chevella,telangana,4,Hyderabad,llm,90,False,2026-06-26
+396,ramanagar,karnataka,3,Bengaluru,llm,85,False,2026-06-26
+397,kalapatti,tamil nadu,19,Coimbatore,llm,90,False,2026-06-26
+398,mumbai tardeo,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+399,puppalguda,telangana,4,Hyderabad,llm,85,False,2026-06-26
+400,sangolda,goa,39,Goa,llm,80,False,2026-06-26
+401,juhu,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+402,colaba mumbai,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+403,mulund west mumbai,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+404,trimulgherry,telangana,4,Hyderabad,llm,90,False,2026-06-26
+405,kirti nagar,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+406,bargaon rural udaipur,rajasthan,42,Udaipur,llm,85,False,2026-06-26
+407,bhilai,chhattisgarh,22,Kozhikode,llm,95,False,2026-06-26
+408,new delhicity not available,delhi,1,Delhi NCR,llm,95,False,2026-06-26
+409,ribandar,goa,39,Goa,llm,85,False,2026-06-26
+410,kothnur,karnataka,3,Bengaluru,llm,85,False,2026-06-26
+411,powai,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+412,andheri east,maharashtra,2,Mumbai,llm,98,False,2026-06-26
+413,east khasi hills,meghalaya,30,Shillong,llm,85,False,2026-06-26
+414,south 24 parganas,west bengal,6,Kolkata,llm,80,False,2026-06-26
+415,serampore,west bengal,6,Kolkata,llm,90,False,2026-06-26
+416,devanahalli,karnataka,3,Bengaluru,llm,90,False,2026-06-26
+417,mumbai north,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+418,dist thane,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+419,kolkata metro region,west bengal,6,Kolkata,llm,95,False,2026-06-26
+420,miraroad,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+421,mumbai 400026,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+422,howrha,west bengal,6,Kolkata,llm,90,False,2026-06-26
+423,mumbai south,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+424,dombivali,maharashtra,2,Mumbai,llm,95,False,2026-06-26
+425,burnpur,west bengal,70,Asansol,llm,80,False,2026-06-26
+426,thane w,maharashtra,2,Mumbai,llm,90,False,2026-06-26
+427,tiruvallur,tamil nadu,5,Chennai,fuzzy,95,False,2026-06-26
+428,bhiwani,haryana,1,Delhi NCR,state_aware_fuzzy,86,False,2026-06-26
+429,north 24 parganas,west bengal,6,Kolkata,state_aware_fuzzy,90,False,2026-06-26
+430,pranhadevi,maharashtra,2,Mumbai,llm,85,False,2026-06-26
+431,paroda,goa,39,Goa,llm,80,False,2026-06-26
+432,krishna,andhra pradesh,25,Vijayawada,llm,80,False,2026-06-26
+433,hooghly,west bengal,6,Kolkata,llm,80,False,2026-06-26
+434,iritty,kerala,15,Bhopal,llm,85,False,2026-06-26
+435,kannur,kerala,15,Bhopal,llm,100,False,2026-06-26
+436,jagraon,punjab,18,Ludhiana,llm,85,False,2026-06-26
+437,siolim,goa,39,Goa,llm,90,False,2026-06-26
+438,pomburpa,goa,39,Goa,llm,90,False,2026-06-26
+439,411015,maharashtra,7,Pune,llm,85,False,2026-06-26
+440,kalyani,west bengal,6,Kolkata,llm,85,False,2026-06-26
+441,lonavala,maharashtra,7,Pune,llm,80,False,2026-06-26
+442,de,delhi,1,Delhi NCR,llm,85,False,2026-06-26
+443,dharuhera,haryana,1,Delhi NCR,llm,80,False,2026-06-26
+444,barabanki,uttar pradesh,11,Lucknow,llm,80,False,2026-06-26
+445,sehore,madhya pradesh,15,Bhopal,llm,80,False,2026-06-26
+446,yelhanka,karnataka,3,Bengaluru,llm,95,False,2026-06-26
+447,kolkta,west bengal,6,Kolkata,state_aware_fuzzy,92,False,2026-06-30
+448,bardez,goa,39,Goa,llm,85,False,2026-06-30
+449,chinchwad,maharashtra,7,Pune,llm,95,False,2026-06-30
+450,liluah,west bengal,6,Kolkata,llm,90,False,2026-06-30
+451,vaddem,goa,39,Goa,llm,80,False,2026-06-30
+452,vadodqra,gujarat,17,Vadodara,state_aware_fuzzy,88,False,2026-07-01
+453,ichalkaranji,maharashtra,38,Kolhapur,llm,90,False,2026-07-01
+454,dombivli west,maharashtra,2,Mumbai,llm,95,False,2026-07-01
+455,khandeshwar navi mumbai,maharashtra,2,Mumbai,llm,95,False,2026-07-01
+456,navimumbai,maharashtra,2,Mumbai,fuzzy,95,False,2026-07-02
+457,mumbia,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-07-02
+458,dabolim,goa,39,Goa,llm,95,False,2026-07-02
+459,ahmdabad,gujarat,8,Ahmedabad,state_aware_fuzzy,94,False,2026-07-02
+460,doiwala,uttarakhand,47,Dehradun,llm,95,False,2026-07-02
+461,surat city,gujarat,10,Surat,llm,100,False,2026-07-03
+462,mumbaibai,maharashtra,2,Mumbai,llm,95,False,2026-07-03
+463,nerul,maharashtra,2,Mumbai,llm,90,False,2026-07-03
+464,देहू रोड,maharashtra,7,Pune,llm,95,False,2026-07-04
+465,ahmedabaf,gujarat,8,Ahmedabad,state_aware_fuzzy,89,False,2026-07-08
+466,mumai,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-07-08
+467,talegaon,maharashtra,7,Pune,state_aware_fuzzy,89,False,2026-07-08
+468,gurgain,haryana,1,Delhi NCR,state_aware_fuzzy,86,False,2026-07-08
+469,garhi harsaru,haryana,1,Delhi NCR,llm,95,False,2026-07-08
+470,wakad,maharashtra,7,Pune,llm,95,False,2026-07-08
+471,400061,maharashtra,2,Mumbai,llm,80,False,2026-07-08
+472,vasai road,maharashtra,2,Mumbai,llm,95,False,2026-07-08
+473,saswad,maharashtra,7,Pune,llm,90,False,2026-07-08
+474,defence colony,delhi,1,Delhi NCR,llm,95,False,2026-07-08
+475,kheda,gujarat,8,Ahmedabad,llm,80,False,2026-07-08
+476,mahim,maharashtra,2,Mumbai,llm,95,False,2026-07-08
+477,saket,delhi,1,Delhi NCR,llm,95,False,2026-07-08
+478,vasai,maharashtra,2,Mumbai,llm,85,False,2026-07-08
+479,nasikh devlali cantt,maharashtra,36,Nashik,llm,92,False,2026-07-08
+480,malegaon,maharashtra,7,Pune,state_aware_fuzzy,88,False,2026-07-08
+481,fridabad,haryana,1,Delhi NCR,state_aware_fuzzy,94,False,2026-07-16
+482,sahibzada ajit singh naga,chandigarh,44,Chandigarh Tricity,fuzzy,98,False,2026-07-16
+483,kv rangareddy,telangana,4,Hyderabad,fuzzy,96,False,2026-07-16
+484,ludhians,punjab,18,Ludhiana,state_aware_fuzzy,88,False,2026-07-16
+485,dwarka,delhi,1,Delhi NCR,llm,95,False,2026-07-16
+486,saphale,maharashtra,2,Mumbai,llm,80,False,2026-07-16
+487,palwal,haryana,1,Delhi NCR,llm,90,False,2026-07-16
+488,airoli,maharashtra,2,Mumbai,llm,95,False,2026-07-16
+489,burnapur asansol,west bengal,70,Asansol,llm,95,False,2026-07-16
+490,hanamkonda,telangana,64,Warangal,llm,90,False,2026-07-22
+491,moira,goa,39,Goa,llm,90,False,2026-07-22
+492,narsingi,telangana,4,Hyderabad,llm,90,False,2026-07-22
+493,virar,maharashtra,2,Mumbai,llm,90,False,2026-07-22
+494,mumbqi,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-07-29
+495,mumabi,maharashtra,2,Mumbai,state_aware_fuzzy,91,False,2026-07-29
+496,colva,goa,39,Goa,llm,95,False,2026-07-29
+497,khanammet,telangana,4,Hyderabad,llm,85,False,2026-07-29
+498,sas nagar (mohali),punjab,44,Chandigarh Tricity,llm,95,False,2026-07-29
+499,ghansoli navimumbai,maharashtra,2,Mumbai,llm,95,False,2026-07-29
+500,pimpri,maharashtra,7,Pune,llm,95,False,2026-07-29
+501,zirakpur punjab,punjab,44,Chandigarh Tricity,llm,95,False,2026-07-29
+502,patancheruvu,telangana,4,Hyderabad,llm,90,False,2026-07-29
+503,srirangapatna mandya,karnataka,23,Mysuru,llm,85,False,2026-08-04
+504,miyapur,telangana,4,Hyderabad,llm,95,False,2026-08-04
+505,ulhasnagar,maharashtra,2,Mumbai,llm,85,False,2026-08-04
+506,chennai 600020,tamil nadu,5,Chennai,llm,100,False,2026-08-04
+507,mira road,maharashtra,2,Mumbai,state_aware_fuzzy,94,False,2026-08-06
+508,mysore mysore,karnataka,23,Mysuru,llm,100,False,2026-08-06
+509,andheri west,maharashtra,2,Mumbai,state_aware_fuzzy,92,False,2026-08-06
+510,mumbai 400064,maharashtra,2,Mumbai,state_aware_fuzzy,92,false,2026-08-08

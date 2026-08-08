@@ -1,5 +1,6 @@
 import requests
 import json
+import re
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
@@ -375,13 +376,6 @@ def _channel_net_roas(revenue, cogs, spend):
     return round((revenue - cogs) / spend, 2)
 
 
-def _channel_gross_roas(gross_sales, spend):
-    """Gross ROAS = gross sales / spend (dashboard definition); None when spend is too low."""
-    if spend < MIN_SPEND_FOR_ROAS:
-        return None
-    return round(gross_sales / spend, 2)
-
-
 def _roas_axis_limits(roas_vals: np.ndarray) -> tuple[float, float]:
     """
     Sensible Net ROAS y-limits that keep the line + labels inside the panel.
@@ -623,11 +617,11 @@ def _plot_one_channel_spend_revenue_roas(
 
 def plot_daily_amounts(daily_insights_data, save_path=None):
     """
-    Channel-split Daily Ad Spend, Gross Sales, and Gross ROAS (Meta / Google / Amazon).
+    Channel-split Daily Ad Spend, Gross Sales, and Net ROAS (Meta / Google / Amazon).
 
     Same order-date cohort as the Profit charts: for orders placed on day D,
     gross sales = placement value before returns/cancels; ad spend is that day's
-    platform spend; Gross ROAS = gross sales / spend.
+    platform spend; Net ROAS = (gross sales − gross COGS) / spend.
     """
     from timeframe_config import get_timeframe_config
     from datetime import timedelta
@@ -640,7 +634,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     end_date_str = end_date.strftime("%Y-%m-%d")
 
     print(
-        f"Building order-date cohort spend/gross sales/Gross ROAS for "
+        f"Building order-date cohort spend/gross sales/Net ROAS for "
         f"{start_date_str} → {end_date_str}..."
     )
     try:
@@ -682,6 +676,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
             .agg({
                 "ad_spend": "sum",
                 "gross_sales": "sum",
+                "gross_cogs": "sum",
             })
             .reindex(all_dates)
             .fillna(0.0)
@@ -689,8 +684,9 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
         spend_values = by_day["ad_spend"].tolist()
         revenue_values = by_day["gross_sales"].tolist()
         roas_values = [
-            _channel_gross_roas(
+            _channel_net_roas(
                 float(by_day["gross_sales"].iloc[i]),
+                float(by_day["gross_cogs"].iloc[i]),
                 float(by_day["ad_spend"].iloc[i]),
             )
             for i in range(len(by_day))
@@ -706,6 +702,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
             channel_label=PLATFORM_LABELS.get(platform, platform.title()),
             n_days=n_days,
             revenue_label="Gross Sales",
+            roas_label="Net ROAS",
             show_legend=False,
         )
 
@@ -728,7 +725,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
                 marker="o",
                 markersize=4,
                 linewidth=1.6,
-                label="Gross ROAS",
+                label="Net ROAS",
             ),
         ],
         loc="upper center",
@@ -744,7 +741,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     )
 
     fig.suptitle(
-        f"Paid Channel Performance — Ad Spend, Gross Sales, and Gross ROAS ({n_days} Days)",
+        f"Paid Channel Performance — Ad Spend, Gross Sales, and Net ROAS ({n_days} Days)",
         fontsize=TYPE_SCALE["title"],
         fontweight="bold",
         color="#1a1a2e",
@@ -753,7 +750,7 @@ def plot_daily_amounts(daily_insights_data, save_path=None):
     fig.text(
         0.5,
         0.962,
-        f"Gross ROAS = Gross Sales / Ad Spend · "
+        f"Net ROAS = (Gross Sales − Gross COGS) / Ad Spend · "
         f"hidden when spend < Rs{int(MIN_SPEND_FOR_ROAS)}",
         ha="center",
         va="top",
@@ -796,7 +793,7 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
     end_str = end_date.strftime("%Y-%m-%d")
     brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", "20"))
 
-    print("Fetching order-date cohort for blended spend/gross sales/Gross ROAS...")
+    print("Fetching order-date cohort for blended spend/gross sales/Net ROAS...")
     db_df = pd.DataFrame()
     try:
         from dashboard_stats import fetch_order_date_cohort_pnl_series
@@ -822,14 +819,15 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
             date_str = str(row["sale_date"])[:10]
             # Prefer gross sales; fall back to net revenue for sources that lack it.
             revenue = float(row.get("gross_sales", 0) or row.get("revenue", 0) or 0)
-            cogs = float(row.get("cogs", 0) or 0)
+            # Net ROAS = (gross sales − gross COGS) / spend; fall back to net cogs.
+            cogs = float(row.get("gross_cogs", 0) or row.get("cogs", 0) or 0)
             ad_spend = float(row.get("total_ad_spend", 0) or 0)
-            gross_roas = _channel_gross_roas(revenue, ad_spend) or 0.0
+            net_roas = _channel_net_roas(revenue, cogs, ad_spend) or 0.0
             api_data_lookup[date_str] = {
                 "revenue": revenue,
                 "ad_spend": ad_spend,
                 "cogs": cogs,
-                "net_roas": gross_roas,
+                "net_roas": net_roas,
                 "net_profit": float(row.get("net_profit", 0) or 0),
             }
     else:
@@ -861,8 +859,9 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
             and api_record.get("ad_spend", 0) >= MIN_SPEND_FOR_ROAS
         ):
             revenue = api_record.get("revenue", 0)
+            cogs = api_record.get("cogs", 0)
             ad_spend = api_record.get("ad_spend", 0)
-            net_roas = revenue / ad_spend
+            net_roas = (revenue - cogs) / ad_spend
         roas_values.append(round(net_roas, 2) if net_roas else 0)
 
     if not dates or (
@@ -893,9 +892,10 @@ def _plot_daily_amounts_blended(daily_insights_data, save_path=None):
         channel_label=f"Blended Paid Performance — Last {n_days} Days",
         n_days=n_days,
         revenue_label="Gross Sales",
+        roas_label="Net ROAS",
     )
     fig.suptitle(
-        f'Daily Ad Spend, Gross Sales, and Gross ROAS for Last {n_days} Days (blended fallback)',
+        f'Daily Ad Spend, Gross Sales, and Net ROAS for Last {n_days} Days (blended fallback)',
         fontsize=13,
         fontweight='bold',
         color="#1a1a2e",
@@ -2126,18 +2126,56 @@ def _smooth_numeric_series(x, y, *, points_per_seg: int = 16):
         return x_arr, y_arr
 
 
+def _canonicalize_ship_cities(cities: pd.Series) -> pd.Series:
+    """Map raw Shopify ship_city → weather-report canonical name when known.
+
+    Collapses aliases like Gurgaon/Gurugram → Delhi NCR, Bangalore → Bengaluru
+    so Top-5 ranking doesn't split one metro across two legend lines.
+    """
+    alias_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "weather_report",
+        "data",
+        "weather",
+        "city_alias_map.csv",
+    )
+    if not os.path.isfile(alias_path):
+        return cities
+    try:
+        amap = pd.read_csv(
+            alias_path, usecols=["raw_city_normalized", "canonical_city"]
+        )
+        lookup = {
+            str(r.raw_city_normalized): str(r.canonical_city)
+            for r in amap.itertuples(index=False)
+        }
+    except Exception:
+        return cities
+
+    def _one(raw) -> str:
+        text = "" if raw is None else str(raw).strip()
+        if not text or text == "Unknown":
+            return "Unknown"
+        key = re.sub(r"[.\-_/,]+", " ", text.lower())
+        key = re.sub(r"\s+", " ", key).strip()
+        return lookup.get(key, text)
+
+    return cities.map(_one)
+
+
 def plot_hourly_sales_last_7_days(save_path=None):
     """
     Sales by time-of-day for the last 7 days (including today) from shopify_orders.
 
-    Uses 30-minute buckets (finer than hourly) from order timestamps.
-    Plots the average daily profile for the top 5 cities by gross sales, plus a
-    bold all-cities average, all as smooth PCHIP curves (no faded per-day lines).
-    Sales are gross (incl GST). Missing slots are filled with zero.
+    Hourly buckets from order timestamps. Plots the average daily profile for
+    the top 5 canonical cities by gross sales (aliases collapsed via
+    city_alias_map). No all-cities total on the same axis — that series is ~7×
+    larger and crushed the city lines into unreadable clutter.
+    Sales are gross (incl GST). Missing hours are filled with zero.
     """
     try:
         logger.info(
-            "Plotting 30-min sales by time-of-day for last 7 days from shopify_orders..."
+            "Plotting hourly sales by time-of-day for last 7 days from shopify_orders..."
         )
         conn_str = (
             f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
@@ -2168,85 +2206,83 @@ def plot_hourly_sales_last_7_days(save_path=None):
         if df.empty:
             logger.warning("No shopify_orders data found for the last 7 days.")
             return None
-        # Gross sales (incl GST) — no net-revenue adjustment on this chart.
 
         df["created_at_ist"] = pd.to_datetime(df["created_at_ist"])
-        # 30-min slot within the day: 0=00:00, 1=00:30, …, 47=23:30
-        slot_minutes = 30
-        slots_per_day = 24 * 60 // slot_minutes  # 48
-        df["slot"] = (
-            df["created_at_ist"].dt.hour * (60 // slot_minutes)
-            + (df["created_at_ist"].dt.minute // slot_minutes)
-        ).astype(int)
-        n_window_days = 7  # averaging window (start_date..end_date inclusive)
+        df["ship_city"] = _canonicalize_ship_cities(df["ship_city"])
+        # Hourly slots: 0=00:00 … 23=23:00 (less spaghetti than 30-min)
+        slots_per_day = 24
+        df["slot"] = df["created_at_ist"].dt.hour.astype(int)
+        n_window_days = max(df["created_at_ist"].dt.date.nunique(), 1)
         full_slots = pd.Index(range(slots_per_day), name="slot")
 
-        # Top 5 cities by total gross sales over the window
-        top_cities = (
-            df.groupby("ship_city")["total_price_amount"].sum().nlargest(5).index.tolist()
+        ranked = (
+            df[df["ship_city"] != "Unknown"]
+            .groupby("ship_city")["total_price_amount"]
+            .sum()
         )
-        # Per-city average daily profile = summed sales per slot / window days
+        top_cities = ranked.nlargest(5).index.tolist()
+        if not top_cities:
+            logger.warning("No city sales to plot for last 7 days.")
+            return None
         city_slot_sum = (
             df[df["ship_city"].isin(top_cities)]
-            .groupby(["ship_city", "slot"])["total_price_amount"].sum()
-        )
-        overall_avg = (
-            df.groupby("slot")["total_price_amount"].sum()
-            .reindex(full_slots, fill_value=0) / n_window_days
+            .groupby(["ship_city", "slot"])["total_price_amount"]
+            .sum()
         )
 
         sns.set_style("whitegrid")
-        fig, ax = plt.subplots(figsize=(14, 6.4))
+        fig, ax = plt.subplots(figsize=(14, 6.0))
         x = np.asarray(full_slots, dtype=float)
-
-        # Colourblind-safe (Okabe-Ito), distinct from the black average line
         city_colors = ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#D55E00"]
+        y_max = 0.0
         for city, color in zip(top_cities, city_colors):
             y = (
-                city_slot_sum.loc[city].reindex(full_slots, fill_value=0).to_numpy(dtype=float)
+                city_slot_sum.loc[city]
+                .reindex(full_slots, fill_value=0)
+                .to_numpy(dtype=float)
                 / n_window_days
             )
-            x_s, y_s = _smooth_numeric_series(x, y, points_per_seg=12)
+            y_max = max(y_max, float(np.nanmax(y)) if len(y) else 0.0)
+            x_s, y_s = _smooth_numeric_series(x, y, points_per_seg=10)
             ax.plot(
-                x_s, y_s, color=color, alpha=0.95, linewidth=1.8,
-                solid_capstyle="round", solid_joinstyle="round",
-                antialiased=True, zorder=3, label=str(city),
+                x_s,
+                y_s,
+                color=color,
+                alpha=0.95,
+                linewidth=2.0,
+                solid_capstyle="round",
+                solid_joinstyle="round",
+                antialiased=True,
+                zorder=3,
+                label=str(city),
             )
 
-        x_avg, y_avg = _smooth_numeric_series(
-            x, overall_avg.to_numpy(dtype=float), points_per_seg=16
-        )
-        ax.plot(
-            x_avg,
-            y_avg,
-            color="black",
-            linewidth=2.2,
-            linestyle="-",
-            solid_capstyle="round",
-            solid_joinstyle="round",
-            label="All cities avg",
-            zorder=4,
-            antialiased=True,
-        )
-
-        # Tick every hour (even slots); minor feel via labels HH:00
-        hour_ticks = list(range(0, slots_per_day, 2))
-        ax.set_xticks(hour_ticks)
+        ax.set_xticks(list(range(0, slots_per_day, 2)))
         ax.set_xticklabels(
-            [f"{(s * slot_minutes) // 60:02d}" for s in hour_ticks],
+            [f"{h:02d}" for h in range(0, slots_per_day, 2)],
             fontsize=TYPE_SCALE["tick"] - 1,
         )
-        ax.set_xlim(-0.5, slots_per_day - 0.5)
-        ax.set_xlabel("Hour of Day (30-min buckets)", fontsize=TYPE_SCALE["axis"])
-        ax.set_ylabel("Avg Sales (Rs)", fontsize=TYPE_SCALE["axis"])
+        ax.set_xlim(-0.4, slots_per_day - 0.6)
+        if y_max > 0:
+            ax.set_ylim(0, y_max * 1.12)
+        ax.set_xlabel("Hour of Day (IST)", fontsize=TYPE_SCALE["axis"])
+        ax.set_ylabel("Avg Sales / Hour (Rs)", fontsize=TYPE_SCALE["axis"])
         ax.tick_params(axis="y", labelsize=TYPE_SCALE["tick"] - 1)
         ax.set_title(
-            "Sales by Time of Day — Top 5 Cities, Last 7 Days (30-min)",
+            "Sales by Time of Day — Top 5 Cities, Last 7 Days",
             fontsize=TYPE_SCALE["title"],
             fontweight="bold",
             pad=12,
         )
-        ax.legend(loc="upper left", fontsize=TYPE_SCALE["legend"] - 1, frameon=True, ncol=2)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.12),
+            fontsize=TYPE_SCALE["legend"],
+            frameon=True,
+            ncol=min(5, len(top_cities)),
+            edgecolor="#E2E8F0",
+            facecolor="white",
+        )
         from matplotlib.ticker import FuncFormatter
 
         ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"₹{v:,.0f}"))
@@ -2259,7 +2295,7 @@ def plot_hourly_sales_last_7_days(save_path=None):
         if save_path:
             os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
             plt.savefig(save_path, dpi=200, bbox_inches="tight")
-            logger.info(f"Half-hourly sales plot saved as: {save_path}")
+            logger.info(f"Hourly sales-by-city plot saved as: {save_path}")
             plt.close(fig)
             return save_path
         else:

@@ -286,6 +286,7 @@ def _plot_geo(report: pd.DataFrame, master_path: Path, out_path: Path,
                     xytext=(3, 3), textcoords="offset points")
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
+    ax.set_aspect("equal", adjustable="box")
     ax.set_title(
         f"Weather geo-heatmap ({_title_stamp(report_date, report_time)})\n"
         f"colour = weather_score, size = orders_30d",
@@ -341,6 +342,7 @@ def _plot_combined_canvas(
                         xytext=(3, 3), textcoords="offset points")
     ax_geo.set_xlabel("Longitude")
     ax_geo.set_ylabel("Latitude")
+    ax_geo.set_aspect("equal", adjustable="box")
     ax_geo.set_title("Weather map — colour = weather_score, size = orders (30d)", fontsize=11)
     ax_geo.grid(True, alpha=0.2)
 

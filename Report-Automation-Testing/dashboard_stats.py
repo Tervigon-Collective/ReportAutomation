@@ -1032,6 +1032,7 @@ def fetch_order_date_cohort_pnl_series(
                 "cancels_amount",
                 "revenue",
                 "cogs",
+                "gross_cogs",
                 "total_ad_spend",
                 "net_profit",
             ]
@@ -1046,6 +1047,7 @@ def fetch_order_date_cohort_pnl_series(
                 "cancels_amount": "sum",
                 "net_sales": "sum",
                 "net_cogs": "sum",
+                "gross_cogs": "sum",
                 "ad_spend": "sum",
                 "net_profit": "sum",
             }
@@ -1061,10 +1063,62 @@ def fetch_order_date_cohort_pnl_series(
             "cancels_amount": g["cancels_amount"],
             "revenue": g["net_sales"],
             "cogs": g["net_cogs"],
+            "gross_cogs": g["gross_cogs"],
             "total_ad_spend": g["ad_spend"],
             "net_profit": g["net_profit"],
         }
     ).reset_index(drop=True)
+
+
+def fetch_gross_aov(
+    brand_id: int,
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+) -> float:
+    """Average actual order value (incl GST) over the order-date cohort.
+
+    Uses the SAME order set as the Orders KPI (gold.fct_orders, brand-filtered,
+    order_date axis, excluding test / voided / revenue-adjustment orders) so AOV
+    reconciles with Orders and Gross Revenue. Numerator is gross_revenue (incl
+    GST) — the actual charged order value, not the GST-excluded gross.
+    """
+    from amazon_entity_report import get_clickhouse_client
+
+    start, end = _to_date_str(start_date), _to_date_str(end_date)
+    sql = """
+    WITH orders_dedup AS (
+      SELECT
+        order_id,
+        argMax(order_date, _loaded_at) AS order_date,
+        argMax(order_status, _loaded_at) AS order_status,
+        argMax(is_test, _loaded_at) AS is_test,
+        argMax(is_revenue_adjustment, _loaded_at) AS is_revenue_adjustment,
+        toFloat64(argMax(gross_revenue, _loaded_at)) AS gross_revenue
+      FROM gold.fct_orders
+      WHERE brand_id = {brandId:Int64}
+      GROUP BY order_id
+    )
+    SELECT count() AS orders, sum(gross_revenue) AS gross_value
+    FROM orders_dedup
+    WHERE order_date >= toDate({startDate:String})
+      AND order_date <= toDate({endDate:String})
+      AND coalesce(is_test, 0) = 0
+      AND lowerUTF8(trimBoth(coalesce(order_status, ''))) != 'voided'
+      AND coalesce(is_revenue_adjustment, 0) = 0
+    """
+    try:
+        client = get_clickhouse_client()
+        res = client.query(
+            sql, parameters={"brandId": brand_id, "startDate": start, "endDate": end}
+        )
+        if not res.result_rows:
+            return 0.0
+        orders, gross_value = res.result_rows[0]
+        orders = float(orders or 0)
+        return round(float(gross_value or 0) / orders, 2) if orders else 0.0
+    except Exception as exc:  # noqa: BLE001 - AOV is non-fatal decoration
+        logger.warning("fetch_gross_aov failed: %s", exc)
+        return 0.0
 
 
 def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:

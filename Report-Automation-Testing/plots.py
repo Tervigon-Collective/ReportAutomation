@@ -2680,15 +2680,12 @@ def generate_plots_for_email(
     # It will check env vars, load from file, or auto-generate from credentials
     # Detailed logging is available in api_data_fetcher logs for diagnostics
     
-    # Load Facebook API credentials from global config
-    ACCESS_TOKEN = get_global_config("Socialpepper_FB_ACCESS_TOKEN")
-    ACCOUNT_ID = get_global_config("Socialpepper_FB_AD_ACCOUNT_ID")
-
-    if not ACCESS_TOKEN or not ACCOUNT_ID:
-        logger.error("Socialpepper_FB_ACCESS_TOKEN or Socialpepper_FB_AD_ACCOUNT_ID not set in database.")
-        sys.exit("Socialpepper_FB_ACCESS_TOKEN or Socialpepper_FB_AD_ACCOUNT_ID not set in database.")
-
-    daily_insights_data, daily_error = fetch_daily_insights_from_api(days, ACCESS_TOKEN, ACCOUNT_ID)
+    # Meta ad spend / purchase value come from the warehouse
+    # (ClickHouse gold.fct_meta_ads_daily, read via fetch_order_date_cohort_rows).
+    # The Graph API insights call was removed: it supplied no chart values, and its
+    # transient throttle (403, code 4 / subcode 1504022) aborted the entire run
+    # after the Excel, PDF and plots had already been built.
+    daily_insights_data, daily_error = None, None
 
     plot_files = []
     today = datetime.now().strftime('%Y-%m-%d')
@@ -2707,8 +2704,8 @@ def generate_plots_for_email(
         logger.info(f"Daily insights plot saved to: {saved_path}")
     else:
         logger.error(
-            "Could not plot daily insights (channel-split or blended). FB error: %s",
-            daily_error,
+            "Could not plot daily insights (channel-split or blended): "
+            "no warehouse cohort/spend rows for the window."
         )
 
     # 2. Daily net profit — event cohort + placement cohort (single dual-panel figure)
@@ -2788,9 +2785,11 @@ def generate_plots_for_email(
     #     logger.info("Generating AOV insights plot for display...")
     #     plot_average_order_value(daily_insights_data)
 
-    if not daily_insights_data and hourly_aov_data is None:
-        logger.error(f"Failed to fetch data: Daily error: {daily_error}")
-        sys.exit(f"Failed to fetch data: Daily error: {daily_error}")
+    if not plot_files:
+        logger.error(
+            "No plots generated for this run; sending report without charts."
+        )
+        return []
 
     logger.info(f"Generated {len(plot_files)} plots for email")
     return plot_files

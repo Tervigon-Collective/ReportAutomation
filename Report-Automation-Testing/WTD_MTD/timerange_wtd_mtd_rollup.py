@@ -28,6 +28,7 @@ from dailyrollup import (
     order_columns_by_funnel, SKU_FIELDS, round_for_output,
     parse_product_details, explode_skus, build_ad_sku_rollup,
     transform_attribution_data, _merge_repeating_values_in_sheet,
+    _merge_product_details_orders,
     run as run_daily_rollup,
     get_campaign_data, get_meta_funnel_metrics, get_campaign_grand_total_for_pdf
 )
@@ -255,15 +256,20 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
     
     # Calculate derived metrics
     with np.errstate(divide='ignore', invalid='ignore'):
-        # CTR: Take average from database CTR column
-        if 'ctr' in df.columns:
-            ctr_avg = df.groupby(group_cols, dropna=False)['ctr'].mean().reset_index()
-            # For Google Ads: CTR is stored as decimal (0-1), multiply by 100 for percentage
-            # For Meta Ads: CTR is already in percentage format (0-100)
-            if source_type.lower() == 'google ads':
-                ctr_avg['ctr'] = ctr_avg['ctr'] * 100  # Convert to percentage
-            metrics_agg = metrics_agg.merge(ctr_avg[group_cols + ['ctr']], on=group_cols, how='left')
-            metrics_agg['ctr'] = metrics_agg['ctr'].fillna(0)
+        # CTR: weighted clicks/impressions (never average stored CTR, never x100 twice)
+        if {'clicks', 'impressions'}.issubset(metrics_agg.columns):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                ctr_calc = (
+                    pd.to_numeric(metrics_agg['clicks'], errors='coerce')
+                    / pd.to_numeric(metrics_agg['impressions'], errors='coerce')
+                ) * 100
+            metrics_agg['ctr'] = (
+                pd.to_numeric(ctr_calc, errors='coerce')
+                .replace([np.inf, -np.inf], 0)
+                .fillna(0)
+            )
+        else:
+            metrics_agg['ctr'] = 0.0
         
         # Bounce Rate: (clicks - landing_page_views) / clicks * 100
         if {'clicks', '_landing_page_view'}.issubset(metrics_agg.columns):
@@ -518,39 +524,34 @@ def build_hierarchy_sku_rollup(df: pd.DataFrame, group_cols: list, timeframe_lab
     
     sku_rows = []
     total_skus_parsed = 0
-    
-    for idx, row in df.iterrows():
-        product_details = row.get('product_details')
-        source = row.get('source', 'Unknown')
-        
-        # For WTD/MTD: ALL channels use product_details directly (exact SKU values)
-        # Pass 0 for all attribution parameters to trigger Direct Mode
-        attributed_revenue = 0.0
-        attributed_cogs = 0.0
-        attributed_quantity = 0
-        
-        print(f"[{timeframe_label}] {source}: Using product_details column directly (exact SKU values)")
-        
-        # Parse product_details in Direct Mode (exact values from JSONB)
+
+    # Collapse date/hour copies of the same ad/campaign before parsing SKUs.
+    # product_details is copied from the ad node onto every time bucket, so
+    # row-wise Direct Mode multiplied quantity by the number of days/hours.
+    group_cols_present = [c for c in group_cols if c in df.columns]
+    grouped = (
+        df.groupby(group_cols_present, dropna=False)
+        if group_cols_present
+        else [(None, df)]
+    )
+    print(f"[{timeframe_label}] Deduping product_details across time buckets before SKU parse")
+
+    for _, group in grouped:
+        merged_orders = _merge_product_details_orders(group.get("product_details", []))
         skus = parse_product_details(
-            product_details,
-            attributed_revenue=attributed_revenue,
-            attributed_cogs=attributed_cogs,
-            attributed_quantity=attributed_quantity
+            merged_orders,
+            attributed_revenue=0.0,
+            attributed_cogs=0.0,
+            attributed_quantity=0,
         )
-        
         if not skus:
             continue
-        
         total_skus_parsed += len(skus)
-        
-        # Create base record with hierarchy columns
-        base = {c: row.get(c) for c in group_cols if c in row}
-        
+        first = group.iloc[0]
+        base = {c: first.get(c) for c in group_cols if c in group.columns}
         for sku in skus:
-            rec = {**base, **sku}
-            sku_rows.append(rec)
-    
+            sku_rows.append({**base, **sku})
+
     print(f"[{timeframe_label}] Parsed {total_skus_parsed} SKUs from {len(df)} rows ({data_source})")
     
     if not sku_rows:
@@ -1281,22 +1282,22 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                         # Round for output
                         channel_df_rounded = round_for_output(channel_df_with_total)
                         
-                        # Apply column ordering (same as dailyrollup.py)
-                        channel_df_rounded = channel_df_rounded[order_columns_by_funnel(channel_df_rounded, include_sku=True)]
-                        
-                        # Rename columns for presentation (same as dailyrollup.py)
+                        # Rename first so funnel order sees quantity/orders/revenue, not sku_quantity.
                         rename_map = {
                             'shopify_orders': 'orders',
                             'shopify_revenue': 'revenue',
                             'shopify_cogs': 'cogs',
                             'sku_quantity': 'quantity',
+                            'sku_unit_price': 'unit_price',
+                            'sku_unit_cogs': 'unit_cogs',
                         }
                         channel_df_rounded = channel_df_rounded.rename(columns={k:v for k,v in rename_map.items() if k in channel_df_rounded.columns})
+                        channel_df_rounded = channel_df_rounded[order_columns_by_funnel(channel_df_rounded, include_sku=True)]
                         
                         # Channel-specific column handling
                         if channel_key == 'organic':
                             # Organic: Only keep specified columns with per-unit pricing
-                            organic_keep_cols = ['channel', 'sku', 'sku_unit_price', 'sku_unit_cogs', 'quantity']
+                            organic_keep_cols = ['channel', 'sku', 'unit_price', 'unit_cogs', 'quantity']
                             available_organic_cols = [c for c in organic_keep_cols if c in channel_df_rounded.columns]
                             if available_organic_cols:
                                 channel_df_rounded = channel_df_rounded[available_organic_cols]

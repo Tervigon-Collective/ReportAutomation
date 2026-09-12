@@ -20,12 +20,16 @@ FUNNEL_ORDER: list[str] = [
     # Consideration
     '_add_to_cart', '_initiate_checkout',
     # Conversion
-    'shopify_orders',
+    'shopify_orders', 'orders',
     # Financials
-    'spend', 'shopify_revenue', 'shopify_cogs', 'gross_roas', 'net_roas', 'profit_margin',
-    # SKU detail
-    'sku', 'vendor', 'product_title', 'variant_title', 'quantity',
-    'unit_price', 'unit_cost', 'sku_revenue', 'sku_cogs',
+    'spend', 'shopify_revenue', 'revenue', 'shopify_cogs', 'cogs',
+    'gross_roas', 'net_roas', 'profit_margin',
+    'conversion_rate',
+    # SKU detail (include pre- and post-rename aliases)
+    'sku', 'vendor', 'product_title', 'variant_title',
+    'quantity', 'sku_quantity',
+    'unit_price', 'unit_cost', 'unit_cogs', 'sku_unit_price', 'sku_unit_cogs',
+    'sku_revenue', 'sku_cogs',
 ]
 
 SKU_FIELDS: list[str] = [
@@ -177,18 +181,48 @@ def _normalize_product_details_list(product_details: str | dict | list | None) -
         return []
 
 
+def _order_dedupe_key(order: dict, anon_idx: int) -> tuple[str, int]:
+    """Stable key so identical order copies from hourly/daily buckets collapse."""
+    order_id = order.get("order_id") or order.get("order_name") or order.get("id")
+    if order_id not in (None, ""):
+        return f"id:{order_id}", anon_idx
+    try:
+        return "fp:" + json.dumps(order, sort_keys=True, default=str), anon_idx
+    except TypeError:
+        return f"__anon_{anon_idx}", anon_idx + 1
+
+
 def _merge_product_details_orders(product_details_values) -> list[dict]:
-    """Merge hourly product_details payloads, keeping one copy of each order_id."""
-    by_order_id: dict[str, dict] = {}
+    """Merge time-bucket product_details payloads, keeping one copy of each order.
+
+    Attribution rows repeat the same ad-level orders on every hour/day bucket.
+    Without collapsing those copies, SKU quantity is multiplied by the number
+    of buckets (e.g. 1 unit x 4 days = 4).
+    """
+    by_key: dict[str, dict] = {}
     anon_idx = 0
     for product_details in product_details_values:
         for order in _normalize_product_details_list(product_details):
-            order_id = order.get('order_id') or order.get('order_name')
-            key = str(order_id) if order_id else f'__anon_{anon_idx}'
-            if not order_id:
-                anon_idx += 1
-            by_order_id[key] = order
-    return list(by_order_id.values())
+            key, anon_idx = _order_dedupe_key(order, anon_idx)
+            by_key[key] = order
+    return list(by_key.values())
+
+
+def _line_item_quantity(item: dict) -> int:
+    """Units sold on a line item. Ignore inventory/stock fields."""
+    if not isinstance(item, dict):
+        return 1
+    for key in ("quantity_ordered", "quantity", "current_quantity"):
+        val = item.get(key)
+        if val in (None, ""):
+            continue
+        try:
+            qty = int(float(val))
+        except (TypeError, ValueError):
+            continue
+        if qty > 0:
+            return qty
+    return 1
 
 
 def parse_product_details(product_details: str | dict | list, attributed_revenue: float = 0.0, attributed_cogs: float = 0.0, attributed_quantity: int = 0) -> list[dict]:
@@ -268,7 +302,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                 sku_metadata.append({
                     "sku": str(sku_code),
                     "vendor": str(item.get("vendor", "Unknown")),
-                    "quantity": int(item.get("quantity") or item.get("quantity_ordered") or 1),
+                    "quantity": _line_item_quantity(item),
                     "product_title": str(item.get("product_title") or item.get("product_name") or item.get("title") or item.get("name") or "Unknown Product"),
                     "variant_title": str(item.get("variant_title") or item.get("name") or sku_code),
                 })
@@ -299,7 +333,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                                 sku_meta = {
                                     'sku': str(sku_obj.get('sku', '')),
                                     'vendor': str(sku_obj.get('vendor', 'Unknown')),
-                                    'quantity': int(sku_obj.get('quantity', 1)),
+                                    'quantity': _line_item_quantity(sku_obj),
                                     'product_title': str(sku_obj.get('product_title', 'Unknown Product')),
                                     'variant_title': str(sku_obj.get('variant_title', 'Unknown Variant')),
                                 }
@@ -333,11 +367,11 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                             sku_code = item.get("sku") or item.get("seller_sku")
                             if not sku_code:
                                 continue
-                            qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                            qty = _line_item_quantity(item)
                             sku_metadata.append({
                                 'sku': str(sku_code),
                                 'vendor': str(item.get('vendor', 'Unknown')),
-                                'quantity': qty if qty > 0 else 1,
+                                'quantity': qty,
                                 'product_title': str(
                                     item.get('product_title')
                                     or item.get('title')
@@ -382,13 +416,13 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                 
                 # Check if unit_price and unit_cost are already provided
                 if 'unit_price' in sku_meta and 'unit_cost' in sku_meta:
-                    # Use unit prices directly and calculate totals (GST net on revenue only)
+                    # Use unit prices as-is. attributed_orders_revenue is already
+                    # the API's net/ex-GST figure; dividing again understates SKU price ~18%.
                     unit_price = sku_meta['unit_price']
                     unit_cost = sku_meta['unit_cost']
                     sku_revenue = unit_price * sku_quantity
                     sku_cogs = unit_cost * sku_quantity
-                    sku_revenue = apply_net_revenue(sku_revenue)
-                    unit_price = sku_revenue / sku_quantity if sku_quantity > 0 else apply_net_revenue(float(unit_price or 0))
+                    unit_price = sku_revenue / sku_quantity if sku_quantity > 0 else float(unit_price or 0)
                 else:
                     # Distribute attributed revenue and COGS across SKUs
                     if total_sku_quantity > 0:
@@ -423,17 +457,17 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                     item = order
                     sku_code = item.get("sku") or item.get("seller_sku")
                     if sku_code:
-                        qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                        qty = _line_item_quantity(item)
                         qty_safe = qty if qty > 0 else 1
                         up_gross = float(item.get("unit_price") or item.get("price") or 0)
                         sr_gross = float(item.get("sku_revenue") or item.get("line_value") or item.get("total") or 0)
                         base_rev = sr_gross if sr_gross else up_gross * qty_safe
-                        sr = apply_net_revenue(base_rev)
-                        up = sr / qty_safe if qty_safe else apply_net_revenue(up_gross)
+                        sr = float(base_rev or 0)
+                        up = sr / qty_safe if qty_safe else float(up_gross or 0)
                         cleaned.append({
                             "sku": str(sku_code),
                             "vendor": str(item.get("vendor", "Unknown")),
-                            "quantity": qty if qty > 0 else 1,
+                            "quantity": qty,
                             "sku_cogs": float(item.get("sku_cogs") or item.get("cogs") or item.get("net_cogs") or 0),
                             "unit_cost": float(item.get("unit_cost") or item.get("cogs") or item.get("net_cogs") or 0),
                             "unit_price": up,
@@ -451,7 +485,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                         sku_code = item.get("sku") or item.get("seller_sku")
                         if not sku_code:
                             continue
-                        qty = int(item.get("quantity") or item.get("quantity_ordered") or 1)
+                        qty = _line_item_quantity(item)
                         qty_safe = qty if qty > 0 else 1
                         up_gross = float(item.get("unit_price") or item.get("price") or 0)
                         sr_gross = float(
@@ -462,12 +496,12 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                             or 0
                         )
                         base_rev = sr_gross if sr_gross else up_gross * qty_safe
-                        sr = apply_net_revenue(base_rev)
-                        up = sr / qty_safe if qty_safe else apply_net_revenue(up_gross)
+                        sr = float(base_rev or 0)
+                        up = sr / qty_safe if qty_safe else float(up_gross or 0)
                         cleaned.append({
                             "sku": str(sku_code),
                             "vendor": str(item.get("vendor", "Unknown")),
-                            "quantity": qty if qty > 0 else 1,
+                            "quantity": qty,
                             "sku_cogs": float(item.get("sku_cogs") or item.get("cogs") or item.get("net_cogs") or 0),
                             "unit_cost": float(item.get("unit_cost") or item.get("cogs") or item.get("net_cogs") or 0),
                             "unit_price": up,
@@ -487,13 +521,13 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                         for sku_obj in skus_list:
                             if isinstance(sku_obj, dict) and sku_obj.get('sku'):
                                 sku_code = str(sku_obj.get('sku', ''))
-                                qty = int(sku_obj.get('quantity', 1))
+                                qty = _line_item_quantity(sku_obj)
                                 qty_safe = qty if qty > 0 else 1
                                 up_gross = float(sku_obj.get('unit_price', 0) or 0)
                                 sr_gross = float(sku_obj.get('sku_revenue', 0) or 0)
                                 base_rev = sr_gross if sr_gross else up_gross * qty_safe
-                                sr = apply_net_revenue(base_rev)
-                                up = sr / qty_safe if qty_safe else apply_net_revenue(up_gross)
+                                sr = float(base_rev or 0)
+                                up = sr / qty_safe if qty_safe else float(up_gross or 0)
                                 cleaned.append({
                                     'sku': sku_code,
                                     'vendor': str(sku_obj.get('vendor', 'Unknown')),
@@ -509,7 +543,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                     elif isinstance(first_sku, str):
                         # Legacy format: skus array contains SKU strings, with order-level totals
                         order_cogs = float(order.get('total_cogs', 0) or 0)
-                        order_value = apply_net_revenue(float(order.get('order_value', 0) or 0))
+                        order_value = float(order.get('order_value', 0) or 0)
                         skus_list = order['skus']
                         
                         # Distribute order values across SKUs
@@ -534,7 +568,7 @@ def parse_product_details(product_details: str | dict | list, attributed_revenue
                 
                 # Legacy Meta format: order has total_cogs, order_value, and skus as string list
                 order_cogs = float(order.get('total_cogs', 0) or 0)
-                order_value = apply_net_revenue(float(order.get('order_value', 0) or 0))
+                order_value = float(order.get('order_value', 0) or 0)
                 skus_list = order.get('skus', [])
                 
                 if not skus_list or skus_list == [None]:
@@ -657,7 +691,7 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
             return pd.DataFrame()
 
         for _, group in attr_df.groupby(ad_group_cols, dropna=False):
-            attributed_revenue = apply_net_revenue(float(group['attributed_orders_revenue'].sum()))
+            attributed_revenue = float(group['attributed_orders_revenue'].sum())
             attributed_cogs = float(group['attributed_orders_cogs'].sum())
             attributed_quantity = int(group['attributed_orders_quantity'].sum())
             merged_orders = _merge_product_details_orders(group['product_details'])
@@ -683,7 +717,7 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
         
         if use_attribution_columns:
             # Meta and Organic: Use attributed_orders_* columns as source of truth
-            attributed_revenue = apply_net_revenue(float(row.get('attributed_orders_revenue', 0) or 0))
+            attributed_revenue = float(row.get('attributed_orders_revenue', 0) or 0)
             attributed_cogs = float(row.get('attributed_orders_cogs', 0) or 0)
             attributed_quantity = int(row.get('attributed_orders_quantity', 0) or 0)
             attributed_orders = int(row.get('attributed_orders_count', 0) or 0)

@@ -266,17 +266,19 @@ def _attribution_row(
     cpm = float(m.get("cpm", 0) or 0) if m.get("cpm") is not None else ((spend / impressions) * 1000 if impressions else 0.0)
     ctr = float(m.get("ctr", 0) or 0) if m.get("ctr") is not None else ((clicks / impressions) * 100 if impressions else 0.0)
 
+    def _payload_orders(value):
+        return value if isinstance(value, (list, dict)) and value else None
+
+    # Prefer time-bucket order payloads (that hour/day). Ad-level orders cover
+    # the full range and are copied onto every bucket, which inflates quantity.
+    product_details = _payload_orders(
+        m.get("attributed_orders") or m.get("orders") or m.get("product_details")
+    )
+    if not product_details and isinstance(ad_node, dict):
+        product_details = _payload_orders(
+            ad_node.get("product_details") or ad_node.get("orders")
+        )
     orders = ad_node.get("orders") if isinstance(ad_node, dict) else None
-    product_details = None
-    if isinstance(ad_node, dict):
-        product_details = ad_node.get("product_details")
-        if not product_details and orders:
-            product_details = orders
-    # Google PMax / sag_organic: orders may live on the hourly bucket, not ad_node
-    if not product_details:
-        bucket_orders = m.get("attributed_orders") or m.get("orders")
-        if bucket_orders:
-            product_details = bucket_orders
 
     return {
         "source": source,
@@ -363,15 +365,26 @@ def _attach_google_orders_to_rows(rows: list[dict], top_orders: list[dict]) -> N
             row.get("utm_campaign"),
         )
         candidates = list(by_campaign.get(key, []))
+        row_date = str(row.get("date_start") or "")[:10]
+
+        def _order_date(o: dict) -> str:
+            return str(o.get("order_date") or o.get("date") or o.get("created_at") or "")[:10]
+
+        # Don't stamp the whole range's orders onto every daily/hourly row.
+        if candidates and row_date and any(_order_date(o) for o in candidates):
+            candidates = [o for o in candidates if _order_date(o) == row_date]
 
         # sag_organic / unattributed Google: campaign_id=0, name from utm_campaign
         if not candidates and orphan_orders:
             if str(row.get("campaign_name") or "").strip().lower() in ("sag_organic", ""):
                 row_rev = float(row.get("attributed_orders_revenue") or 0)
-                candidates = [
+                matched = [
                     o for o in orphan_orders
                     if abs(_order_revenue(o) - row_rev) < 0.05
-                ] or list(orphan_orders)
+                ]
+                if matched and row_date and any(_order_date(o) for o in matched):
+                    matched = [o for o in matched if _order_date(o) == row_date]
+                candidates = matched
 
         if candidates:
             row["product_details"] = candidates

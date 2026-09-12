@@ -97,13 +97,15 @@ def enrich_channel_bucket(
     cogs: float,
     order_count: int,
     *,
+    quantity: Optional[int] = None,
     net_profit: Optional[float] = None,
     gross_roas: Optional[float] = None,
     net_roas: Optional[float] = None,
     be_roas: Optional[float] = None,
 ) -> dict:
-    """Build a channel metrics dict matching get_organized_metrics_for_pdf shape."""
+    """Build a channel metrics dict. order_count is orders; quantity is units sold."""
     s, ad, co, oc = _f(sales), _f(ad_spend), _f(cogs), int(order_count or 0)
+    qty = int(quantity) if quantity is not None else 0
     np = _f(net_profit) if net_profit is not None else compute_net_profit(s, co, ad)
     return {
         "sales": round(s, 2),
@@ -113,7 +115,7 @@ def enrich_channel_bucket(
         "gross_roas": round(_f(gross_roas) if gross_roas is not None else compute_gross_roas(s, ad), 2),
         "net_roas": round(_f(net_roas) if net_roas is not None else compute_net_roas(s, co, ad), 2),
         "be_roas": round(_f(be_roas) if be_roas is not None else compute_be_roas(s, co), 2),
-        "quantity": oc,
+        "quantity": qty,
         "cpp": round(compute_cpp(ad, oc), 2),
         "order_count": oc,
     }
@@ -235,7 +237,7 @@ def channel_email_summary_from_bucket(
 ) -> dict:
     """Map a dashboard channel bucket to the WTD/MTD email summary dict shape."""
     orders = int(bucket.get("order_count", 0) or 0)
-    qty = orders if units is None else int(units)
+    qty = int(units) if units is not None else int(bucket.get('quantity') or 0)
     spend = _f(bucket.get("ad_spend"))
     sales = _f(bucket.get("sales"))
     cogs = _f(bucket.get("cogs"))
@@ -265,7 +267,7 @@ def channel_table_row_from_summary(summary: Mapping[str, Any]) -> dict:
         "net_profit": _f(summary.get("net_profit")),
         "net_roas": _f(summary.get("net_roas")),
         "order_count": int(summary.get("orders", 0) or 0),
-        "units": int(summary.get("quantity", summary.get("orders", 0)) or 0),
+        "units": int(summary.get("quantity") or 0),
     }
 
 
@@ -285,7 +287,7 @@ def channel_table_total_from_historical_dashboard(data: Mapping[str, Any]) -> di
         "net_profit": round(net_profit, 2),
         "net_roas": round(compute_net_roas(sales, cogs, spend), 2),
         "order_count": orders,
-        "units": orders,
+        "units": int(_f(data.get("total_units") or data.get("units") or 0)),
     }
 
 
@@ -307,7 +309,7 @@ def wtd_mtd_snapshot_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
     channel_rows: list[tuple[str, dict]] = []
     for api_key, email_key in _EMAIL_CHANNEL_KEYS.items():
         bucket = metrics.get(api_key, {})
-        units = amazon_units if api_key == "amazon" else None
+        units = amazon_units if api_key == "amazon" else bucket.get("quantity")
         summary = channel_email_summary_from_bucket(bucket, units=units)
         channels[email_key] = summary
         channel_rows.append((_EMAIL_CHANNEL_LABELS[email_key], channel_table_row_from_summary(summary)))

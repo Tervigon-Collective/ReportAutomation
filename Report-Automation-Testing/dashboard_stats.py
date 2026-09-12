@@ -99,6 +99,7 @@ def _api_to_stats(data: dict) -> dict:
             "cogs": chan("cogs_breakdown", ch),
             "ad_spend": spend if ch != "organic" else 0.0,
             "order_count": int(chan("orders_breakdown", ch)),
+            "quantity": int(chan("units_breakdown", ch) or chan("quantity_breakdown", ch)),
         }
     amz_ad = ad.get("amazon", {})
     amazon_spend = float(amz_ad.get("total", 0)) if isinstance(amz_ad, dict) else float(amz_ad or 0)
@@ -121,6 +122,8 @@ def _api_to_stats(data: dict) -> dict:
             "amazon_net_cogs": float(amazon.get("cogs", 0) or 0),
             "amazon_spend": amazon_spend,
             "amazon_orders": int(amazon.get("orders", 0) or 0),
+            "amazon_units": int(amazon.get("units", amazon.get("items", 0)) or 0),
+            "total_units": int(f("total_units") or f("units") or 0),
         },
         "channels": channels,
         "source": "api",
@@ -500,6 +503,20 @@ cancel_cogs AS (
     ) IS NOT NULL
   GROUP BY od.order_date, platform
 ),
+placement_units AS (
+  SELECT
+    od.order_date AS report_date,
+    {channelExpr} AS platform,
+    sum(toInt64(coalesce(oi.quantity, 0))) AS units
+  FROM gold.fct_order_items AS oi
+  INNER JOIN order_day AS od
+    ON od.brand_id = oi.brand_id AND od.order_id = oi.order_id
+  LEFT JOIN attr AS a
+    ON a.brand_id = oi.brand_id AND a.order_id = oi.order_id
+  WHERE oi.brand_id = {brandId:Int64}
+    AND coalesce(oi.is_gift_card, 0) = 0
+  GROUP BY od.order_date, platform
+),
 shopify_keys AS (
   SELECT report_date, platform FROM placement_revenue
   UNION DISTINCT
@@ -512,12 +529,15 @@ shopify_keys AS (
   SELECT report_date, platform FROM return_cogs
   UNION DISTINCT
   SELECT report_date, platform FROM cancel_cogs
+  UNION DISTINCT
+  SELECT report_date, platform FROM placement_units
 ),
 shopify_cohort AS (
   SELECT
     k.report_date AS report_date,
     k.platform AS platform,
     coalesce(pr.orders, 0) AS orders,
+    coalesce(pu.units, 0) AS units,
     coalesce(pr.gross_sales, 0) AS gross_sales,
     coalesce(pr.discounts, 0) AS discounts,
     coalesce(re.returns_amount, 0) AS returns_amount,
@@ -554,6 +574,8 @@ shopify_cohort AS (
   FROM shopify_keys AS k
   LEFT JOIN placement_revenue AS pr
     ON pr.report_date = k.report_date AND pr.platform = k.platform
+  LEFT JOIN placement_units AS pu
+    ON pu.report_date = k.report_date AND pu.platform = k.platform
   LEFT JOIN placement_cogs AS pl
     ON pl.report_date = k.report_date AND pl.platform = k.platform
   LEFT JOIN returned AS re
@@ -574,6 +596,7 @@ amz_items AS (
     oi.order_item_id,
     oi.pnl_refund_status,
     toFloat64(oi.item_price_amount) * toFloat64(oi.quantity_ordered) AS item_gross,
+    toInt64(coalesce(oi.quantity_ordered, 0)) AS qty,
     toFloat64(coalesce(oi.total_cogs, 0)) AS product_cost
   FROM gold.fct_amazon_order_items AS oi
   WHERE oi.brand_id = {brandId:Int64}
@@ -612,6 +635,7 @@ amz_item_pnl AS (
     ai.amazon_order_id AS amazon_order_id,
     ai.pnl_refund_status AS pnl_refund_status,
     ai.product_cost AS product_cost,
+    ai.qty AS qty,
     coalesce(ap.payout_basis, 'NONE') AS payout_basis,
     -- ClickHouse LEFT JOIN fills missing String keys as '' (not NULL). Treat
     -- empty(ap.amazon_order_id) as "no PnL yet" and fall back to item_gross —
@@ -691,6 +715,7 @@ amazon_mkt AS (
     report_date,
     'amazon' AS platform,
     toUInt64(countDistinctIf(amazon_order_id, pnl_refund_status != 'CANCELLATION')) AS orders,
+    sum(qty) AS units,
     sum(item_revenue + item_tax_withheld) AS gross_sales,
     toFloat64(0) AS discounts,
     greatest(sum(item_revenue + item_tax_withheld) - sum(item_revenue + item_refunds + item_tax_withheld), 0) AS returns_amount,
@@ -766,6 +791,7 @@ SELECT
   u.report_date AS report_date,
   u.platform,
   u.orders,
+  u.units,
   round(u.gross_sales, 2) AS gross_sales,
   round(u.discounts, 2) AS discounts,
   round(u.returns_amount, 2) AS returns_amount,
@@ -895,6 +921,7 @@ def _densify_order_date_cohort_with_spend(
                 "report_date": spend_df["report_date"],
                 "platform": spend_df["platform"],
                 "orders": 0,
+                "units": 0,
                 "gross_sales": 0.0,
                 "discounts": 0.0,
                 "returns_amount": 0.0,
@@ -931,6 +958,7 @@ def _densify_order_date_cohort_with_spend(
                 "report_date": row["report_date"],
                 "platform": row["platform"],
                 "orders": 0,
+                "units": 0,
                 "gross_sales": 0.0,
                 "discounts": 0.0,
                 "returns_amount": 0.0,
@@ -986,6 +1014,7 @@ def fetch_order_date_cohort_rows(
     df = pd.DataFrame(res.result_rows, columns=res.column_names)
     numeric_cols = (
         "orders",
+        "units",
         "gross_sales",
         "discounts",
         "returns_amount",
@@ -1095,6 +1124,7 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         "amazon_net_cogs": float(t["amazon_net_cogs"]),
         "amazon_spend": float(t["amazon_spend"]),
         "amazon_orders": int(t["amazon_orders"]),
+        "amazon_units": int(t.get("amazon_units", 0) or 0),
     }
     totals["net_profit"] = round(
         totals["net_sales"] - totals["total_cogs"] - totals["total_ad_spend"], 2
@@ -1174,6 +1204,23 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
     """
     cogs = {r[0]: float(r[1]) for r in client.query(cogs_sql, parameters=bp).result_rows}
 
+    # Units ordered (line-item quantity, not order count). Gift cards excluded.
+    units_sql = f"""
+    WITH order_channel AS (
+      SELECT a.brand_id, a.order_id, any({_CHANNEL_MAP}) AS channel
+      FROM gold.fct_order_attribution a
+      WHERE a.brand_id={{b:Int64}} AND a.order_date>=toDate({{s:String}}) AND a.order_date<=toDate({{e:String}})
+        AND coalesce(a.is_test,0)=0 AND lowerUTF8(trimBoth(coalesce(a.order_status,'')))!='voided'
+      GROUP BY a.brand_id, a.order_id)
+    SELECT coalesce(oc.channel,'organic') AS channel,
+      toInt64(sum(toInt64(coalesce(i.quantity,0)))) AS units
+    FROM gold.fct_order_items i INNER JOIN order_channel oc ON oc.brand_id=i.brand_id AND oc.order_id=i.order_id
+    WHERE i.brand_id={{b:Int64}} AND i.order_date>=toDate({{s:String}}) AND i.order_date<=toDate({{e:String}})
+      AND coalesce(i.is_gift_card,0)=0
+    GROUP BY coalesce(oc.channel,'organic')
+    """
+    units = {r[0]: int(r[1]) for r in client.query(units_sql, parameters=bp).result_rows}
+
     def _spend(table):
         q = (f"SELECT round(sum(toFloat64(spend)),2) FROM gold.{table} "
              "WHERE brand_id={b:Int64} AND report_date>=toDate({s:String}) AND report_date<=toDate({e:String})")
@@ -1190,9 +1237,12 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         channels[ch] = {
             "sales": round(ns.get(ch, {}).get("net_sales", 0.0), 2),
             "order_count": ns.get(ch, {}).get("orders", 0),
+            "quantity": int(units.get(ch, 0) or 0),
             "cogs": round(cogs.get(ch, 0.0), 2),
             "ad_spend": round(spend.get(ch, 0.0), 2),
         }
+
+    totals["total_units"] = sum(int(channels[ch]["quantity"]) for ch in ("meta", "google", "organic"))
 
     return {"totals": totals, "channels": channels, "source": "clickhouse"}
 
@@ -1378,6 +1428,7 @@ def build_pdf_api_metrics(stats: dict) -> dict:
 
     def _enrich(ch):
         s, ad, co, oc = ch["sales"], ch["ad_spend"], ch["cogs"], ch["order_count"]
+        qty = int(ch.get("quantity") or 0)
         margin = s - co
         return {
             **ch,
@@ -1387,7 +1438,8 @@ def build_pdf_api_metrics(stats: dict) -> dict:
             # Dashboard BE ROAS = net_sales / (net_sales - net_cogs)
             "be_roas": round(_sd(s, margin), 2) if margin > 0 else 0.0,
             "cpp": round(_sd(ad, oc), 2),
-            "quantity": oc,
+            "quantity": qty,
+            "order_count": oc,
         }
 
     ch = {k: _enrich(stats["channels"][k]) for k in ("meta", "google", "organic")}
@@ -1398,6 +1450,7 @@ def build_pdf_api_metrics(stats: dict) -> dict:
         "ad_spend": round(t.get("amazon_spend", 0.0), 2),
         "cogs": round(t.get("amazon_net_cogs", 0.0), 2),
         "order_count": int(t.get("amazon_orders", 0)),
+        "quantity": int(t.get("amazon_units", 0) or 0),
     })
     # All-up Total matches General Statistics cards:
     #   Net Profit = net_sales - total_cogs - total_ad_spend
@@ -1417,7 +1470,7 @@ def build_pdf_api_metrics(stats: dict) -> dict:
         "net_roas": round(_sd(t["net_sales"] - t["total_cogs"], t["total_ad_spend"]), 2),
         "be_roas": round(_sd(t["net_sales"], _margin), 2) if _margin > 0 else 0.0,
         "order_count": int(t["total_orders"]),
-        "quantity": int(t["total_orders"]),
+        "quantity": int(t.get("total_units") or 0),
         "cpp": round(_sd(t["total_ad_spend"], t["total_orders"]), 2),
         "returns_cancels": int(t.get("returns_cancels", 0) or 0),
         "cancelled_orders": int(t.get("cancelled_orders", 0) or 0),
@@ -1464,7 +1517,7 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
             "gross_cogs": 0.0, "active_cogs": 0.0,
             "return_cogs": 0.0, "cancel_cogs": 0.0,
             "retcnl_cost": 0.0, "cogs_adjustment": 0.0, "cogs": 0.0,
-            "order_count": 0, "returned_orders": 0, "cancelled_orders": 0,
+            "order_count": 0, "units": 0, "returned_orders": 0, "cancelled_orders": 0,
         }
 
     agg = {p: _blank_channel() for p in ("meta", "google", "organic", "amazon")}
@@ -1486,6 +1539,7 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
             c["cancel_cogs"] += float(r.get("cancel_cogs") or 0)
             c["cogs"] += float(r.get("net_cogs") or 0)
             c["order_count"] += int(r.get("orders") or 0)
+            c["units"] += int(r.get("units") or 0)
             c["returned_orders"] += int(r.get("returned_orders") or 0)
             c["cancelled_orders"] += int(r.get("cancelled_orders") or 0)
 
@@ -1517,7 +1571,7 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
         c["net_roas"] = round(_sd(s - co, ad), 2)
         c["be_roas"] = round(_sd(s, margin), 2) if margin > 0 else 0.0
         c["cpp"] = round(_sd(ad, oc), 2)
-        c["quantity"] = oc
+        c["quantity"] = int(c.get("units") or 0)
         return c
 
     meta = _finish(agg["meta"])
@@ -1539,7 +1593,7 @@ def build_cohort_pdf_metrics(brand_id: int, start: str, end: str) -> dict:
     total["cogs_adjustment"] = round(total["cogs"] - total["gross_cogs"], 2)
     total["retcnl_cost"] = round(total["cogs"] - total["active_cogs"], 2)
     total["order_count"] = sum(int(p["order_count"]) for p in parts)
-    total["quantity"] = total["order_count"]
+    total["quantity"] = sum(int(p.get("quantity") or 0) for p in parts)
     total["returned_orders"] = sum(int(p["returned_orders"]) for p in parts)
     total["cancelled_orders"] = sum(int(p["cancelled_orders"]) for p in parts)
     total["returns_cancels"] = total["returned_orders"] + total["cancelled_orders"]

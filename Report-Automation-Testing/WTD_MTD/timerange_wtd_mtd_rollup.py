@@ -803,8 +803,16 @@ def extract_channel_summary(df: pd.DataFrame, channel_key: str) -> dict:
     spend = float(dedup_campaigns['spend'].sum()) if 'spend' in dedup_campaigns.columns else 0.0
     orders = int(dedup_campaigns['shopify_orders'].sum()) if 'shopify_orders' in dedup_campaigns.columns else 0
     
-    # Sum SKU-level metrics from all rows (including duplicates for SKU quantities)
-    quantity = int(df['sku_quantity'].sum()) if 'sku_quantity' in df.columns else 0
+    # Quantity = units sold (SKU rows only). Never fall back to order count.
+    qty_col = 'sku_quantity' if 'sku_quantity' in df.columns else ('quantity' if 'quantity' in df.columns else None)
+    if qty_col:
+        work = df
+        if 'sku' in df.columns:
+            sku = df['sku'].astype(str).str.strip()
+            work = df[sku.ne('') & sku.str.lower().ne('nan') & sku.str.lower().ne('none')]
+        quantity = int(pd.to_numeric(work[qty_col], errors='coerce').fillna(0).sum())
+    else:
+        quantity = 0
     
     # Calculate derived metrics
     net_roas = (revenue - cogs) / spend if spend > 0 else 0.0
@@ -1238,6 +1246,37 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
             summary_data[timeframe_key]['dashboard_total'] = dashboard_snapshot.get('total', {})
             if dashboard_snapshot.get('channels'):
                 summary_data[timeframe_key]['channels'].update(dashboard_snapshot['channels'])
+            # Quantity/units = gold line-item units, never order count.
+            try:
+                from dashboard_stats import build_cohort_pdf_metrics
+                brand_id = int(os.getenv('CLICKHOUSE_BRAND_ID', '20'))
+                cohort = build_cohort_pdf_metrics(brand_id, start_date_str, end_date_str)
+                label_to_api = {
+                    'Meta Ads': 'meta', 'Google Ads': 'google',
+                    'Organic': 'organic', 'Amazon': 'amazon',
+                }
+                api_to_email = {
+                    'meta': 'meta_ads', 'google': 'google_ads',
+                    'organic': 'organic', 'amazon': 'amazon',
+                }
+                for api_key, email_key in api_to_email.items():
+                    qty = int((cohort.get(api_key) or {}).get('quantity') or 0)
+                    if email_key in summary_data[timeframe_key]['channels']:
+                        summary_data[timeframe_key]['channels'][email_key]['quantity'] = qty
+                patched_rows = []
+                for name, row in (summary_data[timeframe_key].get('dashboard_channel_rows') or []):
+                    row = dict(row)
+                    api_key = label_to_api.get(name)
+                    if api_key and cohort.get(api_key):
+                        row['units'] = int(cohort[api_key].get('quantity') or 0)
+                    patched_rows.append((name, row))
+                if patched_rows:
+                    summary_data[timeframe_key]['dashboard_channel_rows'] = patched_rows
+                tot = dict(summary_data[timeframe_key].get('dashboard_total') or {})
+                tot['units'] = int((cohort.get('total') or {}).get('quantity') or 0)
+                summary_data[timeframe_key]['dashboard_total'] = tot
+            except Exception as _units_exc:
+                logger.warning('Could not overlay gold units onto quantity: %s', _units_exc)
             
             # Format date range for sheet name (DD-MM format, / is invalid in Excel sheet names)
             date_range_str = f"{start_date.strftime('%d-%m')} to {end_date.strftime('%d-%m')}"
@@ -1804,7 +1843,7 @@ def extract_daily_efficiency_metrics(daily_file_path: str, report_date: str = No
             revenue = float(canonical.get('revenue', total.get('sales', 0)) or 0)
             spend = float(canonical.get('ad_spend', total.get('ad_spend', 0)) or 0)
             orders = int(total.get('order_count', canonical.get('orders', 0)) or 0)
-            quantity = int(total.get('units', orders) or 0)
+            quantity = int(total.get('units') or total.get('quantity') or 0)
             if revenue or spend or orders:
                 metrics.update({
                     'revenue': revenue,
@@ -1997,7 +2036,7 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         revenue = canonical.get('revenue', dashboard_total.get('sales', sum(ch.get('revenue', 0) for ch in channels.values())))
         spend = canonical.get('ad_spend', dashboard_total.get('ad_spend', sum(ch.get('spend', 0) for ch in channels.values())))
         orders = dashboard_total.get('order_count', sum(ch.get('orders', 0) for ch in channels.values()))
-        quantity = dashboard_total.get('units', orders)
+        quantity = dashboard_total.get('units') or dashboard_total.get('quantity') or 0
         cpo = spend / orders if orders > 0 else 0.0
         cpu = spend / quantity if quantity > 0 else 0.0
         aov = revenue / orders if orders > 0 else 0.0
@@ -2106,7 +2145,7 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
         total_net_roas = dashboard_total.get('net_roas', (total_revenue - total_cogs) / total_spend if total_spend > 0 else 0.0)
         
         total_orders = dashboard_total.get('order_count', sum(ch.get('orders', 0) for ch in channels.values()))
-        total_quantity = dashboard_total.get('units', total_orders)
+        total_quantity = int(dashboard_total.get('units') or dashboard_total.get('quantity') or 0)
         
         # Calculate overall efficiency metrics
         total_cost_per_order = total_spend / total_orders if total_orders > 0 else 0.0

@@ -1777,7 +1777,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                     'gross_roas': round(meta_gross_roas, 2),
                     'net_roas': round(meta_net_roas, 2),
                     'be_roas': round(meta_be_roas, 2),
-                    'quantity': meta_orders,
+                    'quantity': 0,  # units, not orders
                     'cpp': round(meta_cpp, 2),
                     'order_count': meta_orders
                 },
@@ -1789,7 +1789,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                     'gross_roas': round(google_gross_roas, 2),
                     'net_roas': round(google_net_roas, 2),
                     'be_roas': round(google_be_roas, 2),
-                    'quantity': google_orders,
+                    'quantity': 0,  # units, not orders
                     'cpp': round(google_cpp, 2),
                     'order_count': google_orders
                 },
@@ -1801,7 +1801,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                     'gross_roas': 0,
                     'net_roas': 0,
                     'be_roas': 0,
-                    'quantity': organic_orders,
+                    'quantity': 0,  # units, not orders
                     'cpp': 0,
                     'order_count': organic_orders
                 },
@@ -1813,7 +1813,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                     'gross_roas': round(total_gross_roas, 2),
                     'net_roas': round(total_net_roas, 2),
                     'be_roas': round(total_be_roas, 2),
-                    'quantity': total_orders,
+                    'quantity': 0,  # units, not orders
                     'cpp': round(total_cpp, 2),
                     'order_count': total_orders
                 }
@@ -1940,7 +1940,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                 'gross_roas': round(meta_gross_roas, 2),
                 'net_roas': round(meta_net_roas, 2),
                 'be_roas': round(meta_be_roas, 2),
-                'quantity': meta_orders,
+                'quantity': 0,  # units, not orders
                 'cpp': round(meta_cpp, 2),
                 'order_count': meta_orders
             },
@@ -1952,7 +1952,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                 'gross_roas': round(google_gross_roas, 2),
                 'net_roas': round(google_net_roas, 2),
                 'be_roas': round(google_be_roas, 2),
-                'quantity': google_orders,
+                'quantity': 0,  # units, not orders
                 'cpp': round(google_cpp, 2),
                 'order_count': google_orders
             },
@@ -1964,7 +1964,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                 'gross_roas': 0,  # No ad spend for organic
                 'net_roas': 0,    # No ad spend for organic
                 'be_roas': 0,     # No ad spend for organic
-                'quantity': organic_orders,
+                'quantity': 0,  # units, not orders
                 'cpp': 0,         # No ad spend for organic
                 'order_count': organic_orders
             },
@@ -1976,7 +1976,7 @@ def get_organized_metrics_from_utm(start_date=None, end_date=None):
                 'gross_roas': round(total_gross_roas, 2),
                 'net_roas': round(total_net_roas, 2),
                 'be_roas': round(total_be_roas, 2),
-                'quantity': total_orders,
+                'quantity': 0,  # units, not orders
                 'cpp': round(total_cpp, 2),
                 'order_count': total_orders
             }

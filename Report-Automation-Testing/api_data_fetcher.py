@@ -1767,7 +1767,7 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
         'gross_roas': round(safe_div(meta_sales, meta_ad_spend), 2),
         'net_roas': round(safe_div(meta_sales - meta_cogs, meta_ad_spend), 2),
         'be_roas': round(safe_div(meta_sales, meta_sales - meta_cogs), 2) if (meta_sales - meta_cogs) > 0 else 0.0,
-        'quantity': meta_orders,
+        'quantity': 0,  # units, not orders
         'cpp': round(safe_div(meta_ad_spend, meta_orders), 2),
         'order_count': meta_orders,
     }
@@ -1784,7 +1784,7 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
         'gross_roas': round(safe_div(google_sales, google_ad_spend), 2),
         'net_roas': round(safe_div(google_sales - google_cogs, google_ad_spend), 2),
         'be_roas': round(safe_div(google_sales, google_sales - google_cogs), 2) if (google_sales - google_cogs) > 0 else 0.0,
-        'quantity': google_orders,
+        'quantity': 0,  # units, not orders
         'cpp': round(safe_div(google_ad_spend, google_orders), 2),
         'order_count': google_orders,
     }
@@ -1800,7 +1800,7 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
         'gross_roas': 0,
         'net_roas': 0,
         'be_roas': round(safe_div(organic_sales, organic_sales - organic_cogs), 2) if (organic_sales - organic_cogs) > 0 else 0.0,
-        'quantity': organic_orders,
+        'quantity': 0,  # units, not orders
         'cpp': 0,
         'order_count': organic_orders,
     }
@@ -1815,7 +1815,7 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
         'gross_roas': round(safe_div(total_sales, total_spend), 2),
         'net_roas': round(safe_div(total_sales - total_unit_cost, total_spend), 2),
         'be_roas': round(safe_div(total_sales, total_sales - total_unit_cost), 2) if (total_sales - total_unit_cost) > 0 else 0.0,
-        'quantity': total_orders,
+        'quantity': 0,  # units, not orders
         'cpp': round(safe_div(total_spend, total_orders), 2),
         'order_count': total_orders,
     }

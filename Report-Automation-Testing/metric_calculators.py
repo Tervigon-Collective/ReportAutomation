@@ -135,6 +135,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
     ns = data.get("net_sales_breakdown") or {}
     cogs_bd = data.get("cogs_breakdown") or {}
     orders_bd = data.get("orders_breakdown") or {}
+    units_bd = data.get("units_breakdown") or data.get("quantity_breakdown") or {}
     amazon = data.get("amazon") or {}
 
     channels = {}
@@ -145,6 +146,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
             ad_spend=spend,
             cogs=chan_value(cogs_bd, ch),
             order_count=int(chan_value(orders_bd, ch)),
+            quantity=int(chan_value(units_bd, ch)),
         )
 
     amz_ad = ad.get("amazon", {})
@@ -154,6 +156,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
         ad_spend=amz_spend,
         cogs=_f(amazon.get("cogs")),
         order_count=int(_f(amazon.get("orders"))),
+        quantity=_units_from_amazon_payload(amazon),
     )
 
     # Total KPIs match General Statistics (all channels).
@@ -165,6 +168,7 @@ def channel_metrics_from_historical_dashboard(data: Mapping[str, Any]) -> dict:
         ad_spend=_f(data.get("total_ad_spend")),
         cogs=_f(data.get("total_cogs")),
         order_count=int(_f(data.get("total_orders"))),
+        quantity=int(_f(data.get("total_units") or data.get("units") or 0)),
         net_profit=_f(data.get("net_profit")),
         gross_roas=compute_gross_roas(_f(data.get("net_sales")), _f(data.get("total_ad_spend"))),
         net_roas=compute_net_roas(
@@ -225,9 +229,10 @@ _EMAIL_CHANNEL_LABELS = {
 
 def _units_from_amazon_payload(amazon: Mapping[str, Any]) -> int:
     for key in ("units", "items", "items_shipped", "quantity"):
-        if amazon.get(key) is not None:
-            return int(_f(amazon.get(key)))
-    return int(_f(amazon.get("orders")))
+        val = amazon.get(key)
+        if val not in (None, ""):
+            return int(_f(val))
+    return 0
 
 
 def channel_email_summary_from_bucket(

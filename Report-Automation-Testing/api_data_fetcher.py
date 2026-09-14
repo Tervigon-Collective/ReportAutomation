@@ -1524,7 +1524,20 @@ def fetch_wtd_mtd_dashboard_snapshot(start_date: str, end_date: str) -> dict:
     from metric_calculators import wtd_mtd_snapshot_from_historical_dashboard
 
     data = fetch_historical_dashboard_cached(start_date, end_date)
-    return wtd_mtd_snapshot_from_historical_dashboard(data or {})
+    snap = wtd_mtd_snapshot_from_historical_dashboard(data or {})
+    try:
+        from dashboard_stats import overlay_cohort_order_quantity
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", os.getenv("API_BRAND_ID", "20")))
+        snap = overlay_cohort_order_quantity(
+            snap,
+            _to_date_only(start_date),
+            _to_date_only(end_date),
+            brand_id=brand_id,
+            kind="snapshot",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[WTD/MTD] gold order/qty overlay skipped: %s", exc)
+    return snap
 
 
 def fetch_historical_time_patterns(start_date: str, end_date: str) -> Optional[dict]:
@@ -1709,6 +1722,14 @@ def get_organized_metrics_for_pdf(timeframe_start=None, timeframe_end=None):
     data = fetch_historical_dashboard_cached(start_str, end_str)
     if data:
         result = channel_metrics_from_historical_dashboard(data)
+        try:
+            from dashboard_stats import overlay_cohort_order_quantity
+            brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", os.getenv("API_BRAND_ID", "20")))
+            result = overlay_cohort_order_quantity(
+                result, start_str, end_str, brand_id=brand_id, kind="buckets"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[PDF metrics] gold order/qty overlay skipped: %s", exc)
         return {k: result[k] for k in ("meta", "google", "organic", "amazon", "total") if k in result}
 
     if USE_API_ONLY:

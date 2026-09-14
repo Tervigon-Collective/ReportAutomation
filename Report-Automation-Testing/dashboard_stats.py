@@ -39,7 +39,7 @@ _REAL_TABLES = [
 # Shopify channel table it is folded into 'organic' (alongside unattributed orders).
 _CHANNEL_MAP = """multiIf(
   lowerUTF8(trimBoth(coalesce(a.lt_platform,''))) IN ('meta','facebook','instagram','fb','ig'),'meta',
-  lowerUTF8(trimBoth(coalesce(a.lt_platform,''))) IN ('google','google_ads'),'google',
+  lowerUTF8(trimBoth(coalesce(a.lt_platform,''))) IN ('google','google_ads','google-ads'),'google',
   'organic')"""
 
 
@@ -1179,7 +1179,8 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         o.order_status, o.is_rev_adj, o.nr, o.nret, o.gret
       FROM orders_dedup o LEFT JOIN order_channel oc ON oc.brand_id=o.brand_id AND oc.order_id=o.order_id
       WHERE o.order_date>=toDate({{s:String}}) AND o.order_date<=toDate({{e:String}})
-        AND coalesce(o.is_test,0)=0 AND lowerUTF8(trimBoth(coalesce(o.order_status,'')))!='voided')
+        AND coalesce(o.is_test,0)=0 AND coalesce(o.is_rev_adj,0)=0
+        AND lowerUTF8(trimBoth(coalesce(o.order_status,'')))!='voided')
     SELECT channel, toInt64(count()) AS orders,
       round(sum(if(lowerUTF8(trimBoth(coalesce(order_status,'')))='cancelled',0,
         if(is_rev_adj=1,0,if(nr>0,nret,greatest(0,gret-disc_excl))))),2) AS net_sales
@@ -1243,6 +1244,25 @@ def _clickhouse_stats(brand_id: int, start: str, end: str) -> dict:
         }
 
     totals["total_units"] = sum(int(channels[ch]["quantity"]) for ch in ("meta", "google", "organic"))
+    try:
+        amz_u = client.query(
+            """
+            SELECT toInt64(sumIf(
+              toInt64(coalesce(quantity_ordered, 0)),
+              coalesce(pnl_refund_status, '') != 'CANCELLATION'
+            ))
+            FROM gold.fct_amazon_order_items
+            WHERE brand_id={b:Int64}
+              AND purchase_date IS NOT NULL
+              AND toDate(purchase_date)>=toDate({s:String})
+              AND toDate(purchase_date)<=toDate({e:String})
+            """,
+            parameters=bp,
+        ).result_rows[0][0]
+        totals["amazon_units"] = int(amz_u or 0)
+        totals["total_units"] = int(totals["total_units"]) + totals["amazon_units"]
+    except Exception as ex:  # noqa: BLE001
+        logger.warning("[dashboard] amazon units query failed (%s)", ex)
 
     return {"totals": totals, "channels": channels, "source": "clickhouse"}
 
@@ -1376,6 +1396,131 @@ def _run_source(name: str, brand_id: int, company_id: int, start: str, end: str)
     raise ValueError(f"unknown dashboard source: {name}")
 
 
+def overlay_cohort_order_quantity(
+    payload: dict,
+    start: str,
+    end: str,
+    *,
+    brand_id: Optional[int] = None,
+    kind: str = "auto",
+) -> dict:
+    """Replace order_count / quantity with gold order-date cohort figures.
+
+    Money fields stay on the original source. Cohort excludes voided/test orders
+    and uses line-item `quantity` (gift cards excluded), including Amazon units.
+    """
+    if not payload:
+        return payload
+    if brand_id is None:
+        brand_id = int(os.getenv("CLICKHOUSE_BRAND_ID", os.getenv("API_BRAND_ID", "20")))
+    try:
+        cohort = build_cohort_pdf_metrics(int(brand_id), _to_date_str(start), _to_date_str(end))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[dashboard] gold order/qty overlay skipped (%s)", exc)
+        return payload
+
+    total = cohort.get("total") or {}
+    if not int(total.get("order_count") or 0) and not int(total.get("quantity") or 0):
+        return payload
+
+    def _cpp(spend, orders) -> float:
+        try:
+            o = int(orders or 0)
+            return round(float(spend or 0) / o, 2) if o else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    detected = kind
+    if kind == "auto":
+        if isinstance(payload.get("channels"), dict) and isinstance(payload.get("totals"), dict):
+            detected = "stats"
+        elif "canonical_totals" in payload or "channel_rows" in payload:
+            detected = "snapshot"
+        else:
+            detected = "buckets"
+
+    api_channels = ("meta", "google", "organic", "amazon")
+    email_from_api = {
+        "meta": "meta_ads",
+        "google": "google_ads",
+        "organic": "organic",
+        "amazon": "amazon",
+    }
+    label_from_api = {
+        "meta": "Meta Ads",
+        "google": "Google Ads",
+        "organic": "Organic",
+        "amazon": "Amazon",
+    }
+
+    if detected == "stats":
+        channels = payload.setdefault("channels", {})
+        totals = payload.setdefault("totals", {})
+        for ch in ("meta", "google", "organic"):
+            src = cohort.get(ch) or {}
+            bucket = channels.setdefault(ch, {})
+            bucket["order_count"] = int(src.get("order_count") or 0)
+            bucket["quantity"] = int(src.get("quantity") or src.get("units") or 0)
+        amz = cohort.get("amazon") or {}
+        totals["amazon_orders"] = int(amz.get("order_count") or totals.get("amazon_orders") or 0)
+        totals["amazon_units"] = int(amz.get("quantity") or amz.get("units") or 0)
+        totals["total_orders"] = int(total.get("order_count") or 0)
+        totals["total_units"] = int(total.get("quantity") or 0)
+    elif detected == "snapshot":
+        channels = payload.setdefault("channels", {})
+        for api_key, email_key in email_from_api.items():
+            src = cohort.get(api_key) or {}
+            bucket = channels.setdefault(email_key, {})
+            orders = int(src.get("order_count") or 0)
+            qty = int(src.get("quantity") or src.get("units") or 0)
+            spend = bucket.get("spend", bucket.get("ad_spend", 0))
+            bucket["orders"] = orders
+            bucket["order_count"] = orders
+            bucket["quantity"] = qty
+            bucket["cost_per_order"] = _cpp(spend, orders)
+            try:
+                bucket["cost_per_unit"] = round(float(spend or 0) / qty, 2) if qty else 0.0
+            except (TypeError, ValueError):
+                bucket["cost_per_unit"] = 0.0
+        tot = dict(payload.get("total") or {})
+        tot["order_count"] = int(total.get("order_count") or 0)
+        tot["units"] = int(total.get("quantity") or 0)
+        tot["quantity"] = tot["units"]
+        payload["total"] = tot
+        canon = dict(payload.get("canonical_totals") or {})
+        if canon:
+            canon["orders"] = int(total.get("order_count") or canon.get("orders") or 0)
+            payload["canonical_totals"] = canon
+        patched_rows = []
+        existing = {name: dict(row) for name, row in (payload.get("channel_rows") or [])}
+        for api_key in api_channels:
+            src = cohort.get(api_key) or {}
+            label = label_from_api[api_key]
+            row = existing.get(label) or {}
+            row["order_count"] = int(src.get("order_count") or 0)
+            row["units"] = int(src.get("quantity") or src.get("units") or 0)
+            patched_rows.append((label, row))
+        if patched_rows:
+            payload["channel_rows"] = patched_rows
+    else:
+        for ch in api_channels:
+            src = cohort.get(ch) or {}
+            bucket = payload.setdefault(ch, {})
+            orders = int(src.get("order_count") or 0)
+            qty = int(src.get("quantity") or src.get("units") or 0)
+            bucket["order_count"] = orders
+            bucket["quantity"] = qty
+            spend = bucket.get("ad_spend", 0)
+            bucket["cpp"] = _cpp(spend, orders)
+        tot = payload.setdefault("total", {})
+        tot["order_count"] = int(total.get("order_count") or 0)
+        tot["quantity"] = int(total.get("quantity") or 0)
+        tot["cpp"] = _cpp(tot.get("ad_spend", 0), tot.get("order_count", 0))
+
+    payload["order_qty_source"] = "order_date_cohort"
+    return payload
+
+
 def fetch_general_statistics(
     brand_id: int,
     company_id: int,
@@ -1400,7 +1545,7 @@ def fetch_general_statistics(
         if stats and stats.get("totals"):
             if name != _source_order()[0]:
                 logger.info("[dashboard] served from fallback source '%s'", name)
-            return stats
+            return overlay_cohort_order_quantity(stats, start, end, brand_id=brand_id, kind="stats")
         logger.warning("[dashboard] source '%s' returned no data; trying next", name)
     if last_err is not None:
         logger.error("[dashboard] all sources failed; last error: %s", last_err)

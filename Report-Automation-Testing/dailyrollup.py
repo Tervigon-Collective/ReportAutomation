@@ -691,15 +691,14 @@ def explode_skus(df: pd.DataFrame) -> pd.DataFrame:
             return pd.DataFrame()
 
         for _, group in attr_df.groupby(ad_group_cols, dropna=False):
-            attributed_revenue = float(group['attributed_orders_revenue'].sum())
-            attributed_cogs = float(group['attributed_orders_cogs'].sum())
-            attributed_quantity = int(group['attributed_orders_quantity'].sum())
+            # Direct mode after merge: hourly attributed_* copies of the same
+            # day's totals must not be summed (that inflated SKU quantity).
             merged_orders = _merge_product_details_orders(group['product_details'])
             skus = parse_product_details(
                 merged_orders,
-                attributed_revenue=attributed_revenue,
-                attributed_cogs=attributed_cogs,
-                attributed_quantity=attributed_quantity,
+                attributed_revenue=0.0,
+                attributed_cogs=0.0,
+                attributed_quantity=0,
             )
             if not skus:
                 continue
@@ -932,6 +931,7 @@ def build_channel_summary_from_marketing_df(df: pd.DataFrame) -> dict:
             ad_spend=(_sum(sub, "spend") if key != "organic" else 0.0),
             cogs=_sum(sub, "shopify_cogs"),
             order_count=int(_sum(sub, "shopify_orders")),
+            quantity=int(_sum(sub, "total_sku_quantity")),
         )
     return out
 

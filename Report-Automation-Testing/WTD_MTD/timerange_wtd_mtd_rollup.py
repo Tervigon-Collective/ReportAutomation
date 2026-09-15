@@ -33,6 +33,37 @@ from dailyrollup import (
     get_campaign_data, get_meta_funnel_metrics, get_campaign_grand_total_for_pdf
 )
 
+
+def _blank_hierarchy_value(val) -> str:
+    """Normalize missing campaign/ad names so NaN rows still merge with SKUs."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(val).strip()
+    if text.lower() in ("nan", "none", "<na>", "nat"):
+        return ""
+    return text
+
+
+def _norm_hierarchy_cols(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    out = df.copy()
+    for col in cols:
+        if col in out.columns:
+            out[col] = out[col].map(_blank_hierarchy_value)
+    return out
+
+
+def _unique_orders_and_qty(product_details_values) -> tuple[int, int]:
+    """Unique order count and line-item units from product_details payloads."""
+    merged = _merge_product_details_orders(product_details_values)
+    skus = parse_product_details(merged, 0.0, 0.0, 0)
+    qty = int(sum(int(s.get("quantity") or 0) for s in skus))
+    return len(merged), qty
+
 # Import PDF generation functions
 from api_data_fetcher import get_organized_metrics_for_pdf
 from excel_generation import generate_pdf_report, get_google_funnel_metrics
@@ -239,6 +270,8 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
     if not group_cols:
         print(f"[{timeframe_label}] No grouping columns found for {source_type}")
         return pd.DataFrame()
+
+    df = _norm_hierarchy_cols(df, group_cols)
     
     print(f"[{timeframe_label}] {source_type} grouping by: {group_cols}")
     
@@ -253,6 +286,24 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
     
     # Aggregate metrics by hierarchy
     metrics_agg = df.groupby(group_cols, dropna=False)[numeric_cols].sum().reset_index()
+    metrics_agg = _norm_hierarchy_cols(metrics_agg, group_cols)
+
+    # Spend/clicks/impressions are incremental per day. attributed_orders_count is
+    # often a period-or-day copy, so summing it inflates orders (e.g. 639 vs 373).
+    unique_rows = []
+    for _, group in df.groupby(group_cols, dropna=False):
+        n_orders, _n_qty = _unique_orders_and_qty(group.get("product_details", []))
+        rec = {c: group.iloc[0][c] for c in group_cols}
+        rec["_unique_orders"] = n_orders
+        unique_rows.append(rec)
+    if unique_rows:
+        unique_df = _norm_hierarchy_cols(pd.DataFrame(unique_rows), group_cols)
+        metrics_agg = metrics_agg.merge(unique_df, on=group_cols, how="left")
+        metrics_agg["shopify_orders"] = (
+            pd.to_numeric(metrics_agg["_unique_orders"], errors="coerce").fillna(0).astype(int)
+        )
+        metrics_agg = metrics_agg.drop(columns=["_unique_orders"], errors="ignore")
+    channel_unique_orders, channel_unique_qty = _unique_orders_and_qty(df.get("product_details", []))
     
     # Calculate derived metrics
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -319,6 +370,8 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
         
         # Round for output
         metrics_agg = round_for_output(metrics_agg)
+        metrics_agg.attrs["unique_orders"] = channel_unique_orders
+        metrics_agg.attrs["unique_quantity"] = channel_unique_qty
         return metrics_agg
     
     # Merge metrics with SKU data (same logic as dailyrollup.py)
@@ -500,7 +553,8 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
         merged = merged.sort_values(sort_cols, ascending=ascending_flags, na_position='last').reset_index(drop=True)
     
     print(f"[{timeframe_label}] Generated {len(merged)} {source_type} hierarchy-SKU combinations")
-    
+    merged.attrs["unique_orders"] = channel_unique_orders
+    merged.attrs["unique_quantity"] = channel_unique_qty
     return merged
 
 def build_hierarchy_sku_rollup(df: pd.DataFrame, group_cols: list, timeframe_label: str) -> pd.DataFrame:
@@ -529,6 +583,7 @@ def build_hierarchy_sku_rollup(df: pd.DataFrame, group_cols: list, timeframe_lab
     # product_details is copied from the ad node onto every time bucket, so
     # row-wise Direct Mode multiplied quantity by the number of days/hours.
     group_cols_present = [c for c in group_cols if c in df.columns]
+    df = _norm_hierarchy_cols(df, group_cols_present)
     grouped = (
         df.groupby(group_cols_present, dropna=False)
         if group_cols_present
@@ -567,11 +622,9 @@ def build_hierarchy_sku_rollup(df: pd.DataFrame, group_cols: list, timeframe_lab
     # Group by hierarchy + SKU and aggregate (same logic as dailyrollup.py)
     sku_group_cols = group_cols + ['sku']
     sku_group_cols = [c for c in sku_group_cols if c in sku_df.columns]
-    
-    # Ensure all grouping columns are strings to avoid unhashable type errors
-    for col in sku_group_cols:
-        if col in sku_df.columns:
-            sku_df[col] = sku_df[col].astype(str)
+    sku_df = _norm_hierarchy_cols(sku_df, [c for c in sku_group_cols if c != 'sku'])
+    if 'sku' in sku_df.columns:
+        sku_df['sku'] = sku_df['sku'].map(_blank_hierarchy_value)
     
     print(f"[{timeframe_label}] SKU rollup grouping by: {sku_group_cols}")
     print(f"[{timeframe_label}] SKU DataFrame shape before grouping: {sku_df.shape}")
@@ -924,6 +977,13 @@ def add_grand_total_row(df: pd.DataFrame, timeframe_label: str) -> pd.DataFrame:
             total_map[col] = float(dedup_campaigns[col].sum())
         for col in sku_cols:
             total_map[col] = float(df[col].sum())
+
+        unique_orders = df.attrs.get("unique_orders")
+        unique_qty = df.attrs.get("unique_quantity")
+        if unique_orders is not None and "shopify_orders" in total_map:
+            total_map["shopify_orders"] = int(unique_orders)
+        if unique_qty is not None and "sku_quantity" in total_map:
+            total_map["sku_quantity"] = int(unique_qty)
         
         # Calculate derived totals (same logic as dailyrollup.py)
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -989,6 +1049,8 @@ def add_grand_total_row(df: pd.DataFrame, timeframe_label: str) -> pd.DataFrame:
         
         # Append total row
         df_with_total = pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+        df_with_total.attrs["unique_orders"] = df.attrs.get("unique_orders")
+        df_with_total.attrs["unique_quantity"] = df.attrs.get("unique_quantity")
         
         print(f"[{timeframe_label}] Added Grand Total row")
         return df_with_total

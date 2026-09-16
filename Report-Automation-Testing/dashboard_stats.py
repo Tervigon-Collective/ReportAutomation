@@ -1482,6 +1482,11 @@ def overlay_cohort_order_quantity(
                 bucket["cost_per_unit"] = round(float(spend or 0) / qty, 2) if qty else 0.0
             except (TypeError, ValueError):
                 bucket["cost_per_unit"] = 0.0
+            rev = bucket.get("revenue", bucket.get("sales", 0))
+            try:
+                bucket["avg_order_value"] = round(float(rev or 0) / orders, 2) if orders else 0.0
+            except (TypeError, ValueError):
+                bucket["avg_order_value"] = 0.0
         tot = dict(payload.get("total") or {})
         tot["order_count"] = int(total.get("order_count") or 0)
         tot["units"] = int(total.get("quantity") or 0)

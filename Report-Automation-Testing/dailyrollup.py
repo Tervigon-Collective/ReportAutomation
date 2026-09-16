@@ -8,6 +8,28 @@ from timeframe_config import get_timeframe_config
 from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_shopify_sales_orders_detail
 from revenue_gst import apply_net_revenue, apply_net_revenue_column
 
+def _norm_merge_key(val) -> str:
+    """Stringify merge keys so float campaign ids match SKU string keys."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (int, np.integer)):
+        return str(int(val))
+    if isinstance(val, (float, np.floating)):
+        if float(val).is_integer():
+            return str(int(val))
+        return str(val).strip()
+    text = str(val).strip()
+    if text.lower() in ("nan", "none", "<na>", "nat"):
+        return ""
+    if text.endswith(".0") and text[:-2].lstrip("-").isdigit():
+        return text[:-2]
+    return text
+
 # Preferred funnel-based column order
 FUNNEL_ORDER: list[str] = [
     # Meta delivery
@@ -952,7 +974,7 @@ def build_meta_ads_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
     for _df in [metrics, sku_rollup]:
         for c in key_cols:
             if c in _df.columns:
-                _df[c] = _df[c].astype(str).str.strip()
+                _df[c] = _df[c].map(_norm_merge_key)
 
     if metrics.empty:
         return pd.DataFrame()
@@ -1417,7 +1439,7 @@ def build_google_campaigns_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
     for _df in [metrics, sku_rollup]:
         for c in key_cols:
             if c in _df.columns:
-                _df[c] = _df[c].astype(str).str.strip()
+                _df[c] = _df[c].map(_norm_merge_key)
     
     if metrics.empty:
         return pd.DataFrame()
@@ -1496,7 +1518,7 @@ def build_organic_campaigns_rollup_with_sku(df: pd.DataFrame) -> pd.DataFrame:
     for _df in [metrics, sku_rollup]:
         for c in key_cols:
             if c in _df.columns:
-                _df[c] = _df[c].astype(str).str.strip()
+                _df[c] = _df[c].map(_norm_merge_key)
     
     if metrics.empty:
         return pd.DataFrame()

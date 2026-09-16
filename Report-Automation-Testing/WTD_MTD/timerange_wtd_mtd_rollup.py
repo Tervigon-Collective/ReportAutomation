@@ -35,7 +35,7 @@ from dailyrollup import (
 
 
 def _blank_hierarchy_value(val) -> str:
-    """Normalize missing campaign/ad names so NaN rows still merge with SKUs."""
+    """Normalize campaign/ad names so float ids still merge with string SKU keys."""
     if val is None:
         return ""
     try:
@@ -43,9 +43,19 @@ def _blank_hierarchy_value(val) -> str:
             return ""
     except (TypeError, ValueError):
         pass
+    if isinstance(val, (int, np.integer)):
+        return str(int(val))
+    if isinstance(val, (float, np.floating)):
+        if float(val).is_integer():
+            return str(int(val))
+        return str(val).strip()
     text = str(val).strip()
     if text.lower() in ("nan", "none", "<na>", "nat"):
         return ""
+    if text.endswith(".0"):
+        head = text[:-2]
+        if head.lstrip("-").isdigit():
+            return head
     return text
 
 
@@ -378,6 +388,8 @@ def build_meta_google_hierarchy_rollup(df: pd.DataFrame, timeframe_label: str, s
     print(f"[{timeframe_label}] Merging metrics ({len(metrics_agg)} rows) with SKU rollup ({len(sku_rollup)} rows)")
     print(f"[{timeframe_label}] Merge keys: {group_cols}")
     
+    sku_rollup = _norm_hierarchy_cols(sku_rollup, group_cols)
+    metrics_agg = _norm_hierarchy_cols(metrics_agg, group_cols)
     merged = metrics_agg.merge(
         sku_rollup,
         on=group_cols,
@@ -1537,39 +1549,19 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     start_date.strftime('%Y-%m-%d'),
                     end_date.strftime('%Y-%m-%d'),
                 )
+                # Keep dashboard Amazon on channels['amazon'] so the email/PDF
+                # channel row ties to GET /v1/historical/dashboard and sums into
+                # TOTAL. Settlement is a different P&L (net-payout / delivery
+                # refunds) — store it aside for the footnote only.
                 if amz.get('available'):
-                    summary_data[timeframe_key]['channels']['amazon'] = {
-                        'revenue': amz.get('net_sales', amz.get('revenue', 0)),
-                        'gross_sales': amz.get('gross_sales', 0),
-                        'refunds': amz.get('refunds', 0),
-                        'net_sales': amz.get('net_sales', 0),
-                        'cogs': amz.get('cogs', 0),
-                        'spend': amz.get('spend', 0),
-                        'orders': amz.get('orders', 0),
-                        'quantity': amz.get('units', 0),
-                        'order_item_lines': amz.get('order_item_lines', 0),
-                        'return_lines': amz.get('return_lines', 0),
-                        'return_orders': amz.get('return_orders', 0),
-                        'return_units': amz.get('return_units', 0),
-                        'net_profit': amz.get('net_profit', 0),
-                        'net_roas': amz.get('net_roas', 0),
-                        'cost_per_order': (
-                            amz.get('spend', 0) / amz['orders'] if amz.get('orders') else 0.0
-                        ),
-                        'cost_per_unit': (
-                            amz.get('spend', 0) / amz['units'] if amz.get('units') else 0.0
-                        ),
-                        'avg_order_value': (
-                            amz.get('net_sales', 0) / amz['orders'] if amz.get('orders') else 0.0
-                        ),
-                        'top_campaigns': [],
-                        'bottom_campaigns': [],
-                    }
+                    summary_data[timeframe_key]['amazon_settlement'] = amz
+                    dash_amz = (summary_data[timeframe_key].get('channels') or {}).get('amazon') or {}
                     print(
-                        f"[{label}] Amazon recon: gross=₹{amz.get('gross_sales', 0):,.2f} "
-                        f"delivery_refunds=₹{amz.get('refunds', 0):,.2f} net=₹{amz.get('net_sales', 0):,.2f} "
-                        f"orders={amz.get('orders', 0)} item_lines={amz.get('order_item_lines', 0)} "
-                        f"return_lines={amz.get('return_lines', 0)}"
+                        f"[{label}] Amazon dashboard: sales=₹{dash_amz.get('revenue', 0):,.2f} "
+                        f"cogs=₹{dash_amz.get('cogs', 0):,.2f} spend=₹{dash_amz.get('spend', 0):,.2f} "
+                        f"orders={dash_amz.get('orders', 0)} | settlement net=₹{amz.get('net_sales', 0):,.2f} "
+                        f"gross=₹{amz.get('gross_sales', 0):,.2f} delivery_refunds=₹{amz.get('refunds', 0):,.2f} "
+                        f"orders={amz.get('orders', 0)}"
                     )
             except Exception as e:
                 print(f"[{label}] Failed to add ClickHouse Amazon sheets: {e}")
@@ -2869,11 +2861,38 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 }
 
             def _build_channels(ch_data, amazon):
-                rows = [(_ch_display.get(k, k), _ch_row(v)) for k, v in ch_data.items()]
-                amz = _amazon_row(amazon)
-                if amz:
-                    rows.append(('Amazon', amz))
+                rows = []
+                for k, v in (ch_data or {}).items():
+                    if k == 'amazon':
+                        continue
+                    rows.append((_ch_display.get(k, k), _ch_row(v)))
+                dash_amz = (ch_data or {}).get('amazon')
+                if dash_amz:
+                    rows.append(('Amazon', _ch_row(dash_amz)))
+                else:
+                    amz = _amazon_row(amazon)
+                    if amz:
+                        rows.append(('Amazon', amz))
                 return rows
+
+            def _residual_row(channel_rows, total):
+                if not channel_rows or not total:
+                    return None
+                money_keys = ('sales', 'cogs', 'ad_spend', 'net_profit')
+                residual = {
+                    k: float(total.get(k) or 0) - sum(float(row.get(k) or 0) for _, row in channel_rows)
+                    for k in money_keys
+                }
+                if all(abs(residual[k]) < 1.0 for k in money_keys):
+                    return None
+                residual['net_roas'] = 0.0
+                residual['order_count'] = int(total.get('order_count') or 0) - sum(
+                    int(row.get('order_count') or 0) for _, row in channel_rows
+                )
+                residual['units'] = int(total.get('units') or 0) - sum(
+                    int(row.get('units') or 0) for _, row in channel_rows
+                )
+                return residual
 
             def _total_row(channel_rows):
                 rev = sum(r['sales'] for _, r in channel_rows)
@@ -2969,6 +2988,10 @@ def send_wtd_mtd_email(wtd_mtd_file_path: str, daily_file_path: str, amazon_file
                 'mtd_channels': mtd_channels_ctx,
                 'wtd_total': wtd_total_ctx,
                 'mtd_total': mtd_total_ctx,
+                'wtd_residual': _residual_row(wtd_channels_ctx, wtd_total_ctx),
+                'mtd_residual': _residual_row(mtd_channels_ctx, mtd_total_ctx),
+                'wtd_amazon_settlement': amazon_wtd if amazon_wtd and amazon_wtd.get('available') else None,
+                'mtd_amazon_settlement': amazon_mtd if amazon_mtd and amazon_mtd.get('available') else None,
                 'efficiency': efficiency_ctx,
                 'wtd_campaigns': [],
             }

@@ -26,6 +26,7 @@ from excel_formatting import apply_sheet_formatting, move_totals_to_top
 from channel_pnl import (
     fetch_ad_channel_pnl, fetch_channel_sku_lines,
     build_channel_sheet, write_channel_sheet,
+    channel_summaries_from_pnl, dashboard_rows_from_summaries,
 )
 
 # Import functions from dailyrollup.py
@@ -1343,18 +1344,32 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                     )
                     write_channel_sheet(writer, sheet_name, channel_df, ad_spans)
 
-            # The email KPI summary still runs off the attribution API path.
-            if df.empty:
-                for channel_suffix in ['meta_ads', 'google_ads', 'organic']:
-                    if channel_suffix not in summary_data[timeframe_key]['channels']:
-                        summary_data[timeframe_key]['channels'][channel_suffix] = \
-                            extract_channel_summary(pd.DataFrame(), channel_suffix)
-            else:
-                rollups = build_channel_rollups(df, label)
-                for channel_key in ['meta_ads', 'google_ads', 'organic']:
-                    if channel_key not in summary_data[timeframe_key]['channels']:
-                        summary_data[timeframe_key]['channels'][channel_key] = \
-                            extract_channel_summary(rollups.get(channel_key, pd.DataFrame()), channel_key)
+            # Email KPIs come from the same ClickHouse source as the sheets, so
+            # the email body and the attachments cannot disagree. Amazon keeps
+            # its settlement P&L -- it is not in fct_ad_channel_pnl_daily.
+            try:
+                ch_summaries = channel_summaries_from_pnl(pnl_df, sku_lines_df)
+                if ch_summaries:
+                    summary_data[timeframe_key]['channels'].update(ch_summaries)
+                    amazon_ch = summary_data[timeframe_key]['channels'].get('amazon')
+                    rows, total, canonical = dashboard_rows_from_summaries(
+                        ch_summaries, amazon_ch
+                    )
+                    summary_data[timeframe_key]['dashboard_channel_rows'] = rows
+                    summary_data[timeframe_key]['dashboard_total'] = total
+                    summary_data[timeframe_key]['canonical_totals'] = canonical
+                    print(
+                        f"[{label}] Email KPIs from ClickHouse: "
+                        f"revenue={canonical['revenue']:,.2f} cogs={canonical['cogs']:,.2f} "
+                        f"spend={canonical['ad_spend']:,.2f} net_profit={canonical['net_profit']:,.2f}"
+                    )
+                else:
+                    for channel_suffix in ['meta_ads', 'google_ads', 'organic']:
+                        if channel_suffix not in summary_data[timeframe_key]['channels']:
+                            summary_data[timeframe_key]['channels'][channel_suffix] = \
+                                extract_channel_summary(pd.DataFrame(), channel_suffix)
+            except Exception as e:
+                print(f"[{label}] Channel KPI override failed, keeping API values: {e}")
 
             # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
             # Refunds = actual Refunded Amount by return_delivery_date (Approved only).
@@ -1856,7 +1871,8 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
     channel_names = {
         'meta_ads': 'Meta Ads',
         'google_ads': 'Google Ads',
-        'organic': 'Organic'
+        'organic': 'Organic',
+        'unattributed': 'Unattributed',
     }
     
     # Calculate efficiency metrics for WTD and MTD
@@ -2010,8 +2026,11 @@ def format_summary_for_email(summary_data: dict, amazon_wtd: dict = None, amazon
                 <tbody>
         """)
         
-        # Add rows for each channel
-        for channel_key in ['meta_ads', 'google_ads', 'organic']:
+        # Add rows for each channel. 'unattributed' is its own row now that the
+        # channel numbers come from fct_ad_channel_pnl_daily, which keeps it
+        # separate from organic -- otherwise its net profit sits in the TOTAL
+        # with no row to explain it.
+        for channel_key in ['meta_ads', 'google_ads', 'organic', 'unattributed']:
             if channel_key in channels:
                 ch_data = channels[channel_key]
                 channel_display = channel_names.get(channel_key, channel_key)

@@ -393,3 +393,135 @@ def channel_summary(df: pd.DataFrame) -> dict:
         "net_profit": _num(t.get("net_profit")),
         "net_roas": _num(t.get("net_roas")),
     }
+
+
+SHEET_KEY_BY_CHANNEL = {"meta": "meta_ads", "google": "google_ads",
+                        "organic": "organic", "unattributed": "unattributed"}
+DISPLAY_NAME = {"meta_ads": "Meta Ads", "google_ads": "Google Ads",
+                "organic": "Organic", "unattributed": "Unattributed"}
+
+
+def _campaign_ranking(ads: pd.DataFrame, limit: int = 5) -> tuple[list, list]:
+    """Top / bottom campaigns by net profit, for the email body."""
+    if ads is None or ads.empty or "campaign_name" not in ads.columns:
+        return [], []
+    agg = (
+        ads.groupby("campaign_name", dropna=False)
+        .agg(revenue=("net_sales", "sum"), spend=("spend", "sum"),
+             cogs=("net_cogs", "sum"), net_profit=("net_profit", "sum"),
+             orders=("orders", "sum"))
+        .reset_index()
+    )
+    agg = agg[agg["campaign_name"].astype(str).str.strip() != ""]
+    if agg.empty:
+        return [], []
+    agg["net_roas"] = np.where(
+        agg["spend"] > 0, (agg["revenue"] - agg["cogs"]) / agg["spend"], 0.0)
+    ranked = agg.sort_values("net_profit", ascending=False)
+
+    def _rows(frame):
+        return [{
+            "name": str(r["campaign_name"]),
+            "revenue": round(float(r["revenue"]), 2),
+            "spend": round(float(r["spend"]), 2),
+            "net_profit": round(float(r["net_profit"]), 2),
+            "net_roas": round(float(r["net_roas"]), 2),
+            "orders": int(r["orders"]),
+        } for _, r in frame.iterrows()]
+
+    return _rows(ranked.head(limit)), _rows(ranked.tail(limit).iloc[::-1])
+
+
+def channel_summaries_from_pnl(
+    pnl_df: pd.DataFrame, sku_df: pd.DataFrame
+) -> dict[str, dict]:
+    """Per-channel KPI dicts for the email, in the shape the email expects.
+
+    Same source as the sheets, so the email body and the attachments agree --
+    they did not while the email ran off the marketing API.
+    """
+    out: dict[str, dict] = {}
+    if pnl_df is None or pnl_df.empty:
+        return out
+
+    qty_by_channel = {}
+    if sku_df is not None and not sku_df.empty:
+        tmp = sku_df.copy()
+        tmp["platform"] = tmp["platform"].replace({"other": "organic"})
+        qty_by_channel = tmp.groupby("platform")["quantity"].sum().to_dict()
+
+    for channel, sheet_key in SHEET_KEY_BY_CHANNEL.items():
+        ads = pnl_df[pnl_df["channel"] == channel]
+        if ads.empty:
+            continue
+        revenue = float(ads["net_sales"].sum())
+        cogs = float(ads["net_cogs"].sum())
+        spend = float(ads["spend"].sum())
+        orders = int(ads["orders"].sum())
+        quantity = int(qty_by_channel.get(channel, 0))
+        net_profit = float(ads["net_profit"].sum())
+        top, bottom = _campaign_ranking(ads)
+        out[sheet_key] = {
+            "revenue": round(revenue, 2),
+            "cogs": round(cogs, 2),
+            "spend": round(spend, 2),
+            "orders": orders,
+            "order_count": orders,
+            "quantity": quantity,
+            "net_roas": round((revenue - cogs) / spend, 2) if spend else 0.0,
+            "net_profit": round(net_profit, 2),
+            "cost_per_order": round(spend / orders, 2) if orders else 0.0,
+            "cost_per_unit": round(spend / quantity, 2) if quantity else 0.0,
+            "avg_order_value": round(revenue / orders, 2) if orders else 0.0,
+            "top_campaigns": top,
+            "bottom_campaigns": bottom,
+        }
+    return out
+
+
+def dashboard_rows_from_summaries(
+    summaries: dict[str, dict], amazon: Optional[dict] = None
+) -> tuple[list, dict, dict]:
+    """(channel_rows, total, canonical_totals) for the email, from the same source.
+
+    Amazon is passed through untouched -- it is not in fct_ad_channel_pnl_daily
+    and keeps its own settlement-based P&L.
+    """
+    rows = []
+    for sheet_key in ("meta_ads", "google_ads", "organic", "unattributed"):
+        s = summaries.get(sheet_key)
+        if not s:
+            continue
+        rows.append((DISPLAY_NAME[sheet_key], {
+            "sales": s["revenue"], "cogs": s["cogs"], "ad_spend": s["spend"],
+            "net_profit": s["net_profit"], "net_roas": s["net_roas"],
+            "order_count": s["orders"], "units": s["quantity"],
+        }))
+    if amazon:
+        rows.append(("Amazon", {
+            "sales": float(amazon.get("revenue", 0) or 0),
+            "cogs": float(amazon.get("cogs", 0) or 0),
+            "ad_spend": float(amazon.get("spend", 0) or 0),
+            "net_profit": float(amazon.get("net_profit", 0) or 0),
+            "net_roas": float(amazon.get("net_roas", 0) or 0),
+            "order_count": int(amazon.get("orders", 0) or 0),
+            "units": int(amazon.get("quantity", 0) or 0),
+        }))
+
+    total = {k: 0.0 for k in ("sales", "cogs", "ad_spend", "net_profit")}
+    total.update({"order_count": 0, "units": 0})
+    for _, r in rows:
+        for k in ("sales", "cogs", "ad_spend", "net_profit"):
+            total[k] = round(total[k] + float(r.get(k, 0) or 0), 2)
+        total["order_count"] += int(r.get("order_count", 0) or 0)
+        total["units"] += int(r.get("units", 0) or 0)
+    margin = total["sales"] - total["cogs"]
+    total["net_roas"] = round(margin / total["ad_spend"], 2) if total["ad_spend"] else 0.0
+    total["quantity"] = total["units"]
+
+    canonical = {
+        "revenue": total["sales"], "cogs": total["cogs"],
+        "ad_spend": total["ad_spend"], "net_profit": total["net_profit"],
+        "orders": total["order_count"],
+    }
+    return rows, total, canonical

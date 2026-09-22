@@ -1687,6 +1687,45 @@ def extract_daily_efficiency_metrics(daily_file_path: str, report_date: str = No
             date_str = m.group(1)
 
     if date_str:
+        # Primary: ClickHouse, the same source as the channel sheets and the
+        # email KPIs, so CPO / CPU / AOV cannot disagree with the table above
+        # them. Amazon is added from its own settlement summary.
+        try:
+            from channel_pnl import pnl_totals
+            ch = pnl_totals(date_str, date_str, brand_id=_CH_BRAND_ID)
+            if ch:
+                revenue, spend = ch['revenue'], ch['spend']
+                orders, quantity = ch['orders'], ch['quantity']
+                try:
+                    amz = get_amazon_clickhouse_summary(date_str, date_str) or {}
+                    if amz.get('available'):
+                        revenue += float(amz.get('revenue', 0) or 0)
+                        spend += float(amz.get('spend', 0) or 0)
+                        orders += int(amz.get('orders', 0) or 0)
+                        quantity += int(amz.get('units', 0) or 0)
+                except Exception as _amz_exc:
+                    logger.warning("Amazon summary for efficiency failed: %s", _amz_exc)
+                metrics.update({
+                    'revenue': round(revenue, 2),
+                    'spend': round(spend, 2),
+                    'orders': orders,
+                    'quantity': quantity,
+                    'cost_per_order': spend / orders if orders > 0 else 0.0,
+                    'cost_per_unit': spend / quantity if quantity > 0 else 0.0,
+                    'avg_order_value': revenue / orders if orders > 0 else 0.0,
+                })
+                logger.info(
+                    "Daily efficiency from ClickHouse (%s): revenue=%.2f spend=%.2f "
+                    "CPO=%.2f CPU=%.2f AOV=%.2f",
+                    date_str, revenue, spend, metrics['cost_per_order'],
+                    metrics['cost_per_unit'], metrics['avg_order_value'],
+                )
+                return metrics
+        except Exception as e:
+            logger.warning(
+                "ClickHouse daily efficiency failed for %s: %s; falling back to dashboard API",
+                date_str, e)
+
         try:
             from api_data_fetcher import fetch_wtd_mtd_dashboard_snapshot
             snap = fetch_wtd_mtd_dashboard_snapshot(date_str, date_str)

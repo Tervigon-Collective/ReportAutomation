@@ -569,3 +569,26 @@ def build_campaign_rollup(pnl_df: pd.DataFrame, channel: str) -> pd.DataFrame:
 
     out = pd.concat([pd.DataFrame([total]), agg], ignore_index=True)
     return out[[c for c in CAMPAIGN_COLS if c in out.columns]]
+
+
+def pnl_totals(start_date, end_date, brand_id: Optional[int] = None) -> dict:
+    """Company-wide channel totals for a window, straight from ClickHouse.
+
+    Covers meta / google / organic / unattributed -- i.e. everything except
+    Amazon, which has its own settlement P&L. Units come from the order line
+    items, never from an order count.
+    """
+    pnl = fetch_ad_channel_pnl(start_date, end_date, brand_id=brand_id)
+    if pnl is None or pnl.empty:
+        return {}
+    sku = fetch_channel_sku_lines(start_date, end_date, brand_id=brand_id)
+    quantity = int(pd.to_numeric(sku["quantity"], errors="coerce").fillna(0).sum()) \
+        if sku is not None and not sku.empty else 0
+    return {
+        "revenue": round(float(pnl["net_sales"].sum()), 2),
+        "cogs": round(float(pnl["net_cogs"].sum()), 2),
+        "spend": round(float(pnl["spend"].sum()), 2),
+        "orders": int(pnl["orders"].sum()),
+        "quantity": quantity,
+        "net_profit": round(float(pnl["net_profit"].sum()), 2),
+    }

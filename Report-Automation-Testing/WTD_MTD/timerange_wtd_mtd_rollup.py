@@ -23,6 +23,10 @@ from api_data_fetcher import (
 )
 from global_config import get_global_config, get_temp_dir, get_report_dir
 from excel_formatting import apply_sheet_formatting, move_totals_to_top
+from channel_pnl import (
+    fetch_ad_channel_pnl, fetch_channel_sku_lines,
+    build_channel_sheet, write_channel_sheet,
+)
 
 # Import functions from dailyrollup.py
 from dailyrollup import (
@@ -123,6 +127,12 @@ CLIENT_SECRET = get_global_config('AZURE_CLIENT_SECRET')
 TENANT_ID = get_global_config('AZURE_TENANT_ID')
 EMAIL_SENDER = os.getenv('EMAIL_SENDER', '')
 EMAIL_RECIPIENTS = os.getenv('EMAIL_RECIPIENTS', '').split(',')
+
+# Brand filter for the ClickHouse-sourced channel sheets.
+try:
+    _CH_BRAND_ID = int(os.getenv('CLICKHOUSE_BRAND_ID') or 0) or None
+except ValueError:
+    _CH_BRAND_ID = None
 
 # Validate email configuration
 if not all([CLIENT_ID, CLIENT_SECRET, TENANT_ID, EMAIL_SENDER, EMAIL_RECIPIENTS[0]]):
@@ -1297,133 +1307,55 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
             df = fetch_marketing_hourly(start_date_str, end_date_str)
             rollups = {}
             
-            if df.empty:
-                print(f"[{label}] No attribution data found for this timeframe")
-                # Create empty sheets in order: Meta, Google, Organic
-                for channel_suffix in ['meta_ads', 'google_ads', 'organic']:
-                    sheet_name = f'{timeframe_key}_{channel_suffix} ({date_range_str})'[:31]
-                    pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                    if channel_suffix not in summary_data[timeframe_key]['channels']:
-                        summary_data[timeframe_key]['channels'][channel_suffix] = extract_channel_summary(pd.DataFrame(), channel_suffix)
-            else:
-                print(f"[{label}] Found {len(df)} total records")
-                print(f"[{label}] Channels available: {df['source'].unique() if 'source' in df.columns else 'No source column'}")
-                
-                # Build channel rollups for Excel entity sheets only (email KPIs use dashboard API).
-                rollups = build_channel_rollups(df, label)
-                
-                # Write each channel to separate sheet in specific order: Meta, Google, Organic
-                channel_order = ['meta_ads', 'google_ads', 'organic']
-                for channel_key in channel_order:
-                    if channel_key not in rollups:
-                        # If channel doesn't exist in rollups, create empty sheet
-                        sheet_name = f'{timeframe_key}_{channel_key} ({date_range_str})'[:31]
-                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                        if channel_key not in summary_data[timeframe_key]['channels']:
-                            summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
-                        continue
-                    
-                    channel_df = rollups[channel_key]
-                    sheet_name = f'{timeframe_key}_{channel_key} ({date_range_str})'[:31]
-                    
-                    if not channel_df.empty:
-                        print(f"[{label}] Writing {channel_key} data to sheet '{sheet_name}': {len(channel_df)} rows")
-                        channel_df_with_total = add_grand_total_row(channel_df, f"{label}-{channel_key}")
-                        
-                        # Round for output
-                        channel_df_rounded = round_for_output(channel_df_with_total)
-                        
-                        # Rename first so funnel order sees quantity/orders/revenue, not sku_quantity.
-                        rename_map = {
-                            'shopify_orders': 'orders',
-                            'shopify_revenue': 'revenue',
-                            'shopify_cogs': 'cogs',
-                            'sku_quantity': 'quantity',
-                            'sku_unit_price': 'unit_price',
-                            'sku_unit_cogs': 'unit_cogs',
-                        }
-                        channel_df_rounded = channel_df_rounded.rename(columns={k:v for k,v in rename_map.items() if k in channel_df_rounded.columns})
-                        channel_df_rounded = channel_df_rounded[order_columns_by_funnel(channel_df_rounded, include_sku=True)]
-                        
-                        # Channel-specific column handling
-                        if channel_key == 'organic':
-                            # Organic: Only keep specified columns with per-unit pricing
-                            organic_keep_cols = ['channel', 'sku', 'unit_price', 'unit_cogs', 'quantity']
-                            available_organic_cols = [c for c in organic_keep_cols if c in channel_df_rounded.columns]
-                            if available_organic_cols:
-                                channel_df_rounded = channel_df_rounded[available_organic_cols]
-                        else:
-                            # Drop unnecessary columns for cleaner presentation (channel-specific)
-                            base_drop_cols = [
-                                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity',
-                                'sku_revenue', 'sku_cogs', 'impressions', 'clicks', '_landing_page_view'
-                            ]
-                            # Channel specific removals
-                            if channel_key == 'meta_ads':
-                                # Remove be_roas per requirements
-                                base_drop_cols.extend([c for c in ['be_roas'] if c in channel_df_rounded.columns])
-                            if channel_key == 'google_ads':
-                                # Remove bounce_rate, ATC, IC, be_roas per requirements (keep ctr)
-                                base_drop_cols.extend([c for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'be_roas'] if c in channel_df_rounded.columns])
-                            drop_cols = [c for c in base_drop_cols if c in channel_df_rounded.columns]
-                            if drop_cols:
-                                channel_df_rounded = channel_df_rounded.drop(columns=drop_cols)
-                        
-                        # Write to Excel (Grand Total first)
-                        channel_df_rounded, _n_tot = move_totals_to_top(channel_df_rounded)
-                        channel_df_rounded.to_excel(writer, sheet_name=sheet_name, index=False)
-                        
-                        # Apply formatting (shared helper: see excel_formatting.py)
-                        try:
-                            apply_sheet_formatting(
-                                writer, sheet_name, channel_df_rounded,
-                                total_rows=_n_tot,
-                                threshold_cols=('net_roas', 'profit', 'net_profit'),
-                                heatmap_cols=('ctr', 'spend'),
-                            )
+            # --- channel sheets from ClickHouse gold ---------------------
+            # Revenue / COGS / profit come from gold.fct_ad_channel_pnl_daily --
+            # the table the dashboard reconciles against -- not the marketing
+            # API, which understated Sep Meta revenue by 28% and Google by 22%.
+            # SKU rows are allocated out of each ad's net_sales so the parts sum
+            # to the whole. organic and unattributed stay separate, as the DB
+            # keeps them; folding them together read 24% high.
+            try:
+                pnl_df = fetch_ad_channel_pnl(start_date, end_date, brand_id=_CH_BRAND_ID)
+                sku_lines_df = fetch_channel_sku_lines(start_date, end_date, brand_id=_CH_BRAND_ID)
+            except Exception as e:
+                print(f"[{label}] Channel P&L fetch failed: {e}")
+                pnl_df, sku_lines_df = pd.DataFrame(), pd.DataFrame()
 
-                            # Merge repeating values for better visual grouping (channel-specific)
-                            merge_cols = []
-                            # Always include hierarchy columns when present
-                            for c in ['channel', 'campaign_name', 'adset_name', 'ad_name']:
-                                if c in channel_df_rounded.columns:
-                                    merge_cols.append(c)
-                            # Common campaign-level metrics to merge when present
-                            common_merge_metrics = ['spend', 'revenue', 'cogs', 'net_roas', 'net_profit']
-                            for c in common_merge_metrics:
-                                if c in channel_df_rounded.columns:
-                                    merge_cols.append(c)
-                            if channel_key == 'meta_ads':
-                                # Group Bounce rate, ATC, IC, conversion rate; be_roas intentionally excluded
-                                for c in ['bounce_rate', '_add_to_cart', '_initiate_checkout', 'conversion_rate', 'orders']:
-                                    if c in channel_df_rounded.columns:
-                                        merge_cols.append(c)
-                                # Keep CTR if present (not explicitly required, but harmless)
-                                if 'ctr' in channel_df_rounded.columns:
-                                    merge_cols.append('ctr')
-                            elif channel_key == 'google_ads':
-                                # Group orders, conversion_rate, and ctr (bounce/ATC/IC/be_roas already dropped)
-                                for c in ['orders', 'conversion_rate', 'ctr']:
-                                    if c in channel_df_rounded.columns:
-                                        merge_cols.append(c)
-                            
-                            _merge_repeating_values_in_sheet(
-                                writer,
-                                channel_df_rounded,
-                                sheet_name,
-                                merge_cols,
-                                scope_columns=[c for c in ['channel'] if c in channel_df_rounded.columns],
-                                sum_columns=[]  # No summing needed since we're showing unit prices per SKU
-                            )
-                        except Exception as e:
-                            print(f"[{label}] Error applying formatting to {sheet_name}: {e}")
-                    
-                    else:
-                        print(f"[{label}] No {channel_key} data found, creating empty sheet")
-                        pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
-                        if channel_key not in summary_data[timeframe_key]['channels']:
-                            summary_data[timeframe_key]['channels'][channel_key] = extract_channel_summary(pd.DataFrame(), channel_key)
-             
+            for sheet_key, channel in (('meta_ads', 'meta'), ('google_ads', 'google'),
+                                       ('organic', 'organic'),
+                                       ('unattributed', 'unattributed')):
+                sheet_name = f'{timeframe_key}_{sheet_key} ({date_range_str})'[:31]
+                try:
+                    channel_df, ad_spans = build_channel_sheet(pnl_df, sku_lines_df, channel)
+                except Exception as e:
+                    print(f"[{label}] {sheet_key}: build failed ({e})")
+                    channel_df, ad_spans = pd.DataFrame(), []
+                if channel_df.empty:
+                    print(f"[{label}] {sheet_key}: no data, writing empty sheet")
+                    pd.DataFrame().to_excel(writer, sheet_name=sheet_name, index=False)
+                else:
+                    t = channel_df.iloc[0]
+                    print(
+                        f"[{label}] Writing {sheet_key} '{sheet_name}': "
+                        f"{len(channel_df) - 1} rows / {len(ad_spans)} ad blocks | "
+                        f"spend={t['spend']:,.2f} net_sales={t['net_sales']:,.2f} "
+                        f"net_cogs={t['net_cogs']:,.2f} net_profit={t['net_profit']:,.2f}"
+                    )
+                    write_channel_sheet(writer, sheet_name, channel_df, ad_spans)
+
+            # The email KPI summary still runs off the attribution API path.
+            if df.empty:
+                for channel_suffix in ['meta_ads', 'google_ads', 'organic']:
+                    if channel_suffix not in summary_data[timeframe_key]['channels']:
+                        summary_data[timeframe_key]['channels'][channel_suffix] = \
+                            extract_channel_summary(pd.DataFrame(), channel_suffix)
+            else:
+                rollups = build_channel_rollups(df, label)
+                for channel_key in ['meta_ads', 'google_ads', 'organic']:
+                    if channel_key not in summary_data[timeframe_key]['channels']:
+                        summary_data[timeframe_key]['channels'][channel_key] = \
+                            extract_channel_summary(rollups.get(channel_key, pd.DataFrame()), channel_key)
+
             # Amazon sheets: same date window as Meta/Google/Organic for this timeframe.
             # Refunds = actual Refunded Amount by return_delivery_date (Approved only).
             print(f"\n[{label}] Processing Amazon data (ClickHouse)...")

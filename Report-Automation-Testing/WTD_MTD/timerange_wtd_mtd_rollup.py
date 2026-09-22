@@ -22,6 +22,7 @@ from api_data_fetcher import (
     fetch_wtd_mtd_dashboard_snapshot, clear_marketing_cache,
 )
 from global_config import get_global_config, get_temp_dir, get_report_dir
+from excel_formatting import apply_sheet_formatting
 
 # Import functions from dailyrollup.py
 from dailyrollup import (
@@ -1183,71 +1184,14 @@ def run_amazon_report(out_dir: str = None) -> str:
             sheet_name = f'Amazon Campaigns ({date_display})'
             campaign_rollup.to_excel(writer, sheet_name=sheet_name, index=False)
             
-            # Apply formatting
+            # Apply formatting (shared helper: see excel_formatting.py)
             try:
-                workbook = writer.book
-                center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                header_fmt = workbook.add_format({
-                    'bold': True, 
-                    'align': 'center', 
-                    'valign': 'vcenter', 
-                    'bg_color': '#F2F2F2', 
-                    'border': 1
-                })
-                total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
-                
-                worksheet = writer.sheets[sheet_name]
-                worksheet.set_column(0, len(campaign_rollup.columns)-1, None, center_fmt)
-                worksheet.freeze_panes(1, 0)
-                worksheet.set_row(0, None, header_fmt)
-                
-                # Color Grand Total row (last row)
-                last_row = len(campaign_rollup)
-                worksheet.set_row(last_row, None, total_fmt)
-                
-                # Conditional formatting for ROAS
-                if 'roas' in campaign_rollup.columns:
-                    roas_col = campaign_rollup.columns.get_loc('roas')
-                    green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                    red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                    worksheet.conditional_format(1, roas_col, len(campaign_rollup), roas_col, {
-                        'type': 'cell', 'criteria': '>=', 'value': 1, 'format': green_fmt
-                    })
-                    worksheet.conditional_format(1, roas_col, len(campaign_rollup), roas_col, {
-                        'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                    })
-                
-                # Heatmap for CTR
-                if 'ctr' in campaign_rollup.columns:
-                    ctr_col = campaign_rollup.columns.get_loc('ctr')
-                    worksheet.conditional_format(1, ctr_col, len(campaign_rollup), ctr_col, {
-                        'type': '2_color_scale',
-                        'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                        'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                    })
-                
-                # Heatmap for Spend
-                if 'spend' in campaign_rollup.columns:
-                    spend_col = campaign_rollup.columns.get_loc('spend')
-                    spend_values = pd.to_numeric(campaign_rollup['spend'], errors='coerce').fillna(0)
-                    max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                    worksheet.conditional_format(1, spend_col, len(campaign_rollup), spend_col, {
-                        'type': '2_color_scale',
-                        'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                        'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                    })
-                
-                # Heatmap for Sales
-                if 'sales' in campaign_rollup.columns:
-                    sales_col = campaign_rollup.columns.get_loc('sales')
-                    sales_values = pd.to_numeric(campaign_rollup['sales'], errors='coerce').fillna(0)
-                    max_sales = sales_values.max() if len(sales_values) > 0 else 1000
-                    worksheet.conditional_format(1, sales_col, len(campaign_rollup), sales_col, {
-                        'type': '2_color_scale',
-                        'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                        'max_type': 'num', 'max_value': max_sales, 'max_color': '#90EE90'
-                    })
-                
+                apply_sheet_formatting(
+                    writer, sheet_name, campaign_rollup,
+                    total_rows=1,
+                    threshold_cols=('roas',),
+                    heatmap_cols=('ctr', 'spend', 'sales'),
+                )
                 print(f"[Amazon Report] Formatting applied successfully")
             except Exception as e:
                 print(f"[Amazon Report] Error applying formatting: {e}")
@@ -1427,65 +1371,22 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                         # Write to Excel
                         channel_df_rounded.to_excel(writer, sheet_name=sheet_name, index=False)
                         
-                        # Apply formatting
+                        # Apply formatting (shared helper: see excel_formatting.py)
                         try:
-                            workbook = writer.book
-                            center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                            header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                            total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
-                            
-                            worksheet = writer.sheets[sheet_name]
-                            worksheet.set_column(0, len(channel_df_rounded.columns)-1, None, center_fmt)
-                            worksheet.freeze_panes(1, 0)
-                            worksheet.set_row(0, None, header_fmt)
-                            
-                            # Color Grand Total row (last row)
-                            try:
-                                last_row = len(channel_df_rounded)
-                                worksheet.set_row(last_row, None, total_fmt)
-                            except Exception:
-                                pass
-                            
-                            # Conditional formatting for profit column
-                            if 'net_profit' in channel_df_rounded.columns:
-                                profit_col = channel_df_rounded.columns.get_loc('net_profit')
-                                green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                                red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                                worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
-                                    'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-                                })
-                                worksheet.conditional_format(1, profit_col, len(channel_df_rounded), profit_col, {
-                                    'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                                })
-                            
-                            # Conditional formatting for Net ROAS < 1
-                            if 'net_roas' in channel_df_rounded.columns:
-                                net_roas_col = channel_df_rounded.columns.get_loc('net_roas')
-                                red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                                worksheet.conditional_format(1, net_roas_col, len(channel_df_rounded), net_roas_col, {
-                                    'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                                })
-                            
-                            # Heatmap for CTR (skipped automatically for Google if removed)
-                            if 'ctr' in channel_df_rounded.columns:
-                                ctr_col = channel_df_rounded.columns.get_loc('ctr')
-                                worksheet.conditional_format(1, ctr_col, len(channel_df_rounded), ctr_col, {
-                                    'type': '2_color_scale',
-                                    'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                                    'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                                })
-                            
-                            # Heatmap for Spend
-                            if 'spend' in channel_df_rounded.columns:
-                                spend_col = channel_df_rounded.columns.get_loc('spend')
-                                spend_values = pd.to_numeric(channel_df_rounded['spend'], errors='coerce').fillna(0)
-                                max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                                worksheet.conditional_format(1, spend_col, len(channel_df_rounded), spend_col, {
-                                    'type': '2_color_scale',
-                                    'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                                    'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                                })
-                            
+                            has_total = (
+                                'channel' in channel_df_rounded.columns
+                                and str(channel_df_rounded['channel'].iloc[-1]).strip() in ('All', 'Grand Total')
+                            ) or (
+                                'campaign_name' in channel_df_rounded.columns
+                                and str(channel_df_rounded['campaign_name'].iloc[-1]).strip() == 'Grand Total'
+                            )
+                            apply_sheet_formatting(
+                                writer, sheet_name, channel_df_rounded,
+                                total_rows=1 if has_total else 0,
+                                threshold_cols=('net_roas', 'profit', 'net_profit'),
+                                heatmap_cols=('ctr', 'spend'),
+                            )
+
                             # Merge repeating values for better visual grouping (channel-specific)
                             merge_cols = []
                             # Always include hierarchy columns when present
@@ -1726,66 +1627,27 @@ def _build_product_profitability_df(products: list) -> pd.DataFrame:
 
 
 def _apply_pp_sheet_formatting(writer, sheet_name: str, pp_df: pd.DataFrame) -> None:
-    """Apply standard formatting to a Product Profitability sheet."""
-    if pp_df.empty:
-        return
+    """Product Profitability sheet: shared formatting with its Title Case headers.
+
+    Percentages on this sheet are stored as fractions (0.25 -> 25.00%), and
+    Net Profit is shaded by sign rather than against 1.
+    """
     try:
-        workbook = writer.book
-        header_fmt = workbook.add_format({
-            'bold': True, 'align': 'center', 'valign': 'vcenter',
-            'bg_color': '#E8F4EA', 'border': 1
-        })
-        total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF', 'border': 1})
-        center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-        num_fmt = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'num_format': '#,##0.00'})
-        pct_fmt = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'num_format': '0.00%'})
-        # Right-align but no number format for columns that can be blank (so blank stays blank)
-        right_fmt = workbook.add_format({'align': 'right', 'valign': 'vcenter'})
-        pct_cols = ('Contribution Margin %', 'Ad Spend % of Revenue', 'COGS Reduction %')
-        worksheet = writer.sheets[sheet_name]
-        ncols = len(pp_df.columns)
-        cols_list = list(pp_df.columns)
-        worksheet.set_column(0, 0, 18, center_fmt)
-        worksheet.set_column(1, 1, 50, center_fmt)
-        for c in range(2, ncols):
-            col_name = cols_list[c] if c < len(cols_list) else ''
-            if col_name in PP_BLANK_WHEN_NAN_COLS:
-                fmt = right_fmt  # blank cells stay blank
-            elif col_name in pct_cols:
-                fmt = pct_fmt    # display as percentage (0.25 -> 25.00%)
-            else:
-                fmt = num_fmt
-            worksheet.set_column(c, c, 14, fmt)
-        worksheet.freeze_panes(1, 0)
-        worksheet.set_row(0, None, header_fmt)
-        last_row = len(pp_df)
-        worksheet.set_row(last_row, None, total_fmt)
-        if 'Net Profit' in pp_df.columns:
-            profit_col = pp_df.columns.get_loc('Net Profit')
-            green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-            red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-            worksheet.conditional_format(1, profit_col, last_row - 1, profit_col, {
-                'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-            })
-            worksheet.conditional_format(1, profit_col, last_row - 1, profit_col, {
-                'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-            })
-        if 'Ad Spend' in pp_df.columns:
-            spend_col = pp_df.columns.get_loc('Ad Spend')
-            max_spend = pp_df.iloc[:-1]['Ad Spend'].max() if len(pp_df) > 1 else 1000
-            worksheet.conditional_format(1, spend_col, last_row - 1, spend_col, {
-                'type': '2_color_scale',
-                'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                'max_type': 'num', 'max_value': max_spend or 1000, 'max_color': '#FFFF99'
-            })
-        if 'Revenue' in pp_df.columns:
-            rev_col = pp_df.columns.get_loc('Revenue')
-            max_rev = pp_df.iloc[:-1]['Revenue'].max() if len(pp_df) > 1 else 1000
-            worksheet.conditional_format(1, rev_col, last_row - 1, rev_col, {
-                'type': '2_color_scale',
-                'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                'max_type': 'num', 'max_value': max_rev or 1000, 'max_color': '#C6EFCE'
-            })
+        money_cols = {
+            'Ad Spend', 'Revenue', 'Net Revenue', 'COGS', 'Gross Profit',
+            'Net Profit', 'Contribution', 'Spend', 'Sales', 'Refunds',
+        }
+        pct_cols = {c for c in pp_df.columns if '%' in str(c) or 'Margin' in str(c)}
+        apply_sheet_formatting(
+            writer, sheet_name, pp_df,
+            total_rows=1,
+            money_cols=money_cols,
+            pct_cols=pct_cols,
+            ratio_cols={'ROAS', 'Net ROAS', 'Gross ROAS'},
+            sign_cols=('Net Profit',),
+            heatmap_cols=('Ad Spend', 'Revenue'),
+            pct_as_fraction=True,
+        )
     except Exception as e:
         logger.warning(f"Product Profitability sheet formatting: {e}")
 

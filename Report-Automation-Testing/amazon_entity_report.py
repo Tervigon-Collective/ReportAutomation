@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from excel_formatting import apply_sheet_formatting
 from revenue_gst import apply_net_revenue_column
 
 load_dotenv()
@@ -530,6 +531,83 @@ def fetch_amazon_returns_by_delivery_gold(
         return pd.DataFrame()
 
 
+def fetch_amazon_ad_order_attribution_gold(
+    start_date: str | date | datetime,
+    end_date: str | date | datetime,
+    brand_id: Optional[int] = None,
+) -> pd.DataFrame:
+    """Ad -> order attribution lines from ``gold.fct_amazon_ads_ad_order_attribution``.
+
+    One row per (ad_id, amazon_order_id, report_date). ``spend`` on this table is
+    the ad's **whole daily spend**, repeated on every order row attributed to
+    that ad/day — it is NOT a per-order share. Summing it down an order-level
+    sheet double-counts, so callers must dedupe by (ad_id, report_date); see
+    ``dedupe_attribution_spend``.
+    """
+    start_str = _to_date_str(start_date)
+    end_str = _to_date_str(end_date)
+    brand_id = _resolve_brand_id(brand_id)
+
+    query = f"""
+        SELECT
+            report_date,
+            amazon_order_id,
+            campaign_id,
+            campaign_name,
+            ad_group_id,
+            ad_group_name,
+            ad_id,
+            advertised_sku,
+            order_seller_sku,
+            attribution_method,
+            round(toFloat64(ifNull(spend, 0)), 2) AS spend,
+            toInt64(ifNull(impressions, 0)) AS impressions,
+            toInt64(ifNull(clicks, 0)) AS clicks
+        FROM gold.fct_amazon_ads_ad_order_attribution
+        WHERE report_date BETWEEN %(start_date)s AND %(end_date)s
+            {_brand_filter_clause(brand_id)}
+        ORDER BY report_date, campaign_name, ad_group_name, ad_id, amazon_order_id
+    """
+    try:
+        client = get_clickhouse_client()
+        params = _maybe_add_brand_param(
+            {"start_date": start_str, "end_date": end_str}, brand_id
+        )
+        result = client.query(query, parameters=params)
+        df = pd.DataFrame(result.result_rows, columns=result.column_names)
+        dedup_spend = dedupe_attribution_spend(df)
+        print(
+            f"[ClickHouse Ad Attribution] {len(df)} lines for {start_str} to {end_str}"
+            + (f" (brand_id={brand_id})" if brand_id is not None else "")
+            + f", orders={df['amazon_order_id'].nunique() if not df.empty else 0}"
+            + f", deduped_spend={dedup_spend:.2f}"
+        )
+        return df
+    except Exception as e:
+        print(f"[ClickHouse Ad Attribution] failed ({e})")
+        return pd.DataFrame()
+
+
+def dedupe_attribution_spend(attr_df: pd.DataFrame) -> float:
+    """Real ad spend behind attributed orders: one value per (ad_id, report_date).
+
+    The attribution table repeats an ad's daily spend on every attributed order
+    row, so a naive ``sum`` inflates it (e.g. Sep 2026: 23434.72 naive vs
+    13218.38 deduped).
+    """
+    if attr_df is None or attr_df.empty or "spend" not in attr_df.columns:
+        return 0.0
+    keys = [c for c in ("ad_id", "report_date") if c in attr_df.columns]
+    if not keys:
+        return float(pd.to_numeric(attr_df["spend"], errors="coerce").fillna(0).sum())
+    per_ad_day = (
+        attr_df.assign(spend=pd.to_numeric(attr_df["spend"], errors="coerce").fillna(0.0))
+        .groupby(keys, dropna=False)["spend"]
+        .max()
+    )
+    return float(per_ad_day.sum())
+
+
 def fetch_amazon_refunds_by_settlement_gold(
     start_date: str | date | datetime,
     end_date: str | date | datetime,
@@ -981,62 +1059,15 @@ def get_amazon_clickhouse_summary(
 
 
 def _apply_amazon_ads_formatting(writer, sheet_name: str, campaign_rollup: pd.DataFrame) -> None:
-    """Apply WTD/MTD-style formatting to an Amazon ads sheet."""
-    workbook = writer.book
-    center_fmt = workbook.add_format({"align": "center", "valign": "vcenter"})
-    header_fmt = workbook.add_format({
-        "bold": True,
-        "align": "center",
-        "valign": "vcenter",
-        "bg_color": "#F2F2F2",
-        "border": 1,
-    })
-    total_fmt = workbook.add_format({"bold": True, "bg_color": "#E6F3FF"})
-
-    worksheet = writer.sheets[sheet_name]
-    worksheet.set_column(0, len(campaign_rollup.columns) - 1, None, center_fmt)
-    worksheet.freeze_panes(1, 0)
-    worksheet.set_row(0, None, header_fmt)
-    worksheet.set_row(len(campaign_rollup), None, total_fmt)
-
-    if "roas" in campaign_rollup.columns:
-        roas_col = campaign_rollup.columns.get_loc("roas")
-        green_fmt = workbook.add_format({"font_color": "#006100", "bg_color": "#C6EFCE"})
-        red_fmt = workbook.add_format({"font_color": "#9C0006", "bg_color": "#FFC7CE"})
-        worksheet.conditional_format(1, roas_col, len(campaign_rollup), roas_col, {
-            "type": "cell", "criteria": ">=", "value": 1, "format": green_fmt,
-        })
-        worksheet.conditional_format(1, roas_col, len(campaign_rollup), roas_col, {
-            "type": "cell", "criteria": "<", "value": 1, "format": red_fmt,
-        })
-
-    if "ctr" in campaign_rollup.columns:
-        ctr_col = campaign_rollup.columns.get_loc("ctr")
-        worksheet.conditional_format(1, ctr_col, len(campaign_rollup), ctr_col, {
-            "type": "2_color_scale",
-            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
-            "max_type": "num", "max_value": 5, "max_color": "#90EE90",
-        })
-
-    if "spend" in campaign_rollup.columns:
-        spend_col = campaign_rollup.columns.get_loc("spend")
-        spend_values = pd.to_numeric(campaign_rollup["spend"], errors="coerce").fillna(0)
-        max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-        worksheet.conditional_format(1, spend_col, len(campaign_rollup), spend_col, {
-            "type": "2_color_scale",
-            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
-            "max_type": "num", "max_value": max_spend, "max_color": "#FFFF00",
-        })
-
-    if "sales" in campaign_rollup.columns:
-        sales_col = campaign_rollup.columns.get_loc("sales")
-        sales_values = pd.to_numeric(campaign_rollup["sales"], errors="coerce").fillna(0)
-        max_sales = sales_values.max() if len(sales_values) > 0 else 1000
-        worksheet.conditional_format(1, sales_col, len(campaign_rollup), sales_col, {
-            "type": "2_color_scale",
-            "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
-            "max_type": "num", "max_value": max_sales, "max_color": "#90EE90",
-        })
+    """Amazon ads sheet: shared formatting + ROAS/CTR/spend/sales shading."""
+    apply_sheet_formatting(
+        writer,
+        sheet_name,
+        campaign_rollup,
+        total_rows=1,
+        threshold_cols=("roas",),
+        heatmap_cols=("ctr", "spend", "sales"),
+    )
 
 
 # Order-level P&L money columns allocated to line items.
@@ -1280,21 +1311,256 @@ def _build_sp_line_items_display(
     )
 
 
+_SP_AD_COLS = ["campaign_name", "ad_group_name", "ad_id", "spend"]
+_SP_RETURN_COLS = ["return_delivery_date", "return_quantity",
+                   "refunded_amount_incl_gst", "refunded_amount"]
+_UNATTRIBUTED_LABEL = "(Unattributed / Organic)"
+_RETURNS_OUTSIDE_LABEL = "Returns (order outside window)"
+
+
+def _norm_id(series: pd.Series) -> pd.Series:
+    """Ids arrive as str/int/float across tables; compare them as trimmed text."""
+    return series.astype(str).str.strip().replace({"nan": "", "None": "", "<NA>": ""})
+
+
+def attach_ad_attribution(sp_display: pd.DataFrame, attr_df: pd.DataFrame) -> pd.DataFrame:
+    """Add campaign / ad_group / ad_id / spend to SP line items, Meta-style.
+
+    Spend is the ad's daily spend and is written on **every** row of that ad's
+    block so the sheet can merge the repeating cells (see
+    ``_merge_repeating_values_in_sheet``); it must never be summed down the
+    column. Orders with no attribution sort last under ``_UNATTRIBUTED_LABEL``.
+    """
+    if sp_display is None or sp_display.empty:
+        return sp_display
+
+    out = sp_display.copy()
+    for col in _SP_AD_COLS:
+        if col not in out.columns:
+            out[col] = "" if col != "spend" else np.nan
+
+    if attr_df is not None and not attr_df.empty:
+        attr = attr_df.copy()
+        attr["amazon_order_id"] = _norm_id(attr["amazon_order_id"])
+        attr["spend"] = pd.to_numeric(attr["spend"], errors="coerce").fillna(0.0)
+        # An order can be attributed to more than one ad; keep the highest-spend
+        # ad so the join stays one row per order and cannot multiply line items.
+        attr = (
+            attr.sort_values("spend", ascending=False)
+            .drop_duplicates(subset=["amazon_order_id"], keep="first")
+        )
+        keep = [c for c in ("amazon_order_id", "campaign_name", "ad_group_name",
+                            "ad_id", "spend") if c in attr.columns]
+        out["amazon_order_id"] = _norm_id(out["amazon_order_id"])
+        out = out.drop(columns=[c for c in _SP_AD_COLS if c in out.columns])
+        out = out.merge(attr[keep], on="amazon_order_id", how="left")
+
+    out["campaign_name"] = out["campaign_name"].fillna("").replace("", _UNATTRIBUTED_LABEL)
+    for col in ("ad_group_name", "ad_id"):
+        out[col] = out[col].fillna("")
+    out["_unattributed"] = (out["campaign_name"] == _UNATTRIBUTED_LABEL).astype(int)
+
+    sort_cols = [c for c in ("_unattributed", "purchase_date", "campaign_name",
+                             "ad_group_name", "ad_id", "amazon_order_id", "sku")
+                 if c in out.columns]
+    out = out.sort_values(sort_cols).drop(columns=["_unattributed"]).reset_index(drop=True)
+    return _order_sp_columns(out)
+
+
+def _order_sp_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ad columns sit left next to the date (as on the Meta rollup sheet),
+    return columns group together on the right."""
+    lead = [c for c in ("purchase_date", *_SP_AD_COLS) if c in df.columns]
+    tail = [c for c in _SP_RETURN_COLS if c in df.columns]
+    rest = [c for c in df.columns if c not in lead and c not in tail]
+    return df[lead + rest + tail]
+
+
+def attach_returns(
+    sp_display: pd.DataFrame, returns_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Join returns onto their SP line item; return (joined, orphan_rows).
+
+    Returns are keyed by ``return_delivery_date`` and typically land ~13 days
+    after purchase, so most returns in a window belong to orders bought before
+    it (Aug 2026: 130 of 155 lines). Those orphans cannot attach to any row
+    here and are handed back separately so the refund total stays whole.
+    """
+    empty = pd.DataFrame()
+    if returns_df is None or returns_df.empty:
+        return sp_display, empty
+    if sp_display is None or sp_display.empty:
+        return sp_display, returns_df.copy()
+
+    out = sp_display.copy()
+    ret = returns_df.copy()
+    ret["amazon_order_id"] = _norm_id(ret["amazon_order_id"])
+    out["amazon_order_id"] = _norm_id(out["amazon_order_id"])
+
+    # Join on (order, SKU): the returns feed's order_item_id comes from a
+    # different id space than the SP feed's (e.g. 44247492955779 vs
+    # 67559671048242), so matching on it silently finds nothing.
+    ret["_k"] = ret["amazon_order_id"] + "|" + _norm_id(ret.get("merchant_sku", ""))
+    out["_k"] = out["amazon_order_id"] + "|" + _norm_id(out.get("sku", ""))
+
+    # Create the refund columns up front: when no return matches an order in
+    # this window every line is an orphan, and without the columns their
+    # refunds would vanish from the sheet entirely.
+    for col in _SP_RETURN_COLS:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    agg = {c: "sum" for c in ("return_quantity", "refunded_amount_incl_gst",
+                              "refunded_amount") if c in ret.columns}
+    matched_keys = set(out["_k"])
+    ret["_matched"] = ret["_k"].isin(matched_keys)
+
+    joinable = ret[ret["_matched"]]
+    if not joinable.empty and agg:
+        grouped = joinable.groupby("_k", dropna=False).agg(agg).reset_index()
+        if "return_delivery_date" in joinable.columns:
+            first_date = joinable.groupby("_k")["return_delivery_date"].min().reset_index()
+            grouped = grouped.merge(first_date, on="_k", how="left")
+        # Fill the pre-created columns rather than letting the merge suffix them.
+        out = out.drop(columns=[c for c in _SP_RETURN_COLS if c in out.columns])
+        out = out.merge(grouped, on="_k", how="left")
+        for col in _SP_RETURN_COLS:
+            if col not in out.columns:
+                out[col] = np.nan
+
+    orphans = ret[~ret["_matched"]].drop(columns=["_k", "_matched"], errors="ignore")
+    out = out.drop(columns=["_k"], errors="ignore")
+    return out, orphans
+
+
+def build_orphan_return_rows(orphans: pd.DataFrame, sp_columns: list[str]) -> pd.DataFrame:
+    """Shape unmatched return lines to the SP sheet's columns as their own block.
+
+    Refunds are shown negative so the Grand Total nets against gross.
+    """
+    if orphans is None or orphans.empty:
+        return pd.DataFrame()
+
+    rows = pd.DataFrame(index=range(len(orphans)), columns=sp_columns)
+    src = orphans.reset_index(drop=True)
+
+    def _put(col, values):
+        if col in rows.columns:
+            rows[col] = values
+
+    _put("campaign_name", _RETURNS_OUTSIDE_LABEL)
+    _put("purchase_date", src.get("order_date"))
+    _put("amazon_order_id", src.get("amazon_order_id"))
+    _put("order_item_id", src.get("order_item_id"))
+    _put("sku", src.get("merchant_sku"))
+    _put("asin", src.get("asin"))
+    _put("title", src.get("item_name"))
+    _put("order_status", src.get("return_request_status"))
+    for col in ("return_delivery_date", "return_quantity",
+                "refunded_amount_incl_gst", "refunded_amount"):
+        _put(col, src.get(col))
+    return rows
+
+
+def build_sp_grand_total_row(
+    sp_df: pd.DataFrame, attributed_spend: float, total_ads_spend: Optional[float] = None
+) -> pd.DataFrame:
+    """Grand Total + spend reconciliation rows for the SP sheet.
+
+    ``spend`` is summed from the deduped ad/day figure passed in, never from the
+    repeated column. When ``total_ads_spend`` is known, the shortfall against
+    campaigns_daily is spelled out so partial attribution cannot read as a
+    smaller ad bill.
+    """
+    if sp_df is None or sp_df.empty:
+        return pd.DataFrame()
+
+    sum_cols = [c for c in ("quantity_ordered", "quantity_shipped", "gross",
+                            "finance_refunds", "commission", "closing", "shipping",
+                            "tax_withheld", "net_payout", "product_cost",
+                            "gross_profit", "return_quantity",
+                            "refunded_amount_incl_gst", "refunded_amount")
+                if c in sp_df.columns]
+
+    total = {c: "" for c in sp_df.columns}
+    for col in sum_cols:
+        total[col] = float(pd.to_numeric(sp_df[col], errors="coerce").fillna(0).sum())
+    total["amazon_order_id"] = "Grand Total"
+    if "spend" in sp_df.columns:
+        total["spend"] = round(float(attributed_spend), 2)
+    # Percentages are ratios of the totals, never a sum of per-row percentages.
+    if "gross_margin_pct" in sp_df.columns:
+        gross_total = float(total.get("gross") or 0)
+        total["gross_margin_pct"] = (
+            round(float(total.get("gross_profit") or 0) / gross_total * 100, 2)
+            if gross_total else 0.0
+        )
+
+    rows = [total]
+    if total_ads_spend is not None and "spend" in sp_df.columns:
+        for label, value in (
+            ("Attributed ad spend", attributed_spend),
+            ("Total ad spend (campaigns_daily)", total_ads_spend),
+            ("Unattributed ad spend", float(total_ads_spend) - float(attributed_spend)),
+        ):
+            row = {c: "" for c in sp_df.columns}
+            row["amazon_order_id"] = label
+            row["spend"] = round(float(value), 2)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+_SP_TOTAL_LABELS = {
+    "Grand Total", "Attributed ad spend",
+    "Total ad spend (campaigns_daily)", "Unattributed ad spend",
+}
+
+
+def _merge_sp_ad_blocks(writer, sp_out: pd.DataFrame, sheet_name: str) -> None:
+    """Merge the repeating campaign/ad_group/ad_id/spend cells, as Meta does.
+
+    Spend repeats on every order row of an ad's block; merging the run renders
+    it once and makes clear it is one ad-day figure rather than a per-order
+    amount to be added up.
+    """
+    if sp_out is None or sp_out.empty or "campaign_name" not in sp_out.columns:
+        return
+    # Totals/recon rows sit at the bottom and must not be merged into a block.
+    data_len = len(sp_out)
+    if "amazon_order_id" in sp_out.columns:
+        is_total = sp_out["amazon_order_id"].astype(str).isin(_SP_TOTAL_LABELS)
+        if is_total.any():
+            data_len = int(is_total.idxmax())
+    data_rows = sp_out.iloc[:data_len]
+    if data_rows.empty:
+        return
+
+    from dailyrollup import _merge_repeating_values_in_sheet  # avoids an import cycle
+
+    merge_cols = [c for c in _SP_AD_COLS if c in data_rows.columns]
+    scope_cols = [c for c in ("purchase_date", "campaign_name", "ad_group_name")
+                  if c in data_rows.columns]
+    _merge_repeating_values_in_sheet(
+        writer, data_rows, sheet_name, merge_cols,
+        scope_columns=scope_cols,
+        sum_columns=[],  # spend is an ad-day value; summing it would double-count
+    )
+
+
 def _apply_sp_sheet_formatting(writer, sheet_name: str, sp_df: pd.DataFrame) -> None:
-    """Basic formatting for Amazon SP orders sheet."""
-    workbook = writer.book
-    center_fmt = workbook.add_format({"align": "center", "valign": "vcenter"})
-    header_fmt = workbook.add_format({
-        "bold": True,
-        "align": "center",
-        "valign": "vcenter",
-        "bg_color": "#F2F2F2",
-        "border": 1,
-    })
-    worksheet = writer.sheets[sheet_name]
-    worksheet.set_column(0, len(sp_df.columns) - 1, None, center_fmt)
-    worksheet.freeze_panes(1, 0)
-    worksheet.set_row(0, None, header_fmt)
+    """Amazon SP sheet: shared formatting; totals/recon rows styled as totals."""
+    total_rows = 0
+    if "amazon_order_id" in sp_df.columns:
+        total_rows = int(
+            sp_df["amazon_order_id"].astype(str).isin(_SP_TOTAL_LABELS).sum()
+        )
+    apply_sheet_formatting(
+        writer,
+        sheet_name,
+        sp_df,
+        total_rows=total_rows,
+        heatmap_cols=("spend", "gross"),
+    )
 
 
 def add_amazon_sheets_for_timeframe(
@@ -1388,29 +1654,22 @@ def add_amazon_sheets_for_timeframe(
         pd.DataFrame().to_excel(writer, sheet_name=amazon_sheet_name, index=False)
 
     # --- Amazon SP line-item sheet ---
-    # One row per (amazon_order_id, seller_sku). Orders with multiple SKUs
-    # become multiple rows; canceled orders still appear but their per-line
-    # money columns (gross, etc.) are 0 (zeroed in the SQL fetch).
+    # One row per (amazon_order_id, seller_sku), laid out like the Meta ads
+    # rollup: campaign/ad_group/ad + the ad's daily spend on the left, merged
+    # across the order rows they cover. Returns (both the ones matching an
+    # order in this window and the ones whose order predates it) land on this
+    # same sheet — there is no separate returns sheet.
     sp_sheet_name = f"{timeframe_key}_amazon_sp ({amazon_date_range_str})"[:31]
     sp_display = _build_sp_line_items_display(sp_items_df, sp_orders_df, sp_pnl_df)
-    if not sp_display.empty:
-        if round_for_output_fn:
-            sp_display = round_for_output_fn(sp_display)
-        print(
-            f"[{timeframe_key}] Writing Amazon SP line-item sheet '{sp_sheet_name}': "
-            f"{len(sp_display)} line items"
-        )
-        sp_display.to_excel(writer, sheet_name=sp_sheet_name, index=False)
-        try:
-            _apply_sp_sheet_formatting(writer, sp_sheet_name, sp_display)
-        except Exception as e:
-            print(f"[{timeframe_key}] Amazon SP formatting error: {e}")
-    else:
-        print(f"[{timeframe_key}] No Amazon SP data, creating empty sheet")
-        pd.DataFrame().to_excel(writer, sheet_name=sp_sheet_name, index=False)
 
-    # --- Amazon Returns sheet (return_delivery_date, actual Refunded Amount) ---
-    returns_sheet_name = f"{timeframe_key}_amazon_returns ({amazon_date_range_str})"[:31]
+    try:
+        attr_df = fetch_amazon_ad_order_attribution_gold(
+            amazon_start_str, amazon_end_str, brand_id=brand_id
+        )
+    except Exception as e:
+        print(f"[{timeframe_key}] Amazon ad attribution fetch error: {e}")
+        attr_df = pd.DataFrame()
+
     try:
         returns_df = fetch_amazon_returns_by_delivery_gold(
             amazon_start_str, amazon_end_str, brand_id=brand_id
@@ -1419,34 +1678,57 @@ def add_amazon_sheets_for_timeframe(
         print(f"[{timeframe_key}] Amazon returns fetch error: {e}")
         returns_df = pd.DataFrame()
 
-    if not returns_df.empty:
-        returns_out = returns_df.copy()
-        if round_for_output_fn:
-            returns_out = round_for_output_fn(returns_out)
-        totals = summarize_amazon_delivery_refunds(returns_df)
-        total_row = {
-            "return_delivery_date": "",
-            "amazon_order_id": "Grand Total",
-            "merchant_sku": "",
-            "return_quantity": totals["return_units"],
-            "refunded_amount_incl_gst": totals.get("refunds_incl_gst", totals["refunds"]),
-            "refunded_amount": totals["refunds"],
-        }
-        returns_out = pd.concat([returns_out, pd.DataFrame([total_row])], ignore_index=True)
-        print(
-            f"[{timeframe_key}] Writing Amazon Returns sheet '{returns_sheet_name}': "
-            f"{totals['return_lines']} lines / {totals['return_orders']} orders / "
-            f"refunded_ex_gst={totals['refunds']:.2f} "
-            f"(incl_gst={totals.get('refunds_incl_gst', totals['refunds']):.2f})"
+    if not sp_display.empty:
+        sp_display = attach_ad_attribution(sp_display, attr_df)
+        sp_display, orphan_returns = attach_returns(sp_display, returns_df)
+
+        sp_display = _order_sp_columns(sp_display)
+        orphan_rows = build_orphan_return_rows(orphan_returns, list(sp_display.columns))
+        if not orphan_rows.empty:
+            print(
+                f"[{timeframe_key}] {len(orphan_rows)} return lines whose order "
+                f"predates this window, appended as their own block"
+            )
+            sp_display = pd.concat([sp_display, orphan_rows], ignore_index=True)
+
+        attributed_spend = dedupe_attribution_spend(attr_df)
+        total_ads_spend = (
+            float(pd.to_numeric(ads_df["spend"], errors="coerce").fillna(0).sum())
+            if not ads_df.empty and "spend" in ads_df.columns else None
         )
-        returns_out.to_excel(writer, sheet_name=returns_sheet_name, index=False)
+        attributed_orders = (
+            attr_df["amazon_order_id"].nunique() if not attr_df.empty else 0
+        )
+        sp_orders_count = (
+            sp_orders_df["amazon_order_id"].nunique() if not sp_orders_df.empty else 0
+        )
+        print(
+            f"[{timeframe_key}] Amazon SP attribution: {attributed_orders}/{sp_orders_count} "
+            f"orders attributed, spend={attributed_spend:.2f}"
+            + (f" of {total_ads_spend:.2f} total" if total_ads_spend is not None else "")
+        )
+
+        if round_for_output_fn:
+            sp_display = round_for_output_fn(sp_display)
+        total_rows = build_sp_grand_total_row(
+            sp_display, attributed_spend, total_ads_spend
+        )
+        sp_out = pd.concat([sp_display, total_rows], ignore_index=True) \
+            if not total_rows.empty else sp_display
+
+        print(
+            f"[{timeframe_key}] Writing Amazon SP line-item sheet '{sp_sheet_name}': "
+            f"{len(sp_display)} rows + {len(total_rows)} total/recon rows"
+        )
+        sp_out.to_excel(writer, sheet_name=sp_sheet_name, index=False)
         try:
-            _apply_sp_sheet_formatting(writer, returns_sheet_name, returns_out)
+            _apply_sp_sheet_formatting(writer, sp_sheet_name, sp_out)
+            _merge_sp_ad_blocks(writer, sp_out, sp_sheet_name)
         except Exception as e:
-            print(f"[{timeframe_key}] Amazon Returns formatting error: {e}")
+            print(f"[{timeframe_key}] Amazon SP formatting error: {e}")
     else:
-        print(f"[{timeframe_key}] No Amazon returns, creating empty sheet")
-        pd.DataFrame().to_excel(writer, sheet_name=returns_sheet_name, index=False)
+        print(f"[{timeframe_key}] No Amazon SP data, creating empty sheet")
+        pd.DataFrame().to_excel(writer, sheet_name=sp_sheet_name, index=False)
 
 
 def add_amazon_sheets_for_previous_day(writer, days_back: int = 1) -> str:

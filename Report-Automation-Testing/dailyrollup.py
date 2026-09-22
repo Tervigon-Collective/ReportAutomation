@@ -7,6 +7,11 @@ import numpy as np
 from timeframe_config import get_timeframe_config
 from api_data_fetcher import fetch_marketing_hourly, fetch_google_spend, fetch_shopify_sales_orders_detail
 from revenue_gst import apply_net_revenue, apply_net_revenue_column
+from excel_formatting import apply_sheet_formatting
+from channel_pnl import (
+    fetch_ad_channel_pnl, fetch_channel_sku_lines,
+    build_channel_sheet, write_channel_sheet, build_campaign_rollup,
+)
 
 def _norm_merge_key(val) -> str:
     """Stringify merge keys so float campaign ids match SKU string keys."""
@@ -2296,6 +2301,18 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
     else:
         pd.DataFrame().to_csv(csv_path, index=False)
 
+    # Channel P&L straight from ClickHouse gold for the channel sheets.
+    try:
+        _ch_brand = int(os.getenv('CLICKHOUSE_BRAND_ID') or 0) or None
+    except ValueError:
+        _ch_brand = None
+    try:
+        _pnl_df = fetch_ad_channel_pnl(s, e, brand_id=_ch_brand)
+        _sku_lines_df = fetch_channel_sku_lines(s, e, brand_id=_ch_brand)
+    except Exception as _pnl_exc:
+        print(f"[DailyRollup] Channel P&L fetch failed: {_pnl_exc}")
+        _pnl_df, _sku_lines_df = pd.DataFrame(), pd.DataFrame()
+
     # Write Excel with multiple sheets
     with pd.ExcelWriter(
         xlsx_path,
@@ -2303,797 +2320,67 @@ def run(start_date: str = None, end_date: str = None, out_dir: str = None) -> st
         engine_kwargs={'options': {'nan_inf_to_errors': True}}
     ) as writer:
         
-        # Meta ads rollup sheet (similar to ad_rollup from dailyrollup_orig.py)
-        if not meta_ads_rollup.empty:
-            # Sort by net_roas descending, then by hierarchy for proper merging of repeated values
-            key_cols_for_merge = ['date_start','channel','campaign_name','adset_name','ad_name']
-            sort_cols = []
-            if 'net_roas' in meta_ads_rollup.columns:
-                sort_cols.append('net_roas')
-            sort_cols.extend([c for c in key_cols_for_merge if c in meta_ads_rollup.columns])
-            
-            # Sort with net_roas descending, then hierarchy ascending
-            ascending_flags = [False] + [True] * (len(sort_cols) - 1)
-            meta_ads_sorted = meta_ads_rollup.sort_values(sort_cols, ascending=ascending_flags, na_position='last')
-            
-            # Add Grand Total row with proper aggregation logic
-            try:
-                # Use ad-level rollup (pre-SKU) for accurate totals that match meta_campaigns
-                src = meta_ads_base.copy()
-                # Normalize types with better error handling
-                numeric_cols = ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
-                               'shopify_orders','spend','shopify_revenue','shopify_cogs','total_sku_quantity',
-                               'quantity','sku_revenue','sku_cogs']
-                for c in numeric_cols:
-                    if c in src.columns:
-                        src[c] = pd.to_numeric(src[c], errors='coerce').fillna(0)
-                
-                ad_keys = [c for c in ['date_start','channel','campaign_name','adset_name','ad_name'] if c in src.columns]
-                non_sku_cols = [c for c in ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
-                                            'shopify_orders','spend','shopify_revenue','shopify_cogs','total_sku_quantity'] if c in src.columns]
-                sku_cols = [c for c in ['quantity'] if c in meta_ads_rollup.columns]
-
-                total_map = {}
-                for c in non_sku_cols:
-                    total_map[c] = float(src[c].sum())
-                for c in sku_cols:
-                    total_map[c] = float(meta_ads_rollup[c].sum())
-                
-                # Compute derived totals with proper error handling (matching campaign rollup methodology)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    # CTR: Use simple aggregation from total clicks/impressions (same as campaign rollup)
-                    if 'clicks' in total_map and 'impressions' in total_map and total_map['impressions'] > 0:
-                        total_map['ctr'] = (total_map['clicks'] / total_map['impressions']) * 100
-                    else:
-                        total_map['ctr'] = 0.0
-                    
-                    # Bounce Rate: Use simple aggregation with clipping (same as campaign rollup)
-                    if 'clicks' in total_map and '_landing_page_view' in total_map and total_map['clicks'] > 0:
-                        bounce = ((total_map['clicks'] - total_map['_landing_page_view']) / total_map['clicks']) * 100
-                        total_map['bounce_rate'] = max(0, min(100, bounce))  # Clip between 0-100 like campaign rollup
-                    else:
-                        total_map['bounce_rate'] = 0.0
-                    
-                    if 'shopify_revenue' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['gross_roas'] = total_map['shopify_revenue'] / total_map['spend']
-                    else:
-                        total_map['gross_roas'] = 0.0
-                    
-                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['net_roas'] = (total_map['shopify_revenue'] - total_map['shopify_cogs']) / total_map['spend']
-                        total_map['net_profit'] = total_map['shopify_revenue'] - total_map['shopify_cogs'] - total_map['spend']
-                        if total_map['shopify_revenue'] > 0:
-                            total_map['profit_margin'] = (total_map['net_profit'] / total_map['shopify_revenue']) * 100
-                        else:
-                            total_map['profit_margin'] = 0.0
-                    else:
-                        total_map['net_roas'] = 0.0
-                        total_map['net_profit'] = 0.0
-                        total_map['profit_margin'] = 0.0
-                
-                # Replace any inf/nan values with 0
-                for key, value in total_map.items():
-                    if not np.isfinite(value):
-                        total_map[key] = 0.0
-                
-                # Build total row
-                total_row = {c: '' for c in meta_ads_sorted.columns}
-                if 'date_start' in total_row: total_row['date_start'] = 'Total'
-                if 'channel' in total_row: total_row['channel'] = 'All'
-                if 'campaign_name' in total_row: total_row['campaign_name'] = 'Grand Total'
-                if 'adset_name' in total_row: total_row['adset_name'] = ''
-                if 'ad_name' in total_row: total_row['ad_name'] = ''
-                if 'sku' in total_row: total_row['sku'] = ''
-                
-                # Copy numeric totals with validation (exclude unit_price and unit_cost - leave blank for Grand Total)
-                numeric_total_cols = ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
-                                     'shopify_orders','spend','shopify_revenue','shopify_cogs','total_sku_quantity',
-                                     'quantity','ctr','bounce_rate',
-                                     'gross_roas','net_roas','net_profit','profit_margin']
-                for c in numeric_total_cols:
-                    if c in total_row and c in total_map:
-                        total_row[c] = total_map[c]
-                
-                # Set unit price and cost to empty for Grand Total (per-unit values don't aggregate)
-                if 'unit_price' in total_row: total_row['unit_price'] = ''
-                if 'unit_cost' in total_row: total_row['unit_cost'] = ''
-                
-                # Append total row
-                meta_ads_sorted = pd.concat([meta_ads_sorted, pd.DataFrame([total_row])], ignore_index=True)
-
-                # Override the Grand Total bounce rate with the real session-weighted
-                # value from /v1/meta-funnel (the total_map version above is the fake
-                # (clicks - LPV)/clicks ~100). Per-ad rows already carry the real value.
-                try:
-                    _, _fsum = _fetch_meta_funnel_by_ad(s, e)
-                    if 'bounce_rate' in meta_ads_sorted.columns and _fsum and _fsum.get('avg_bounce_rate') is not None:
-                        meta_ads_sorted.loc[meta_ads_sorted.index[-1], 'bounce_rate'] = max(
-                            0.0, min(100.0, float(_fsum.get('avg_bounce_rate') or 0))
-                        )
-                except Exception as _bexc:
-                    print(f"[Meta Ads Grand Total] Real bounce override skipped: {_bexc}")
-            except Exception as e:
-                print(f"[Meta Ads Grand Total] Error calculating grand total: {e}")
-                # Continue without grand total rather than failing silently
-            
-            # Round for output
-            meta_ads_rounded = round_for_output(meta_ads_sorted)
-            
-            # Rename headers for presentation (funnel structure)
-            rename_map = {
-                '_landing_page_view': 'LPV',
-                'bounce_rate': 'Bounce Rate',
-                '_add_to_cart': 'ATC',
-                'unit_price': 'sku_unit_price',
-                'unit_cost': 'sku_unit_cogs',
-            }
-            meta_ads_rounded = meta_ads_rounded.rename(columns={k:v for k,v in rename_map.items() if k in meta_ads_rounded.columns})
-            meta_ads_rounded = drop_internal_id_columns(meta_ads_rounded)
-            
-            # Drop vendor, product_title, variant_title, profit_margin, total_sku_quantity, sku_revenue, sku_cogs, impressions, _landing_page_view, LPV for presentation
-            drop_cols = [c for c in ['campaign_status','vendor','product_title','variant_title','profit_margin','total_sku_quantity','sku_revenue','sku_cogs','impressions','_landing_page_view','LPV','bounce_rate','Bounce Rate'] if c in meta_ads_rounded.columns]
-            meta_ads_rounded = meta_ads_rounded.drop(columns=drop_cols)
-            
-            meta_ads_rounded.to_excel(writer, sheet_name='meta_ads_rollup', index=False)
-            
-            # Apply formatting
-            try:
-                workbook = writer.book
-                center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
-                worksheet = writer.sheets['meta_ads_rollup']
-                worksheet.set_column(0, len(meta_ads_rounded.columns)-1, None, center_fmt)
-                worksheet.freeze_panes(1, 0)
-                worksheet.set_row(0, None, header_fmt)
-                
-                # Color Grand Total row (last row)
-                try:
-                    last_row = len(meta_ads_rounded)
-                    worksheet.set_row(last_row, None, total_fmt)
-                except Exception:
-                    pass
-                
-                # Conditional formatting for profit column if present
-                try:
-                    if 'net_profit' in meta_ads_rounded.columns:
-                        profit_col = meta_ads_rounded.columns.get_loc('net_profit')
-                        green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, profit_col, len(meta_ads_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-                        })
-                        worksheet.conditional_format(1, profit_col, len(meta_ads_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-                
-                # Heatmap for Bounce Rate: 0 ignored (white), 100 worst (light blue)
-                try:
-                    bounce_col_name = 'Bounce Rate' if 'Bounce Rate' in meta_ads_rounded.columns else ('bounce_rate' if 'bounce_rate' in meta_ads_rounded.columns else None)
-                    if bounce_col_name is not None:
-                        bcol = meta_ads_rounded.columns.get_loc(bounce_col_name)
-                        worksheet.conditional_format(1, bcol, len(meta_ads_rounded), bcol, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 1, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 100, 'max_color': '#D9EAFB'
-                        })
-                except Exception:
-                    pass
-                
-                # Gradient formatting for CTR column
-                try:
-                    ctr_col_name = 'ctr' if 'ctr' in meta_ads_rounded.columns else None
-                    if ctr_col_name is not None:
-                        ctr_col = meta_ads_rounded.columns.get_loc(ctr_col_name)
-                        worksheet.conditional_format(1, ctr_col, len(meta_ads_rounded), ctr_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                        })
-                except Exception:
-                    pass
-                
-                
-                # Gradient formatting for Spend column
-                try:
-                    spend_col_name = 'spend' if 'spend' in meta_ads_rounded.columns else None
-                    if spend_col_name is not None:
-                        spend_col = meta_ads_rounded.columns.get_loc(spend_col_name)
-                        # Get max spend value for scaling
-                        spend_values = pd.to_numeric(meta_ads_rounded[spend_col_name], errors='coerce').fillna(0)
-                        max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                        worksheet.conditional_format(1, spend_col, len(meta_ads_rounded), spend_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                        })
-                except Exception:
-                    pass
-                
-                # Red formatting for Net ROAS < 1
-                try:
-                    net_roas_col_name = 'net_roas' if 'net_roas' in meta_ads_rounded.columns else None
-                    if net_roas_col_name is not None:
-                        net_roas_col = meta_ads_rounded.columns.get_loc(net_roas_col_name)
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, net_roas_col, len(meta_ads_rounded), net_roas_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            
-            # Merge repeating values for grouped display
-            metric_cols_to_merge = [
-                'clicks','ctr','ATC','_initiate_checkout',
-                'shopify_orders','Bounce Rate','spend','shopify_revenue','shopify_cogs','gross_roas','net_roas','profit'
-            ]
-            display_merge_cols = []
-            for c in key_cols_for_merge + metric_cols_to_merge:
-                if c in meta_ads_rounded.columns:
-                    display_merge_cols.append(c)
-            
-            # Don't sum shopify_revenue/cogs across SKU rows (they're ad-level metrics that repeat)
-            _merge_repeating_values_in_sheet(
-                writer,
-                meta_ads_rounded,
-                'meta_ads_rollup',
-                display_merge_cols,
-                scope_columns=[c for c in ['date_start','channel','campaign_name'] if c in meta_ads_rounded.columns],
-                sum_columns=[]  # No summing needed since we're showing unit prices per SKU
-            )
-        else:
+        # meta_ads_rollup: ad-grain sheet from gold.fct_ad_channel_pnl_daily -- the
+        # source the dashboard reconciles against. The marketing API path this
+        # replaces understated Sep Meta revenue by 28%.
+        _ch_df, _ch_spans = build_channel_sheet(_pnl_df, _sku_lines_df, 'meta')
+        if _ch_df.empty:
             pd.DataFrame().to_excel(writer, sheet_name='meta_ads_rollup', index=False)
-
-        # Meta campaigns sheet
-        if not meta_campaigns.empty:
-            # Add Grand Total row with proper aggregation logic
-            try:
-                # Use ad-level rollup totals (matches sum of meta_campaigns rows)
-                src = meta_ads_base.copy()
-                
-                # Normalize types with better error handling
-                numeric_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                               '_landing_page_view','_add_to_cart','_initiate_checkout']
-                for c in numeric_cols:
-                    if c in src.columns:
-                        src[c] = pd.to_numeric(src[c], errors='coerce').fillna(0)
-                
-                # Calculate totals with better precision
-                total_map = {}
-                for c in numeric_cols:
-                    if c in src.columns:
-                        total_map[c] = float(src[c].sum())
-                
-                # Compute derived totals with proper error handling (matching campaign rollup methodology)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    # CTR: Use simple aggregation from total clicks/impressions (same as campaign rollup)
-                    if 'clicks' in total_map and 'impressions' in total_map and total_map['impressions'] > 0:
-                        total_map['ctr'] = (total_map['clicks'] / total_map['impressions']) * 100
-                    else:
-                        total_map['ctr'] = 0.0
-                    
-                    if 'shopify_revenue' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['gross_roas'] = total_map['shopify_revenue'] / total_map['spend']
-                    else:
-                        total_map['gross_roas'] = 0.0
-                    
-                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['net_roas'] = (total_map['shopify_revenue'] - total_map['shopify_cogs']) / total_map['spend']
-                        total_map['net_profit'] = total_map['shopify_revenue'] - total_map['shopify_cogs'] - total_map['spend']
-                        if total_map['shopify_revenue'] > 0:
-                            total_map['profit_margin'] = (total_map['net_profit'] / total_map['shopify_revenue']) * 100
-                        else:
-                            total_map['profit_margin'] = 0.0
-                    else:
-                        total_map['net_roas'] = 0.0
-                        total_map['net_profit'] = 0.0
-                        total_map['profit_margin'] = 0.0
-
-                    # Calculate be_roas (breakeven ROAS) — dashboard: revenue / (revenue - cogs)
-                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map:
-                        _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
-                        total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
-                    else:
-                        total_map['be_roas'] = 0.0
-                    
-                    # Calculate conversion_rate (orders / clicks * 100)
-                    if 'shopify_orders' in total_map and 'clicks' in total_map and total_map['clicks'] > 0:
-                        total_map['conversion_rate'] = (total_map['shopify_orders'] / total_map['clicks']) * 100
-                    else:
-                        total_map['conversion_rate'] = 0.0
-                
-                # Replace any inf/nan values with 0
-                for key, value in total_map.items():
-                    if not np.isfinite(value):
-                        total_map[key] = 0.0
-                
-                # Build total row
-                total_row = {c: '' for c in meta_campaigns.columns}
-                if 'date_start' in total_row: total_row['date_start'] = 'Total'
-                if 'channel' in total_row: total_row['channel'] = 'All'
-                if 'campaign_name' in total_row: total_row['campaign_name'] = 'Grand Total'
-                
-                # Copy numeric totals with validation
-                numeric_total_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                                     '_landing_page_view','_add_to_cart','_initiate_checkout','ctr',
-                                     'gross_roas','net_roas','be_roas','conversion_rate','net_profit','profit_margin']
-                for c in numeric_total_cols:
-                    if c in total_row and c in total_map:
-                        total_row[c] = total_map[c]
-                
-                # Append total row
-                meta_campaigns = pd.concat([meta_campaigns, pd.DataFrame([total_row])], ignore_index=True)
-            except Exception as e:
-                print(f"[Meta Campaigns Grand Total] Error calculating grand total: {e}")
-                # Continue without grand total rather than failing silently
-            
-            meta_campaigns_rounded = round_for_output(meta_campaigns)
-            meta_campaigns_rounded = drop_internal_id_columns(meta_campaigns_rounded)
-            meta_campaigns_rounded.to_excel(writer, sheet_name='meta_campaigns', index=False)
-            
-            # Apply formatting and color schema
-            try:
-                workbook = writer.book
-                center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
-                worksheet = writer.sheets['meta_campaigns']
-                worksheet.set_column(0, len(meta_campaigns_rounded.columns)-1, None, center_fmt)
-                worksheet.freeze_panes(1, 0)
-                worksheet.set_row(0, None, header_fmt)
-                
-                # Color Grand Total row (last row)
-                try:
-                    last_row = len(meta_campaigns_rounded)
-                    worksheet.set_row(last_row, None, total_fmt)
-                except Exception:
-                    pass
-                
-                # Conditional formatting for profit column if present
-                try:
-                    if 'net_profit' in meta_campaigns_rounded.columns:
-                        profit_col = meta_campaigns_rounded.columns.get_loc('net_profit')
-                        green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, profit_col, len(meta_campaigns_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-                        })
-                        worksheet.conditional_format(1, profit_col, len(meta_campaigns_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-                
-                # Gradient formatting for CTR column
-                try:
-                    if 'ctr' in meta_campaigns_rounded.columns:
-                        ctr_col = meta_campaigns_rounded.columns.get_loc('ctr')
-                        worksheet.conditional_format(1, ctr_col, len(meta_campaigns_rounded), ctr_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                        })
-                except Exception:
-                    pass
-                
-                
-                # Gradient formatting for Spend column
-                try:
-                    if 'spend' in meta_campaigns_rounded.columns:
-                        spend_col = meta_campaigns_rounded.columns.get_loc('spend')
-                        # Get max spend value for scaling
-                        spend_values = pd.to_numeric(meta_campaigns_rounded['spend'], errors='coerce').fillna(0)
-                        max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                        worksheet.conditional_format(1, spend_col, len(meta_campaigns_rounded), spend_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                        })
-                except Exception:
-                    pass
-                
-                # Red formatting for Net ROAS < 1
-                try:
-                    if 'net_roas' in meta_campaigns_rounded.columns:
-                        net_roas_col = meta_campaigns_rounded.columns.get_loc('net_roas')
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, net_roas_col, len(meta_campaigns_rounded), net_roas_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-            except Exception:
-                pass
         else:
+            write_channel_sheet(writer, 'meta_ads_rollup', _ch_df, _ch_spans)
+
+        # meta_campaigns: campaign grain from the same ClickHouse source. Column
+        # names stay revenue/cogs/orders -- the daily report's own readers key
+        # off them (extract_daily_campaign_performers, ..._efficiency_metrics).
+        _camp = build_campaign_rollup(_pnl_df, 'meta')
+        if _camp.empty:
             pd.DataFrame().to_excel(writer, sheet_name='meta_campaigns', index=False)
-
-        # Google campaigns sheet
-        if not google_campaigns.empty:
-            # Apply column ordering and remove unwanted columns (same as meta ads rollup)
-            google_campaigns = google_campaigns[order_columns_by_funnel(google_campaigns, include_sku=True)]
-            
-            # Rename unit columns to sku_unit_price and sku_unit_cogs
-            google_campaigns = google_campaigns.rename(columns={
-                'unit_price': 'sku_unit_price',
-                'unit_cost': 'sku_unit_cogs'
-            })
-            
-            # Drop vendor, product_title, variant_title, profit_margin, total_sku_quantity, sku_revenue, sku_cogs for presentation
-            drop_cols = [c for c in [
-                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity',
-                'sku_revenue', 'sku_cogs', 'sku_unit_price', 'sku_unit_cogs', 'sku_quantity',
-            ] if c in google_campaigns.columns]
-            google_campaigns = google_campaigns.drop(columns=drop_cols)
-            google_campaigns = drop_internal_id_columns(google_campaigns)
-            
-            # Add Grand Total row with proper aggregation logic
-            try:
-                # Use raw data for accurate totals (not the processed campaign data)
-                # Get the raw Google data that was used to build the campaigns
-                google_raw = df[df['source'] == 'Google Ads'].copy()
-                if google_raw.empty:
-                    # Fallback to campaign data if raw data not available
-                    src = google_campaigns.copy()
-                else:
-                    # Transform the raw data to get the same column structure
-                    src = transform_attribution_data(google_raw)
-                
-                # Normalize types with better error handling
-                numeric_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                               '_landing_page_view','_add_to_cart','_initiate_checkout']
-                for c in numeric_cols:
-                    if c in src.columns:
-                        src[c] = pd.to_numeric(src[c], errors='coerce').fillna(0)
-                
-                # Calculate totals with better precision (same approach as Meta campaigns)
-                total_map = {}
-                for c in numeric_cols:
-                    if c in src.columns:
-                        total_map[c] = float(src[c].sum())
-                
-                # Compute derived totals with proper error handling (matching campaign rollup methodology)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    # CTR: Use simple aggregation from total clicks/impressions (same as campaign rollup)
-                    if 'clicks' in total_map and 'impressions' in total_map and total_map['impressions'] > 0:
-                        total_map['ctr'] = (total_map['clicks'] / total_map['impressions']) * 100
-                    else:
-                        total_map['ctr'] = 0.0
-                    
-                    # Bounce Rate: Use simple aggregation with clipping (same as campaign rollup)
-                    if 'clicks' in total_map and '_landing_page_view' in total_map and total_map['clicks'] > 0:
-                        bounce = ((total_map['clicks'] - total_map['_landing_page_view']) / total_map['clicks']) * 100
-                        total_map['bounce_rate'] = max(0, min(100, bounce))  # Clip between 0-100 like campaign rollup
-                    else:
-                        total_map['bounce_rate'] = 0.0
-                    
-                    # Gross ROAS
-                    if 'shopify_revenue' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['gross_roas'] = total_map['shopify_revenue'] / total_map['spend']
-                    else:
-                        total_map['gross_roas'] = 0.0
-                    
-                    # Net ROAS and Profit
-                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map and 'spend' in total_map and total_map['spend'] > 0:
-                        total_map['net_roas'] = (total_map['shopify_revenue'] - total_map['shopify_cogs']) / total_map['spend']
-                        total_map['net_profit'] = total_map['shopify_revenue'] - total_map['shopify_cogs'] - total_map['spend']
-                        if total_map['shopify_revenue'] > 0:
-                            total_map['profit_margin'] = (total_map['net_profit'] / total_map['shopify_revenue']) * 100
-                        else:
-                            total_map['profit_margin'] = 0.0
-                    else:
-                        total_map['net_roas'] = 0.0
-                        total_map['net_profit'] = 0.0
-                        total_map['profit_margin'] = 0.0
-
-                    # BE ROAS — dashboard: revenue / (revenue - cogs)
-                    if 'shopify_revenue' in total_map and 'shopify_cogs' in total_map:
-                        _margin = total_map['shopify_revenue'] - total_map['shopify_cogs']
-                        total_map['be_roas'] = (total_map['shopify_revenue'] / _margin) if _margin > 0 else 0.0
-                    else:
-                        total_map['be_roas'] = 0.0
-                    
-                    # Conversion rate
-                    if 'shopify_orders' in total_map and 'clicks' in total_map and total_map['clicks'] > 0:
-                        total_map['conversion_rate'] = (total_map['shopify_orders'] / total_map['clicks']) * 100
-                    else:
-                        total_map['conversion_rate'] = 0.0
-                
-                # Replace any inf/nan values with 0
-                for key, value in total_map.items():
-                    if not np.isfinite(value):
-                        total_map[key] = 0.0
-                
-                # Build total row
-                total_row = {c: '' for c in google_campaigns.columns}
-                if 'date_start' in total_row: total_row['date_start'] = 'Total'
-                if 'channel' in total_row: total_row['channel'] = 'All'
-                if 'campaign_name' in total_row: total_row['campaign_name'] = 'Grand Total'
-                if 'sku' in total_row: total_row['sku'] = ''
-                
-                # Copy numeric totals with validation (exclude unit_price and unit_cost - leave blank for Grand Total)
-                numeric_total_cols = ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                                     '_landing_page_view','_add_to_cart','_initiate_checkout','ctr','bounce_rate',
-                                     'gross_roas','net_roas','be_roas','conversion_rate','net_profit','profit_margin',
-                                     'quantity','sku_quantity']
-                for c in numeric_total_cols:
-                    if c in total_row and c in total_map:
-                        total_row[c] = total_map[c]
-                
-                # Set unit price and cost to empty for Grand Total (per-unit values don't aggregate)
-                if 'unit_price' in total_row: total_row['unit_price'] = ''
-                if 'unit_cost' in total_row: total_row['unit_cost'] = ''
-                if 'sku_unit_price' in total_row: total_row['sku_unit_price'] = ''
-                if 'sku_unit_cogs' in total_row: total_row['sku_unit_cogs'] = ''
-                
-                # Append total row
-                google_campaigns = pd.concat([google_campaigns, pd.DataFrame([total_row])], ignore_index=True)
-            except Exception:
-                pass
-            
-            google_campaigns_rounded = round_for_output(google_campaigns)
-            google_campaigns_rounded.to_excel(writer, sheet_name='google_campaigns', index=False)
-            
-            # Merge repeating values for better visual grouping
-            try:
-                display_merge_cols = []
-                # Basic grouping columns
-                for c in ['date_start','channel','campaign_name']:
-                    if c in google_campaigns_rounded.columns:
-                        display_merge_cols.append(c)
-                
-                # Campaign-level metrics that should be merged across SKU rows
-                campaign_metrics = ['ctr','spend','shopify_revenue','shopify_cogs','shopify_orders','gross_roas','net_roas','net_profit','be_roas','conversion_rate']
-                for c in campaign_metrics:
-                    if c in google_campaigns_rounded.columns:
-                        display_merge_cols.append(c)
-                
-                _merge_repeating_values_in_sheet(
-                    writer,
-                    google_campaigns_rounded,
-                    'google_campaigns',
-                    display_merge_cols
-                )
-            except Exception:
-                pass
-            
-            # Apply formatting and color schema
-            try:
-                workbook = writer.book
-                center_fmt = workbook.add_format({'align': 'center', 'valign': 'vcenter'})
-                header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF'})
-                worksheet = writer.sheets['google_campaigns']
-                worksheet.set_column(0, len(google_campaigns_rounded.columns)-1, None, center_fmt)
-                worksheet.freeze_panes(1, 0)
-                worksheet.set_row(0, None, header_fmt)
-                
-                # Color Grand Total row (last row)
-                try:
-                    last_row = len(google_campaigns_rounded)
-                    worksheet.set_row(last_row, None, total_fmt)
-                except Exception:
-                    pass
-                
-                # Conditional formatting for profit column if present
-                try:
-                    if 'net_profit' in google_campaigns_rounded.columns:
-                        profit_col = google_campaigns_rounded.columns.get_loc('net_profit')
-                        green_fmt = workbook.add_format({'font_color': '#006100', 'bg_color': '#C6EFCE'})
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, profit_col, len(google_campaigns_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '>', 'value': 0, 'format': green_fmt
-                        })
-                        worksheet.conditional_format(1, profit_col, len(google_campaigns_rounded), profit_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 0, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-                
-                # Heatmap for Bounce Rate
-                try:
-                    if 'bounce_rate' in google_campaigns_rounded.columns:
-                        bounce_col = google_campaigns_rounded.columns.get_loc('bounce_rate')
-                        worksheet.conditional_format(1, bounce_col, len(google_campaigns_rounded), bounce_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 1, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 100, 'max_color': '#D9EAFB'
-                        })
-                except Exception:
-                    pass
-                
-                # Gradient formatting for CTR column
-                try:
-                    if 'ctr' in google_campaigns_rounded.columns:
-                        ctr_col = google_campaigns_rounded.columns.get_loc('ctr')
-                        worksheet.conditional_format(1, ctr_col, len(google_campaigns_rounded), ctr_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                        })
-                except Exception:
-                    pass
-                
-                
-                # Gradient formatting for Spend column
-                try:
-                    if 'spend' in google_campaigns_rounded.columns:
-                        spend_col = google_campaigns_rounded.columns.get_loc('spend')
-                        # Get max spend value for scaling
-                        spend_values = pd.to_numeric(google_campaigns_rounded['spend'], errors='coerce').fillna(0)
-                        max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                        worksheet.conditional_format(1, spend_col, len(google_campaigns_rounded), spend_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                        })
-                except Exception:
-                    pass
-                
-                # Red formatting for Net ROAS < 1
-                try:
-                    if 'net_roas' in google_campaigns_rounded.columns:
-                        net_roas_col = google_campaigns_rounded.columns.get_loc('net_roas')
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, net_roas_col, len(google_campaigns_rounded), net_roas_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-            except Exception:
-                pass
         else:
+            _camp.to_excel(writer, sheet_name='meta_campaigns', index=False)
+            apply_sheet_formatting(
+                writer, 'meta_campaigns', _camp, total_rows=1,
+                heatmap_cols=('spend', 'revenue'), sign_cols=('net_profit',),
+                threshold_cols=('net_roas',),
+            )
+
+        # google_campaigns: campaign grain from the same ClickHouse source. Column
+        # names stay revenue/cogs/orders -- the daily report's own readers key
+        # off them (extract_daily_campaign_performers, ..._efficiency_metrics).
+        _camp = build_campaign_rollup(_pnl_df, 'google')
+        if _camp.empty:
             pd.DataFrame().to_excel(writer, sheet_name='google_campaigns', index=False)
-
-        # Organic campaigns sheet
-        if not organic_campaigns.empty:
-            # Apply column ordering and remove unwanted columns (same as meta ads rollup)
-            organic_campaigns = organic_campaigns[order_columns_by_funnel(organic_campaigns, include_sku=True)]
-            
-            # Drop unwanted columns for organic sheet presentation
-            drop_cols = [c for c in [
-                'campaign_name', 'shopify_revenue', 'shopify_cogs',
-                'vendor', 'product_title', 'variant_title', 'profit_margin', 'total_sku_quantity', 'unit_price', 'unit_cost',
-            ] if c in organic_campaigns.columns]
-            organic_campaigns = organic_campaigns.drop(columns=drop_cols)
-            organic_campaigns = drop_internal_id_columns(organic_campaigns)
-            
-            # Add Grand Total row with proper aggregation logic
-            try:
-                # Use original data for accurate totals
-                src = organic_campaigns.copy()
-                # Normalize types
-                for c in ['impressions','clicks','spend','shopify_orders','shopify_revenue','shopify_cogs',
-                          '_landing_page_view','_add_to_cart','_initiate_checkout']:
-                    if c in src.columns:
-                        src[c] = pd.to_numeric(src[c], errors='coerce').fillna(0)
-                
-                # Calculate totals - need to handle SKU-level metrics properly
-                # For Organic campaigns, we need to sum SKU metrics from all rows but avoid double-counting campaign-level metrics
-                campaign_keys = ['date_start','channel','campaign_name']
-                present_campaign_keys = [c for c in campaign_keys if c in src.columns]
-                
-                # Sum non-SKU metrics from unique campaign rows to avoid double-counting
-                dedup_campaigns = src.drop_duplicates(subset=present_campaign_keys) if present_campaign_keys else src
-                non_sku_cols = [c for c in ['impressions','clicks','_landing_page_view','_add_to_cart','_initiate_checkout',
-                                            'shopify_orders','spend','shopify_revenue','shopify_cogs'] if c in src.columns]
-                sku_cols = [c for c in ['sku_quantity','sku_revenue','sku_cogs'] if c in src.columns]
-                
-                total_map = {c: float(dedup_campaigns[c].sum()) for c in non_sku_cols}
-                total_map.update({c: float(src[c].sum()) for c in sku_cols})
-                
-                # Compute derived totals (exclude ctr, net_roas, be_roas, conversion_rate, net_profit, gross_roas for organic)
-                
-                # Build total row
-                total_row = {c: '' for c in organic_campaigns.columns}
-                if 'date_start' in total_row: total_row['date_start'] = 'Total'
-                if 'channel' in total_row: total_row['channel'] = 'All'
-                if 'sku' in total_row: total_row['sku'] = ''
-                
-                # Copy numeric totals (exclude removed columns: campaign_name, shopify_revenue, shopify_cogs)
-                for c in ['impressions','clicks','shopify_orders',
-                          '_landing_page_view','_add_to_cart','_initiate_checkout','bounce_rate',
-                          'sku_quantity','sku_revenue','sku_cogs']:
-                    if c in total_row and c in total_map:
-                        total_row[c] = float(total_map[c])
-                
-                # Append total row
-                organic_campaigns = pd.concat([organic_campaigns, pd.DataFrame([total_row])], ignore_index=True)
-            except Exception:
-                pass
-            
-            organic_campaigns_rounded = round_for_output(organic_campaigns)
-            organic_campaigns_rounded.to_excel(writer, sheet_name='organic_campaigns', index=False)
-            
-            # For organic campaigns, use terminal-like format (no merging for cleaner display)
-            # Skip the merging logic for organic data to show individual SKU rows clearly
-            
-            # Apply terminal-like formatting for organic campaigns
-            try:
-                workbook = writer.book
-                # Terminal-like formatting: left-aligned text, right-aligned numbers
-                text_fmt = workbook.add_format({'align': 'left', 'valign': 'vcenter'})
-                number_fmt = workbook.add_format({'align': 'right', 'valign': 'vcenter', 'num_format': '#,##0.00'})
-                header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'valign': 'vcenter', 'bg_color': '#F2F2F2', 'border': 1})
-                total_fmt = workbook.add_format({'bold': True, 'bg_color': '#E6F3FF', 'align': 'right', 'num_format': '#,##0.00'})
-                
-                worksheet = writer.sheets['organic_campaigns']
-                worksheet.freeze_panes(1, 0)
-                worksheet.set_row(0, None, header_fmt)
-                
-                # Set column-specific formatting for terminal-like appearance
-                for col_idx, col_name in enumerate(organic_campaigns_rounded.columns):
-                    if col_name in ['date_start', 'channel', 'sku', 'vendor', 'product_title', 'variant_title']:
-                        worksheet.set_column(col_idx, col_idx, None, text_fmt)
-                    else:
-                        worksheet.set_column(col_idx, col_idx, None, number_fmt)
-                
-                # Color Grand Total row (last row)
-                try:
-                    last_row = len(organic_campaigns_rounded)
-                    worksheet.set_row(last_row, None, total_fmt)
-                except Exception:
-                    pass
-                
-                # No conditional formatting for profit column in organic campaigns (net_profit removed)
-                
-                # Heatmap for Bounce Rate
-                try:
-                    if 'bounce_rate' in organic_campaigns_rounded.columns:
-                        bounce_col = organic_campaigns_rounded.columns.get_loc('bounce_rate')
-                        worksheet.conditional_format(1, bounce_col, len(organic_campaigns_rounded), bounce_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 1, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 100, 'max_color': '#D9EAFB'
-                        })
-                except Exception:
-                    pass
-                
-                # Gradient formatting for CTR column
-                try:
-                    if 'ctr' in organic_campaigns_rounded.columns:
-                        ctr_col = organic_campaigns_rounded.columns.get_loc('ctr')
-                        worksheet.conditional_format(1, ctr_col, len(organic_campaigns_rounded), ctr_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': 5, 'max_color': '#90EE90'
-                        })
-                except Exception:
-                    pass
-                
-                
-                # Gradient formatting for Spend column
-                try:
-                    if 'spend' in organic_campaigns_rounded.columns:
-                        spend_col = organic_campaigns_rounded.columns.get_loc('spend')
-                        # Get max spend value for scaling
-                        spend_values = pd.to_numeric(organic_campaigns_rounded['spend'], errors='coerce').fillna(0)
-                        max_spend = spend_values.max() if len(spend_values) > 0 else 1000
-                        worksheet.conditional_format(1, spend_col, len(organic_campaigns_rounded), spend_col, {
-                            'type': '2_color_scale',
-                            'min_type': 'num', 'min_value': 0, 'min_color': '#FFFFFF',
-                            'max_type': 'num', 'max_value': max_spend, 'max_color': '#FFFF00'
-                        })
-                except Exception:
-                    pass
-                
-                # Red formatting for Net ROAS < 1
-                try:
-                    if 'net_roas' in organic_campaigns_rounded.columns:
-                        net_roas_col = organic_campaigns_rounded.columns.get_loc('net_roas')
-                        red_fmt = workbook.add_format({'font_color': '#9C0006', 'bg_color': '#FFC7CE'})
-                        worksheet.conditional_format(1, net_roas_col, len(organic_campaigns_rounded), net_roas_col, {
-                            'type': 'cell', 'criteria': '<', 'value': 1, 'format': red_fmt
-                        })
-                except Exception:
-                    pass
-            except Exception:
-                pass
         else:
+            _camp.to_excel(writer, sheet_name='google_campaigns', index=False)
+            apply_sheet_formatting(
+                writer, 'google_campaigns', _camp, total_rows=1,
+                heatmap_cols=('spend', 'revenue'), sign_cols=('net_profit',),
+                threshold_cols=('net_roas',),
+            )
+
+        # organic_campaigns: campaign grain from the same ClickHouse source. Column
+        # names stay revenue/cogs/orders -- the daily report's own readers key
+        # off them (extract_daily_campaign_performers, ..._efficiency_metrics).
+        _camp = build_campaign_rollup(_pnl_df, 'organic')
+        if _camp.empty:
             pd.DataFrame().to_excel(writer, sheet_name='organic_campaigns', index=False)
+        else:
+            _camp.to_excel(writer, sheet_name='organic_campaigns', index=False)
+            apply_sheet_formatting(
+                writer, 'organic_campaigns', _camp, total_rows=1,
+                heatmap_cols=('spend', 'revenue'), sign_cols=('net_profit',),
+                threshold_cols=('net_roas',),
+            )
+
+        # unattributed: its own sheet, as the DB keeps it apart from organic.
+        _camp_un = build_campaign_rollup(_pnl_df, 'unattributed')
+        if _camp_un.empty:
+            pd.DataFrame().to_excel(writer, sheet_name='unattributed_campaigns', index=False)
+        else:
+            _camp_un.to_excel(writer, sheet_name='unattributed_campaigns', index=False)
+            apply_sheet_formatting(
+                writer, 'unattributed_campaigns', _camp_un, total_rows=1,
+                heatmap_cols=('spend', 'revenue'), sign_cols=('net_profit',),
+            )
 
         # Raw data sheets for temporary viewing - COMMENTED OUT
         # # Raw Meta data

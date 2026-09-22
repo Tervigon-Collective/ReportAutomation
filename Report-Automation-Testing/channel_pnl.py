@@ -525,3 +525,47 @@ def dashboard_rows_from_summaries(
         "orders": total["order_count"],
     }
     return rows, total, canonical
+
+
+CAMPAIGN_COLS = ["campaign_name", "impressions", "clicks", "ctr", "spend",
+                 "orders", "revenue", "cogs", "net_profit", "net_roas"]
+
+
+def build_campaign_rollup(pnl_df: pd.DataFrame, channel: str) -> pd.DataFrame:
+    """Campaign-grain rollup with Grand Total first.
+
+    Column names stay ``revenue`` / ``cogs`` / ``orders`` because the daily
+    report's own readers key off them: extract_daily_campaign_performers reads
+    meta_campaigns / google_campaigns, and extract_daily_efficiency_metrics
+    parses their 'Grand Total' row by campaign_name.
+    """
+    if pnl_df is None or pnl_df.empty:
+        return pd.DataFrame(columns=CAMPAIGN_COLS)
+    ads = pnl_df[pnl_df["channel"] == channel]
+    if ads.empty:
+        return pd.DataFrame(columns=CAMPAIGN_COLS)
+
+    agg = (
+        ads.groupby("campaign_name", dropna=False)
+        .agg(impressions=("impressions", "sum"), clicks=("clicks", "sum"),
+             spend=("spend", "sum"), orders=("orders", "sum"),
+             revenue=("net_sales", "sum"), cogs=("net_cogs", "sum"),
+             net_profit=("net_profit", "sum"))
+        .reset_index()
+    )
+    agg["campaign_name"] = agg["campaign_name"].replace("", UNATTRIBUTED_AD_LABEL)
+    agg["ctr"] = np.where(agg["impressions"] > 0,
+                          agg["clicks"] / agg["impressions"] * 100, 0.0).round(2)
+    agg["net_roas"] = np.where(agg["spend"] > 0,
+                               (agg["revenue"] - agg["cogs"]) / agg["spend"], 0.0).round(2)
+    agg = agg.sort_values("spend", ascending=False).reset_index(drop=True)
+
+    total = {"campaign_name": GRAND_TOTAL_LABEL}
+    for col in ("impressions", "clicks", "spend", "orders", "revenue", "cogs", "net_profit"):
+        total[col] = round(float(agg[col].sum()), 2)
+    total["ctr"] = round(total["clicks"] / total["impressions"] * 100, 2) if total["impressions"] else 0.0
+    total["net_roas"] = round(
+        (total["revenue"] - total["cogs"]) / total["spend"], 2) if total["spend"] else 0.0
+
+    out = pd.concat([pd.DataFrame([total]), agg], ignore_index=True)
+    return out[[c for c in CAMPAIGN_COLS if c in out.columns]]

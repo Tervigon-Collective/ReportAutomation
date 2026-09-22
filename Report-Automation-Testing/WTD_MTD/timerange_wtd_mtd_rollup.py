@@ -22,7 +22,7 @@ from api_data_fetcher import (
     fetch_wtd_mtd_dashboard_snapshot, clear_marketing_cache,
 )
 from global_config import get_global_config, get_temp_dir, get_report_dir
-from excel_formatting import apply_sheet_formatting
+from excel_formatting import apply_sheet_formatting, move_totals_to_top
 
 # Import functions from dailyrollup.py
 from dailyrollup import (
@@ -1182,6 +1182,7 @@ def run_amazon_report(out_dir: str = None) -> str:
         ) as writer:
             
             sheet_name = f'Amazon Campaigns ({date_display})'
+            campaign_rollup, _n_tot = move_totals_to_top(campaign_rollup)
             campaign_rollup.to_excel(writer, sheet_name=sheet_name, index=False)
             
             # Apply formatting (shared helper: see excel_formatting.py)
@@ -1368,21 +1369,15 @@ def run_wtd_mtd_report(out_dir: str = None) -> tuple:
                             if drop_cols:
                                 channel_df_rounded = channel_df_rounded.drop(columns=drop_cols)
                         
-                        # Write to Excel
+                        # Write to Excel (Grand Total first)
+                        channel_df_rounded, _n_tot = move_totals_to_top(channel_df_rounded)
                         channel_df_rounded.to_excel(writer, sheet_name=sheet_name, index=False)
                         
                         # Apply formatting (shared helper: see excel_formatting.py)
                         try:
-                            has_total = (
-                                'channel' in channel_df_rounded.columns
-                                and str(channel_df_rounded['channel'].iloc[-1]).strip() in ('All', 'Grand Total')
-                            ) or (
-                                'campaign_name' in channel_df_rounded.columns
-                                and str(channel_df_rounded['campaign_name'].iloc[-1]).strip() == 'Grand Total'
-                            )
                             apply_sheet_formatting(
                                 writer, sheet_name, channel_df_rounded,
-                                total_rows=1 if has_total else 0,
+                                total_rows=_n_tot,
                                 threshold_cols=('net_roas', 'profit', 'net_profit'),
                                 heatmap_cols=('ctr', 'spend'),
                             )
@@ -1610,7 +1605,8 @@ def _build_product_profitability_df(products: list) -> pd.DataFrame:
         'Gap': total_gap,
         'COGS Reduction %': total_cogs_red_pct,
     }
-    pp_df = pd.concat([pp_df, pd.DataFrame([total_row])], ignore_index=True)
+    # Blended total first, so the headline row needs no scrolling.
+    pp_df = pd.concat([pd.DataFrame([total_row]), pp_df], ignore_index=True)
     pp_df = pp_df[[c for c in PP_COLUMN_ORDER if c in pp_df.columns]]
     pp_df = round_for_output(pp_df)
     # Round to 2 decimal places; percentage columns to 4 so Excel % format shows e.g. 48.05%

@@ -2170,7 +2170,7 @@ def _write_amazon_sp_sheet(writer, start_date_str: str, end_date_str: str, sheet
                 "refunded_amount_incl_gst": totals.get("refunds_incl_gst", totals["refunds"]),
                 "refunded_amount": totals["refunds"],
             }
-            returns_out = pd.concat([returns_out, pd.DataFrame([total_row])], ignore_index=True)
+            returns_out = pd.concat([pd.DataFrame([total_row]), returns_out], ignore_index=True)
             returns_out.to_excel(writer, sheet_name=returns_sheet, index=False)
             try:
                 _apply_sp_sheet_formatting(writer, returns_sheet, returns_out)

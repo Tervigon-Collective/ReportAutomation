@@ -1673,7 +1673,12 @@ def build_amazon_merged_sheet(
     total["gross_margin_pct"] = (
         round(_num(total.get("gross_profit")) / gross_total * 100, 2) if gross_total else 0.0
     )
-    df = pd.concat([df, pd.DataFrame([total], columns=MERGED_COLS)], ignore_index=True)
+    # Grand Total goes first, so the headline numbers need no scrolling. Every
+    # recorded row offset shifts down by one to stay aligned with the sheet.
+    df = pd.concat([pd.DataFrame([total], columns=MERGED_COLS), df], ignore_index=True)
+    ad_spans = [(a + 1, b + 1) for a, b in ad_spans]
+    label_spans = [(a + 1, b + 1) for a, b in label_spans]
+    section_rows = [r + 1 for r in section_rows]
     return df, ad_spans, label_spans, section_rows
 
 
@@ -1757,6 +1762,8 @@ def _apply_sp_sheet_formatting(writer, sheet_name: str, sp_df: pd.DataFrame) -> 
         heatmap_cols=("gross", "refunded_amount"),
         sign_cols=("gross_profit", "net_profit"),
     )
+    # NOTE: callers write the frame themselves; they must pass one whose totals
+    # are already on top (see move_totals_to_top).
 
 
 def add_amazon_sheets_for_timeframe(
@@ -1866,7 +1873,7 @@ def add_amazon_sheets_for_timeframe(
     if round_for_output_fn:
         merged = round_for_output_fn(merged)
 
-    total = merged.iloc[-1]
+    total = merged.iloc[0]
     print(
         f"[{timeframe_key}] Writing merged Amazon sheet '{sheet_name}': "
         f"{len(merged) - 1} rows ({len(ad_spans)} blocks) | "

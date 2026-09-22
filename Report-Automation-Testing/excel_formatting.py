@@ -87,6 +87,34 @@ def _width_for(col: str) -> int:
     return 14
 
 
+TOTAL_LABELS = ("Grand Total", "All", "Total")
+
+
+def move_totals_to_top(
+    df: pd.DataFrame, label_cols: Sequence[str] = ()
+) -> tuple[pd.DataFrame, int]:
+    """Lift the Grand Total row(s) to the top; returns (df, how_many_moved).
+
+    Totals sit directly under the header so the headline numbers are the first
+    thing on screen, with no scrolling to the end of a long sheet.
+    """
+    if df is None or df.empty:
+        return df, 0
+    cols = [c for c in (label_cols or ("campaign_name", "channel", "amazon_order_id",
+                                       "date_start", "SKU", "sku"))
+            if c in df.columns]
+    if not cols:
+        return df, 0
+    mask = pd.Series(False, index=df.index)
+    for col in cols:
+        mask |= df[col].astype(str).str.strip().isin(TOTAL_LABELS)
+    if not mask.any():
+        return df, 0
+    totals = df[mask]
+    rest = df[~mask]
+    return (pd.concat([totals, rest], ignore_index=True), int(mask.sum()))
+
+
 def section_format(workbook):
     """Bold neutral banner used for the block labels inside a sheet."""
     return workbook.add_format(_SECTION)
@@ -105,10 +133,13 @@ def apply_sheet_formatting(
     sign_cols: Sequence[str] = (),
     pct_as_fraction: bool = False,
     freeze_col: int = 0,
+    totals_at_top: bool = True,
 ) -> None:
     """Format a written sheet: header, widths, number formats, totals, gradients.
 
-    total_rows       how many rows at the bottom are totals / reconciliation
+    total_rows       how many rows are totals / reconciliation
+    totals_at_top    totals sit directly under the header (the default) rather
+                     than at the end of the sheet
     heatmap_cols     light white->blue gradient, scaled to the column's own max
     threshold_cols   blue at/above 1, red below (ROAS-style columns)
     sign_cols        blue above 0, red below (profit-style columns)
@@ -160,26 +191,34 @@ def apply_sheet_formatting(
             fmt = center_fmt
         worksheet.set_column(idx, idx, _width_for(name), fmt)
 
-    worksheet.freeze_panes(1, freeze_col)
     worksheet.set_row(0, 30, header_fmt)
-    worksheet.autofilter(0, 0, max(len(df) - total_rows, 1), len(df.columns) - 1)
 
-    last_row = len(df)  # header occupies row 0, so data ends here
-    for offset in range(total_rows):
-        worksheet.set_row(last_row - offset, None, total_fmt)
+    if total_rows and totals_at_top:
+        # Header + totals stay visible; no autofilter, since filtering or
+        # sorting a range containing the total row would drag it into the data.
+        for r in range(1, total_rows + 1):
+            worksheet.set_row(r, None, total_fmt)
+        worksheet.freeze_panes(1 + total_rows, freeze_col)
+        data_first, data_last = 1 + total_rows, len(df)
+    else:
+        worksheet.freeze_panes(1, freeze_col)
+        last_row = len(df)  # header occupies row 0, so data ends here
+        for offset in range(total_rows):
+            worksheet.set_row(last_row - offset, None, total_fmt)
+        worksheet.autofilter(0, 0, max(len(df) - total_rows, 1), len(df.columns) - 1)
+        data_first, data_last = 1, (last_row - total_rows if total_rows else last_row)
 
-    data_last = last_row - total_rows if total_rows else last_row
-    if data_last < 1:
+    if data_last < data_first:
         return
 
     for col in threshold_cols:
         if col not in df.columns:
             continue
         pos = df.columns.get_loc(col)
-        worksheet.conditional_format(1, pos, data_last, pos, {
+        worksheet.conditional_format(data_first, pos, data_last, pos, {
             "type": "cell", "criteria": ">=", "value": 1,
             "format": workbook.add_format(_POS)})
-        worksheet.conditional_format(1, pos, data_last, pos, {
+        worksheet.conditional_format(data_first, pos, data_last, pos, {
             "type": "cell", "criteria": "<", "value": 1,
             "format": workbook.add_format(_NEG)})
 
@@ -187,10 +226,10 @@ def apply_sheet_formatting(
         if col not in df.columns:
             continue
         pos = df.columns.get_loc(col)
-        worksheet.conditional_format(1, pos, data_last, pos, {
+        worksheet.conditional_format(data_first, pos, data_last, pos, {
             "type": "cell", "criteria": ">", "value": 0,
             "format": workbook.add_format(_POS)})
-        worksheet.conditional_format(1, pos, data_last, pos, {
+        worksheet.conditional_format(data_first, pos, data_last, pos, {
             "type": "cell", "criteria": "<", "value": 0,
             "format": workbook.add_format(_NEG)})
 
@@ -198,21 +237,23 @@ def apply_sheet_formatting(
         if col not in df.columns:
             continue
         pos = df.columns.get_loc(col)
-        values = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        # Scale to the data rows: including the total would flatten the ramp.
+        values = pd.to_numeric(
+            df[col].iloc[data_first - 1:data_last], errors="coerce").fillna(0)
         top = float(values.max()) if len(values) else 0.0
         if not np.isfinite(top) or top <= 0:
             top = 1000.0
         low = float(values.min()) if len(values) else 0.0
         if low < 0:
             # Signed magnitude: red arm -> neutral -> blue arm, gray midpoint.
-            worksheet.conditional_format(1, pos, data_last, pos, {
+            worksheet.conditional_format(data_first, pos, data_last, pos, {
                 "type": "3_color_scale",
                 "min_type": "num", "min_value": low, "min_color": _RED_TINT,
                 "mid_type": "num", "mid_value": 0, "mid_color": _NEUTRAL,
                 "max_type": "num", "max_value": top, "max_color": _BLUE_MID,
             })
         else:
-            worksheet.conditional_format(1, pos, data_last, pos, {
+            worksheet.conditional_format(data_first, pos, data_last, pos, {
                 "type": "2_color_scale",
                 "min_type": "num", "min_value": 0, "min_color": "#FFFFFF",
                 "max_type": "num", "max_value": top, "max_color": _BLUE_MID,

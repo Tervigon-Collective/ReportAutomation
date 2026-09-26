@@ -373,14 +373,25 @@ def fetch_amazon_sp_order_pnl_gold(
                 order_currency_code                                        AS currency,
                 round(order_total_header,            2)                    AS order_total,
                 round(effective_gross_revenue,       2)                    AS gross,
+                -- Prefer accounts/ops ex-GST only when non-zero. FULLY_REFUNDED
+                -- orders net accounts_revenue_excl_gst to 0 even though the
+                -- original sale still sits in effective_gross_revenue — fall
+                -- through to gross/1.18 so the sheet keeps the sale line.
                 round(
                     coalesce(
-                        toFloat64(accounts_revenue_excl_gst),
-                        toFloat64(operational_revenue_excl_gst),
+                        nullIf(toFloat64(accounts_revenue_excl_gst), 0),
+                        nullIf(toFloat64(operational_revenue_excl_gst), 0),
                         toFloat64(effective_gross_revenue) / 1.18
                     ), 2
                 )                                                          AS gross_ex_gst,
-                round(effective_refunds,             2)                    AS refunds,
+                -- Keep incl-GST refunds for fee_gst residual; display uses ex-GST.
+                round(effective_refunds,             2)                    AS refunds_incl,
+                round(
+                    coalesce(
+                        toFloat64(refund_principal),
+                        toFloat64(effective_refunds) / 1.18
+                    ), 2
+                )                                                          AS refunds,
                 round(effective_commission,          2)                    AS commission,
                 round(effective_closing,             2)                    AS closing,
                 round(effective_shipping,            2)                    AS shipping,
@@ -1168,7 +1179,8 @@ def _apply_amazon_ads_formatting(writer, sheet_name: str, campaign_rollup: pd.Da
 # (purchase-date order P&L). Headline refunds use return delivery date via
 # ``fetch_amazon_returns_by_delivery_gold`` — a separate sheet/axis.
 _PNL_MONEY_COLS = (
-    "gross", "gross_ex_gst", "finance_refunds", "commission", "closing", "shipping",
+    "gross", "gross_ex_gst", "finance_refunds", "refunds_incl",
+    "commission", "closing", "shipping",
     "tax_withheld", "net_payout", "cogs", "gross_profit",
 )
 
@@ -1272,12 +1284,15 @@ def _apply_sp_gross_profit_rules(df: pd.DataFrame) -> pd.DataFrame:
 
     fee_gst is the GST Amazon charges on its own fees (recoverable input tax credit
     for the seller). It is deducted from the settlement cash but absent from every
-    effective_* fee column, causing the breakdown to not add up to net_payout when
-    using gross_incl (effective_gross_revenue).  We expose it as its own column and
-    show gross_ex_gst (accounts_revenue_excl_gst) so the waterfall balances:
+    effective_* fee column.  We expose it as its own column and show both the sale
+    and finance refunds ex-GST so the waterfall balances:
 
-        gross_ex_gst + finance_refunds + commission + closing + shipping
-        + tax_withheld + fee_gst = net_payout (ex-GST)
+        gross_ex_gst + finance_refunds(ex) + commission + closing + shipping
+        + tax_withheld + fee_gst = net_payout (ex customer GST)
+
+    FULLY_REFUNDED orders keep the original sale on ``gross_ex_gst`` and the
+    matching reverse on ``finance_refunds`` (both ex-GST). Customer GST on the
+    sale and refund cancel in cash, so net_payout stays at settlement cash.
     """
     if df is None or df.empty:
         return df
@@ -1288,25 +1303,33 @@ def _apply_sp_gross_profit_rules(df: pd.DataFrame) -> pd.DataFrame:
             return pd.to_numeric(out[col], errors="coerce").fillna(0.0)
         return pd.Series(0.0, index=out.index)
 
-    # fee_gst = gap between effective_net_payout (gross-incl basis) and the
-    # sum of all visible fee breakdown columns.  For settled orders this equals
-    # recoverable_fee_gst (IGST on commission, shipping, etc.).
-    # For estimated orders effective fee columns already match net_payout, so gap ≈ 0.
-    np_col     = _c("net_payout")
-    gross_col  = _c("gross")
-    r_col      = _c("finance_refunds")
-    comm_col   = _c("commission")
-    clos_col   = _c("closing")
-    ship_col   = _c("shipping")
-    tax_col    = _c("tax_withheld")
-    out["fee_gst"] = (np_col - (gross_col + r_col + comm_col + clos_col + ship_col + tax_col)).round(2)
+    np_col    = _c("net_payout")
+    gross_col = _c("gross")
+    # Incl-GST refunds for residual; prefer dedicated column when present.
+    r_incl = _c("refunds_incl") if "refunds_incl" in out.columns else _c("finance_refunds")
+    r_ex   = _c("finance_refunds") if "finance_refunds" in out.columns else _c("refunds")
+    # If finance_refunds still holds incl-GST (no refunds_incl), treat as incl.
+    if "refunds_incl" not in out.columns and "gross_ex_gst" in out.columns:
+        # Legacy path: convert display refunds to ex-GST here.
+        r_incl = _c("finance_refunds")
+        r_ex = (r_incl / 1.18).round(2)
+        out["finance_refunds"] = r_ex
 
-    # Convert net_payout to ex-GST: subtract output_gst flowing through both
-    # sides.  output_gst = gross_incl – gross_ex_gst.
-    if "gross_ex_gst" in out.columns:
-        gex_col    = _c("gross_ex_gst")
-        output_gst = gross_col - gex_col
-        out["net_payout"] = (np_col - output_gst).round(2)
+    comm_col = _c("commission")
+    clos_col = _c("closing")
+    ship_col = _c("shipping")
+    tax_col  = _c("tax_withheld")
+
+    # fee_gst from incl-GST identity (matches recoverable_fee_gst on settled orders).
+    out["fee_gst"] = (
+        np_col - (gross_col + r_incl + comm_col + clos_col + ship_col + tax_col)
+    ).round(2)
+
+    # Strip customer GST from net_payout on both the sale and the refund side.
+    gex_col = _c("gross_ex_gst") if "gross_ex_gst" in out.columns else gross_col
+    sale_gst = gross_col - gex_col
+    refund_gst = r_incl - r_ex
+    out["net_payout"] = (np_col - sale_gst - refund_gst).round(2)
 
     cogs_col = "product_cost" if "product_cost" in out.columns else (
         "cogs" if "cogs" in out.columns else None
@@ -1501,11 +1524,17 @@ def _line_item_row(item: dict, refunds: dict) -> dict:
             row[col] = item[col]
     for col in RETURN_COLS:
         row[col] = refunds.get(col)
-    # Net profit: what is left after Amazon's fees, the product cost and any
-    # refund. gross_profit already nets fees and product cost.
-    row["net_profit"] = round(
-        _num(item.get("gross_profit")) - _num(refunds.get("refunded_amount")), 2
-    )
+    # gross_profit = net_payout - product_cost, and net_payout already includes
+    # finance_refunds. Delivery-dated refunded_amount is the same cash event on
+    # another axis — subtracting it again double-counts the refund.
+    # Only apply delivery refunds when finance has not booked one yet.
+    gp = _num(item.get("gross_profit"))
+    finance_ref = _num(item.get("finance_refunds"))
+    delivery_ref = _num(refunds.get("refunded_amount"))
+    if abs(finance_ref) > 0.01:
+        row["net_profit"] = round(gp, 2)
+    else:
+        row["net_profit"] = round(gp - delivery_ref, 2)
     return row
 
 

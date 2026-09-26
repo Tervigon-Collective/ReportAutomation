@@ -373,6 +373,13 @@ def fetch_amazon_sp_order_pnl_gold(
                 order_currency_code                                        AS currency,
                 round(order_total_header,            2)                    AS order_total,
                 round(effective_gross_revenue,       2)                    AS gross,
+                round(
+                    coalesce(
+                        toFloat64(accounts_revenue_excl_gst),
+                        toFloat64(operational_revenue_excl_gst),
+                        toFloat64(effective_gross_revenue) / 1.18
+                    ), 2
+                )                                                          AS gross_ex_gst,
                 round(effective_refunds,             2)                    AS refunds,
                 round(effective_commission,          2)                    AS commission,
                 round(effective_closing,             2)                    AS closing,
@@ -1161,7 +1168,7 @@ def _apply_amazon_ads_formatting(writer, sheet_name: str, campaign_rollup: pd.Da
 # (purchase-date order P&L). Headline refunds use return delivery date via
 # ``fetch_amazon_returns_by_delivery_gold`` — a separate sheet/axis.
 _PNL_MONEY_COLS = (
-    "gross", "finance_refunds", "commission", "closing", "shipping",
+    "gross", "gross_ex_gst", "finance_refunds", "commission", "closing", "shipping",
     "tax_withheld", "net_payout", "cogs", "gross_profit",
 )
 
@@ -1254,31 +1261,67 @@ _SP_DISPLAY_COLS = [
     "order_status", "pnl_status", "payout_basis",
     "fulfillment_channel", "sku", "asin", "title",
     "quantity_ordered", "quantity_shipped",
-    "gross", "finance_refunds", "commission", "closing", "shipping",
-    "tax_withheld", "net_payout", "product_cost", "gross_profit",
+    "gross_ex_gst", "finance_refunds", "commission", "closing", "shipping",
+    "tax_withheld", "fee_gst", "net_payout", "product_cost", "gross_profit",
     "gross_margin_pct",
 ]
 
 
 def _apply_sp_gross_profit_rules(df: pd.DataFrame) -> pd.DataFrame:
-    """Recompute gross_profit as net_payout - product_cost/cogs for display."""
+    """Compute fee_gst, convert net_payout to ex-GST, recompute gross_profit.
+
+    fee_gst is the GST Amazon charges on its own fees (recoverable input tax credit
+    for the seller). It is deducted from the settlement cash but absent from every
+    effective_* fee column, causing the breakdown to not add up to net_payout when
+    using gross_incl (effective_gross_revenue).  We expose it as its own column and
+    show gross_ex_gst (accounts_revenue_excl_gst) so the waterfall balances:
+
+        gross_ex_gst + finance_refunds + commission + closing + shipping
+        + tax_withheld + fee_gst = net_payout (ex-GST)
+    """
     if df is None or df.empty:
         return df
     out = df.copy()
+
+    def _c(col: str) -> pd.Series:
+        if col in out.columns:
+            return pd.to_numeric(out[col], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=out.index)
+
+    # fee_gst = gap between effective_net_payout (gross-incl basis) and the
+    # sum of all visible fee breakdown columns.  For settled orders this equals
+    # recoverable_fee_gst (IGST on commission, shipping, etc.).
+    # For estimated orders effective fee columns already match net_payout, so gap ≈ 0.
+    np_col     = _c("net_payout")
+    gross_col  = _c("gross")
+    r_col      = _c("finance_refunds")
+    comm_col   = _c("commission")
+    clos_col   = _c("closing")
+    ship_col   = _c("shipping")
+    tax_col    = _c("tax_withheld")
+    out["fee_gst"] = (np_col - (gross_col + r_col + comm_col + clos_col + ship_col + tax_col)).round(2)
+
+    # Convert net_payout to ex-GST: subtract output_gst flowing through both
+    # sides.  output_gst = gross_incl – gross_ex_gst.
+    if "gross_ex_gst" in out.columns:
+        gex_col    = _c("gross_ex_gst")
+        output_gst = gross_col - gex_col
+        out["net_payout"] = (np_col - output_gst).round(2)
+
     cogs_col = "product_cost" if "product_cost" in out.columns else (
         "cogs" if "cogs" in out.columns else None
     )
-    if "net_payout" in out.columns and cogs_col:
-        np_col = pd.to_numeric(out["net_payout"], errors="coerce").fillna(0.0)
+    if cogs_col:
+        np_ex = pd.to_numeric(out["net_payout"], errors="coerce").fillna(0.0)
         co_col = pd.to_numeric(out[cogs_col], errors="coerce").fillna(0.0)
-        out["gross_profit"] = (np_col - co_col).round(4)
-        if "gross" in out.columns:
-            gross = pd.to_numeric(out["gross"], errors="coerce")
-            out["gross_margin_pct"] = (
-                (out["gross_profit"] / gross.replace(0, np.nan) * 100)
-                .round(2)
-                .fillna(0.0)
-            )
+        out["gross_profit"] = (np_ex - co_col).round(4)
+        base_col = "gross_ex_gst" if "gross_ex_gst" in out.columns else "gross"
+        gross_denom = pd.to_numeric(out[base_col], errors="coerce")
+        out["gross_margin_pct"] = (
+            (out["gross_profit"] / gross_denom.replace(0, np.nan) * 100)
+            .round(2)
+            .fillna(0.0)
+        )
     return out
 
 
@@ -1408,8 +1451,8 @@ AD_COLS = ["campaign_name", "ad_group_name", "ad_id",
 ORDER_COLS = [
     "amazon_order_id", "order_item_id", "order_status", "pnl_status",
     "payout_basis", "fulfillment_channel", "sku", "asin", "title",
-    "quantity_ordered", "quantity_shipped", "gross", "finance_refunds",
-    "commission", "closing", "shipping", "tax_withheld", "net_payout",
+    "quantity_ordered", "quantity_shipped", "gross_ex_gst", "finance_refunds",
+    "commission", "closing", "shipping", "tax_withheld", "fee_gst", "net_payout",
     "product_cost", "gross_profit", "gross_margin_pct",
 ]
 RETURN_COLS = ["return_delivery_date", "return_quantity",
@@ -1423,8 +1466,8 @@ GRAND_TOTAL_LABEL = "Grand Total"
 
 _SUM_COLS = [
     "impressions", "clicks", "spend", "ad_orders", "ad_sales",
-    "quantity_ordered", "quantity_shipped", "gross", "finance_refunds",
-    "commission", "closing", "shipping", "tax_withheld", "net_payout",
+    "quantity_ordered", "quantity_shipped", "gross_ex_gst", "finance_refunds",
+    "commission", "closing", "shipping", "tax_withheld", "fee_gst", "net_payout",
     "product_cost", "gross_profit", "return_quantity",
     "refunded_amount_incl_gst", "refunded_amount", "net_profit",
     "net_after_spend",
@@ -1493,8 +1536,9 @@ def _return_row(ret: dict, meta: dict) -> dict:
 
     row["quantity_ordered"] = -qty
     row["quantity_shipped"] = -qty
-    row["gross"] = 0.0
+    row["gross_ex_gst"] = 0.0
     row["shipping"] = round(-label_cost, 2)
+    row["fee_gst"] = 0.0
     row["net_payout"] = round(-label_cost, 2)
     row["product_cost"] = 0.0
     row["gross_profit"] = round(-label_cost, 2)

@@ -28,7 +28,8 @@ import pandas as pd
 
 # Columns recognised by name so callers rarely need to spell them out.
 MONEY_COLS = {
-    "spend", "sales", "ad_sales", "revenue", "gross", "net_payout", "commission",
+    "spend", "sales", "ad_sales", "revenue", "gross", "gross_ex_gst",
+    "net_payout", "fee_gst", "commission",
     "closing", "shipping", "tax_withheld", "product_cost", "cogs", "gross_profit",
     "profit", "net_profit", "net_after_spend", "finance_refunds",
     "refunded_amount", "refunded_amount_incl_gst", "order_amount", "label_cost",
